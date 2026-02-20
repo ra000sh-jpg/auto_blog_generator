@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
+import re
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time as time_obj, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -77,6 +80,8 @@ class SchedulerService:
     DRAFT_BUFFER_TARGET = 6
     DEFAULT_GENERATOR_POLL_SECONDS = 30
     DEFAULT_PUBLISHER_POLL_SECONDS = 20
+    DEFAULT_DAILY_TARGET = 3
+    DEFAULT_IDEA_VAULT_DAILY_QUOTA = 2
 
     def __init__(
         self,
@@ -195,6 +200,16 @@ class SchedulerService:
                 misfire_grace_time=3600,
             )
 
+        if self.job_store:
+            self._scheduler.add_job(
+                self._run_daily_quota_seed,
+                cron_trigger(hour=0, minute=5),
+                id="daily_quota_seed",
+                name="일간 큐 시드 생성",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+
         logger.info("Scheduler setup complete")
 
     async def start(self) -> None:
@@ -272,6 +287,7 @@ class SchedulerService:
     async def _run_startup_catchup(self) -> None:
         """시작 시점에 놓친 작업을 보정 실행한다."""
         logger.info("Running startup catch-up")
+        await self._run_daily_quota_seed()
         await self._run_draft_prefetch()
         await self._run_daily_target_check()
 
@@ -324,15 +340,20 @@ class SchedulerService:
         queue_stats = self.job_store.get_queue_stats()
         ready_count = int(queue_stats.get("ready_to_publish", 0))
         queued_count = int(queue_stats.get("queued", 0))
+        configured_target = self._get_configured_daily_target()
+        idea_pending_count = self._get_idea_vault_pending_count()
+        idea_daily_quota = self._get_configured_idea_vault_quota(configured_target)
 
         try:
             sent = await self.notifier.notify_daily_summary(
                 local_date=now_local.strftime("%Y-%m-%d"),
-                target=self.daily_posts_target,
+                target=configured_target,
                 completed=completed,
                 failed=failed,
                 ready_count=ready_count,
                 queued_count=queued_count,
+                idea_pending_count=idea_pending_count,
+                idea_daily_quota=idea_daily_quota,
             )
             if sent:
                 self._last_daily_summary_date = now_local.date()
@@ -342,16 +363,17 @@ class SchedulerService:
     async def _run_daily_target_check(self) -> None:
         """일일 목표 기반으로 준비된 초안을 1건씩 천천히 발행한다."""
         now_local = self._get_now_local()
-        self._ensure_daily_publish_slots(now_local.date())
+        configured_target = self._get_configured_daily_target()
+        self._ensure_daily_publish_slots(now_local.date(), configured_target)
 
         if not (self.ACTIVE_HOURS[0] <= now_local.hour < self.ACTIVE_HOURS[1]):
             logger.debug("Outside active hours: %s", now_local)
             return
 
         today_completed = self._get_today_post_count()
-        remaining = self.daily_posts_target - today_completed
+        remaining = configured_target - today_completed
         if remaining <= 0:
-            logger.debug("Daily target reached: %d/%d", today_completed, self.daily_posts_target)
+            logger.debug("Daily target reached: %d/%d", today_completed, configured_target)
             return
 
         if not self._is_publish_interval_ready(now_local, today_completed):
@@ -365,14 +387,14 @@ class SchedulerService:
             logger.info(
                 "No prepared draft to publish yet (%d/%d completed)",
                 today_completed,
-                self.daily_posts_target,
+                configured_target,
             )
             return
 
         logger.info(
             "Daily target check passed (%d/%d), publishing prepared draft",
             today_completed,
-            self.daily_posts_target,
+            configured_target,
         )
         try:
             published = await self._publish_next_available_job()
@@ -393,12 +415,14 @@ class SchedulerService:
             return
 
         ready_count = self._get_ready_draft_count()
-        needed = max(0, self.DRAFT_BUFFER_TARGET - ready_count)
+        configured_target = self._get_configured_daily_target()
+        target_buffer = max(self.DRAFT_BUFFER_TARGET, configured_target + 2)
+        needed = max(0, target_buffer - ready_count)
         if needed <= 0:
             logger.debug(
                 "Draft buffer is enough (%d ready, target=%d)",
                 ready_count,
-                self.DRAFT_BUFFER_TARGET,
+                target_buffer,
             )
             return
 
@@ -410,7 +434,7 @@ class SchedulerService:
             "Draft prefetch start (need=%d, ready=%d, target=%d)",
             needed,
             ready_count,
-            self.DRAFT_BUFFER_TARGET,
+            target_buffer,
         )
         prepared_count = 0
         for _ in range(needed):
@@ -494,12 +518,16 @@ class SchedulerService:
         )
         return cpu_allowed and memory_percent <= self.memory_threshold_percent
 
-    def _ensure_daily_publish_slots(self, target_date: date) -> None:
+    def _ensure_daily_publish_slots(self, target_date: date, daily_target: int) -> None:
         """당일 발행 슬롯을 준비한다."""
-        if self._publish_slot_date == target_date and self._daily_publish_slots:
+        if (
+            self._publish_slot_date == target_date
+            and self._daily_publish_slots
+            and len(self._daily_publish_slots) == max(1, daily_target)
+        ):
             return
 
-        self._daily_publish_slots = self._build_daily_publish_slots(target_date)
+        self._daily_publish_slots = self._build_daily_publish_slots(target_date, daily_target)
         self._publish_slot_date = target_date
         self._publish_wait_until_utc = None
         logger.info(
@@ -510,7 +538,7 @@ class SchedulerService:
             },
         )
 
-    def _build_daily_publish_slots(self, target_date: date) -> List[datetime]:
+    def _build_daily_publish_slots(self, target_date: date, daily_target: Optional[int] = None) -> List[datetime]:
         """출/점/퇴 중심 가중 분포로 하루 발행 슬롯을 만든다."""
         local_tz = self._get_now_local().tzinfo
         if local_tz is None:
@@ -518,8 +546,9 @@ class SchedulerService:
 
         rng = self._build_rng_for_date(target_date)
         candidates: List[datetime] = []
+        resolved_target = max(1, int(daily_target or self.daily_posts_target))
 
-        for index in range(self.daily_posts_target):
+        for index in range(resolved_target):
             if index < len(self.PUBLISH_ANCHOR_HOURS):
                 base_hour = self.PUBLISH_ANCHOR_HOURS[index]
             else:
@@ -568,6 +597,432 @@ class SchedulerService:
                 candidates[index] = previous + max_interval
 
         return candidates
+
+    async def _run_daily_quota_seed(self) -> None:
+        """매일 자정에 사용자 설정 비율대로 큐를 생성한다."""
+        if not self.job_store:
+            return
+
+        now_local = self._get_now_local()
+        today_local = now_local.date().isoformat()
+        last_seed_date = self.job_store.get_system_setting("scheduler_last_seed_date", "")
+        if last_seed_date == today_local:
+            return
+
+        daily_target, allocations = self._load_daily_quota_allocations()
+        if daily_target <= 0:
+            return
+
+        idea_vault_quota = self._get_configured_idea_vault_quota(daily_target)
+        non_vault_target = max(0, daily_target - idea_vault_quota)
+        non_vault_allocations = self._fit_allocations_to_target(allocations, non_vault_target)
+
+        created = 0
+        created_non_vault = 0
+        created_idea_vault = 0
+        seed_base_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        sequence = 0
+        for allocation in non_vault_allocations:
+            category_name = str(allocation.get("category", "")).strip()
+            topic_mode = str(allocation.get("topic_mode", "cafe")).strip()
+            count = max(0, int(allocation.get("count", 0)))
+            if not category_name or count <= 0:
+                continue
+
+            persona_id = self._persona_id_for_topic(topic_mode)
+            for _ in range(count):
+                scheduled_at = (seed_base_utc + timedelta(minutes=sequence)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                sequence += 1
+                title = self._build_seed_title(
+                    category=category_name,
+                    topic_mode=topic_mode,
+                    local_date=today_local,
+                    sequence=sequence,
+                )
+                seed_keywords = self._build_seed_keywords(category_name, topic_mode)
+                success = self.job_store.schedule_job(
+                    job_id=str(uuid.uuid4()),
+                    title=title,
+                    seed_keywords=seed_keywords,
+                    platform="naver",
+                    persona_id=persona_id,
+                    scheduled_at=scheduled_at,
+                    max_retries=3,
+                    category=category_name,
+                )
+                if success:
+                    created += 1
+                    created_non_vault += 1
+
+        if idea_vault_quota > 0:
+            claim_fn = getattr(self.job_store, "claim_random_idea_vault_items", None)
+            release_fn = getattr(self.job_store, "release_idea_vault_job_lock", None)
+            if claim_fn and callable(claim_fn):
+                idea_job_ids = [str(uuid.uuid4()) for _ in range(idea_vault_quota)]
+                claimed_items = claim_fn(idea_job_ids)
+                if len(claimed_items) < idea_vault_quota:
+                    logger.info(
+                        "Idea vault stock is short; strict holiday rule keeps unfilled quota",
+                        extra={
+                            "requested": idea_vault_quota,
+                            "claimed": len(claimed_items),
+                        },
+                    )
+                for claimed in claimed_items:
+                    idea_job_id = str(claimed.get("queued_job_id", "")).strip()
+                    raw_text = str(claimed.get("raw_text", "")).strip()
+                    category_name = str(claimed.get("mapped_category", "")).strip() or "다양한 생각"
+                    topic_mode = self._normalize_topic_mode(str(claimed.get("topic_mode", "")).strip())
+                    if not idea_job_id or not raw_text:
+                        continue
+                    sequence += 1
+                    scheduled_at = (
+                        seed_base_utc + timedelta(minutes=sequence)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    title = self._build_vault_seed_title(
+                        raw_text=raw_text,
+                        local_date=today_local,
+                        sequence=sequence,
+                    )
+                    seed_keywords = self._build_vault_seed_keywords(
+                        raw_text=raw_text,
+                        category=category_name,
+                        topic_mode=topic_mode,
+                    )
+                    persona_id = self._persona_id_for_topic(topic_mode)
+                    success = self.job_store.schedule_job(
+                        job_id=idea_job_id,
+                        title=title,
+                        seed_keywords=seed_keywords,
+                        platform="naver",
+                        persona_id=persona_id,
+                        scheduled_at=scheduled_at,
+                        max_retries=3,
+                        tags=["idea_vault"],
+                        category=category_name,
+                    )
+                    if success:
+                        created += 1
+                        created_idea_vault += 1
+                    elif release_fn and callable(release_fn):
+                        release_fn(idea_job_id)
+            else:
+                logger.debug("Idea vault claim function is not available")
+
+        self.job_store.set_system_setting("scheduler_last_seed_date", today_local)
+        self.job_store.set_system_setting("scheduler_last_seed_count", str(created))
+        self.job_store.set_system_setting("scheduler_last_seed_non_vault_count", str(created_non_vault))
+        self.job_store.set_system_setting("scheduler_last_seed_idea_vault_count", str(created_idea_vault))
+        logger.info(
+            "Daily quota seed completed",
+            extra={
+                "date": today_local,
+                "target": daily_target,
+                "created_count": created,
+                "allocation_count": len(non_vault_allocations),
+                "idea_vault_quota": idea_vault_quota,
+                "created_non_vault": created_non_vault,
+                "created_idea_vault": created_idea_vault,
+            },
+        )
+
+    def _get_configured_daily_target(self) -> int:
+        """DB 설정을 포함한 일간 목표 발행량을 반환한다."""
+        default_target = max(1, self.daily_posts_target or self.DEFAULT_DAILY_TARGET)
+        if not self.job_store:
+            return default_target
+        get_setting = getattr(self.job_store, "get_system_setting", None)
+        if not get_setting or not callable(get_setting):
+            return default_target
+        raw = str(get_setting("scheduler_daily_posts_target", "")).strip()
+        if not raw:
+            return default_target
+        try:
+            value = int(raw)
+        except ValueError:
+            return default_target
+        return max(1, min(20, value))
+
+    def _load_daily_quota_allocations(self) -> tuple[int, List[Dict[str, Any]]]:
+        """DB에서 카테고리 할당량 설정을 읽어 정규화한다."""
+        daily_target = self._get_configured_daily_target()
+        if not self.job_store:
+            return daily_target, []
+        get_setting = getattr(self.job_store, "get_system_setting", None)
+        if not get_setting or not callable(get_setting):
+            return daily_target, self._build_default_quota_allocations(daily_target)
+
+        raw_allocations = str(get_setting("scheduler_category_allocations", "")).strip()
+        allocations: List[Dict[str, Any]] = []
+        if raw_allocations:
+            try:
+                decoded = json.loads(raw_allocations)
+                if isinstance(decoded, list):
+                    for item in decoded:
+                        if not isinstance(item, dict):
+                            continue
+                        category_name = str(item.get("category", "")).strip()
+                        topic_mode = self._normalize_topic_mode(str(item.get("topic_mode", "")).strip())
+                        count = max(0, int(item.get("count", 0)))
+                        if not category_name:
+                            continue
+                        allocations.append(
+                            {
+                                "category": category_name,
+                                "topic_mode": topic_mode,
+                                "count": count,
+                            }
+                        )
+            except Exception:
+                allocations = []
+
+        if not allocations:
+            allocations = self._build_default_quota_allocations(daily_target)
+
+        total = sum(int(item.get("count", 0)) for item in allocations)
+        if total <= 0:
+            allocations = self._build_default_quota_allocations(daily_target)
+
+        return daily_target, allocations
+
+    def _fit_allocations_to_target(
+        self,
+        allocations: List[Dict[str, Any]],
+        target: int,
+    ) -> List[Dict[str, Any]]:
+        """할당 리스트를 목표치에 맞게 축소/확장한다."""
+        safe_target = max(0, int(target))
+        if safe_target <= 0:
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for item in allocations:
+            category_name = str(item.get("category", "")).strip()
+            if not category_name:
+                continue
+            normalized.append(
+                {
+                    "category": category_name,
+                    "topic_mode": self._normalize_topic_mode(str(item.get("topic_mode", "")).strip()),
+                    "count": max(0, int(item.get("count", 0))),
+                }
+            )
+        if not normalized:
+            normalized = self._build_default_quota_allocations(safe_target)
+
+        output = [
+            {
+                "category": item["category"],
+                "topic_mode": item["topic_mode"],
+                "count": 0,
+            }
+            for item in normalized
+        ]
+        remaining = [int(item["count"]) for item in normalized]
+
+        allocated = 0
+        index = 0
+        while allocated < safe_target and any(value > 0 for value in remaining):
+            if remaining[index] > 0:
+                output[index]["count"] = int(output[index]["count"]) + 1
+                remaining[index] -= 1
+                allocated += 1
+            index = (index + 1) % len(remaining)
+
+        while allocated < safe_target:
+            output[allocated % len(output)]["count"] = int(output[allocated % len(output)]["count"]) + 1
+            allocated += 1
+
+        return [item for item in output if int(item["count"]) > 0]
+
+    def _get_configured_idea_vault_quota(self, daily_target: int) -> int:
+        """일간 아이디어 창고 할당량을 반환한다."""
+        default_quota = min(
+            max(0, int(daily_target)),
+            self.DEFAULT_IDEA_VAULT_DAILY_QUOTA,
+        )
+        if not self.job_store:
+            return default_quota
+        get_setting = getattr(self.job_store, "get_system_setting", None)
+        if not get_setting or not callable(get_setting):
+            return default_quota
+        raw = str(get_setting("scheduler_idea_vault_daily_quota", "")).strip()
+        if not raw:
+            return default_quota
+        try:
+            value = int(raw)
+        except ValueError:
+            return default_quota
+        return max(0, min(max(0, int(daily_target)), value))
+
+    def _get_idea_vault_pending_count(self) -> int:
+        """아이디어 창고 pending 재고를 반환한다."""
+        if not self.job_store:
+            return 0
+        getter = getattr(self.job_store, "get_idea_vault_pending_count", None)
+        if not getter or not callable(getter):
+            return 0
+        try:
+            return max(0, int(getter()))
+        except Exception:
+            return 0
+
+    def _build_default_quota_allocations(self, daily_target: int) -> List[Dict[str, Any]]:
+        """설정이 없을 때 기본 할당량을 만든다."""
+        if not self.job_store:
+            return [
+                {
+                    "category": "다양한 생각",
+                    "topic_mode": "cafe",
+                    "count": max(1, daily_target),
+                }
+            ]
+
+        get_setting = getattr(self.job_store, "get_system_setting", None)
+        if not get_setting or not callable(get_setting):
+            return [
+                {
+                    "category": "다양한 생각",
+                    "topic_mode": "cafe",
+                    "count": max(1, daily_target),
+                }
+            ]
+
+        raw_categories = str(get_setting("custom_categories", "[]"))
+        categories: List[str] = []
+        try:
+            decoded = json.loads(raw_categories)
+            if isinstance(decoded, list):
+                for item in decoded:
+                    text = str(item).strip()
+                    if text and text not in categories:
+                        categories.append(text)
+        except Exception:
+            categories = []
+
+        if not categories:
+            categories = ["다양한 생각"]
+
+        allocations = [
+            {
+                "category": category_name,
+                "topic_mode": self._infer_topic_mode_from_category(category_name),
+                "count": 0,
+            }
+            for category_name in categories
+        ]
+        for index in range(max(1, daily_target)):
+            allocations[index % len(allocations)]["count"] = int(allocations[index % len(allocations)]["count"]) + 1
+        return allocations
+
+    def _normalize_topic_mode(self, raw_mode: str) -> str:
+        """토픽 모드를 허용 범위로 정규화한다."""
+        lowered = raw_mode.lower().strip()
+        if lowered == "economy":
+            return "finance"
+        if lowered in {"cafe", "it", "parenting", "finance"}:
+            return lowered
+        return "cafe"
+
+    def _infer_topic_mode_from_category(self, category_name: str) -> str:
+        """카테고리 문자열 기반 토픽 모드를 추정한다."""
+        lowered = str(category_name).lower()
+        if any(token in lowered for token in ("경제", "finance", "투자", "주식", "재테크")):
+            return "finance"
+        if any(token in lowered for token in ("it", "개발", "코드", "ai", "자동화", "테크")):
+            return "it"
+        if any(token in lowered for token in ("육아", "아이", "부모", "가정")):
+            return "parenting"
+        return "cafe"
+
+    def _persona_id_for_topic(self, topic_mode: str) -> str:
+        """토픽 모드별 기본 페르소나를 반환한다."""
+        mapping = {
+            "cafe": "P1",
+            "it": "P2",
+            "parenting": "P3",
+            "finance": "P4",
+        }
+        return mapping.get(self._normalize_topic_mode(topic_mode), "P1")
+
+    def _build_seed_title(
+        self,
+        *,
+        category: str,
+        topic_mode: str,
+        local_date: str,
+        sequence: int,
+    ) -> str:
+        """자정 큐 시드용 제목을 생성한다."""
+        label = {
+            "cafe": "라이프",
+            "it": "IT",
+            "parenting": "육아",
+            "finance": "경제",
+        }.get(self._normalize_topic_mode(topic_mode), "라이프")
+        return f"{local_date} {label} 브리핑 #{sequence} - {category}"
+
+    def _build_seed_keywords(self, category: str, topic_mode: str) -> List[str]:
+        """자정 큐 시드용 키워드를 생성한다."""
+        base_keywords = {
+            "cafe": ["일상", "노하우", "리뷰"],
+            "it": ["IT", "자동화", "생산성"],
+            "parenting": ["육아", "가정", "성장"],
+            "finance": ["경제", "재테크", "투자"],
+        }.get(self._normalize_topic_mode(topic_mode), ["일상", "정보"])
+
+        category_token = str(category).strip()
+        keywords = [category_token] if category_token else []
+        for token in base_keywords:
+            if token not in keywords:
+                keywords.append(token)
+        return keywords[:3]
+
+    def _build_vault_seed_title(
+        self,
+        *,
+        raw_text: str,
+        local_date: str,
+        sequence: int,
+    ) -> str:
+        """아이디어 창고 시드용 제목을 생성한다."""
+        normalized = re.sub(r"\s+", " ", str(raw_text).strip())
+        if not normalized:
+            normalized = "아이디어 메모"
+        if len(normalized) > 42:
+            normalized = f"{normalized[:42].rstrip()}..."
+        return f"{local_date} 아이디어 브리핑 #{sequence} - {normalized}"
+
+    def _build_vault_seed_keywords(
+        self,
+        *,
+        raw_text: str,
+        category: str,
+        topic_mode: str,
+    ) -> List[str]:
+        """아이디어 문장에서 시드 키워드를 생성한다."""
+        keywords: List[str] = []
+        category_name = str(category).strip()
+        if category_name:
+            keywords.append(category_name)
+
+        tokens = re.findall(r"[가-힣A-Za-z0-9]{2,20}", str(raw_text))
+        for token in tokens:
+            normalized = token.strip()
+            if not normalized or normalized in keywords:
+                continue
+            keywords.append(normalized)
+            if len(keywords) >= 3:
+                break
+
+        if len(keywords) < 2:
+            fallback = self._build_seed_keywords(category=category, topic_mode=topic_mode)
+            for token in fallback:
+                if token not in keywords:
+                    keywords.append(token)
+                if len(keywords) >= 3:
+                    break
+        return keywords[:3]
 
     def _build_rng_for_date(self, target_date: date) -> random.Random:
         """날짜 단위 고정 시드를 생성한다."""
@@ -636,6 +1091,7 @@ async def run_scheduler_forever(
     """스케줄러를 시작하고 종료 신호까지 대기한다."""
     from ..collectors.metrics_collector import MetricsCollector
     from ..config import load_config
+    from ..llm import get_generator, llm_generate_fn
     from ..logging_config import setup_logging
     from ..uploaders.playwright_publisher import PlaywrightPublisher
     from .job_store import JobStore
@@ -662,10 +1118,19 @@ async def run_scheduler_forever(
 
     notifier = TelegramNotifier.from_env()
     publisher = PlaywrightPublisher(blog_id=blog_id or "dry-run")
+    generate_fn = stub_generate_fn
+    try:
+        # 스케줄러는 LLM 생성기를 기본 사용하되, 초기화 실패 시 stub로 안전 폴백한다.
+        get_generator(config.llm)
+        generate_fn = llm_generate_fn
+        logger.info("Scheduler generation backend: llm")
+    except Exception as exc:
+        logger.warning("Scheduler LLM init failed, fallback to stub: %s", exc)
+
     pipeline_service = PipelineService(
         job_store=job_store,
         publisher=publisher,
-        generate_fn=stub_generate_fn,
+        generate_fn=generate_fn,
         notifier=notifier,
         internal_retry_attempts=1,
         queue_retry_limit=1,
