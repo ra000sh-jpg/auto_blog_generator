@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autoblog.worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Developer/CommandLineTools/usr/bin/python3</string>
+        <string>/Users/naseunghwan/Desktop/auto_blog_generator/scripts/run_scheduler.py</string>
+        <string>--daily-target</string>
+        <string>3</string>
+        <string>--min-interval</string>
+        <string>60</string>
+        <string>--max-interval</string>
+        <string>110</string>
+        <string>--cpu-start-threshold</string>
+        <string>28</string>
+        <string>--cpu-stop-threshold</string>
+        <string>35</string>
+        <string>--cpu-window-size</string>
+        <string>5</string>
+        <string>--generator-poll-sec</string>
+        <string>30</string>
+        <string>--publisher-poll-sec</string>
+        <string>20</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/naseunghwan/Desktop/auto_blog_generator</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/naseunghwan/Desktop/auto_blog_generator/logs/worker.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/naseunghwan/Desktop/auto_blog_generator/logs/worker.stderr.log</string>
+</dict>
+</plist>
