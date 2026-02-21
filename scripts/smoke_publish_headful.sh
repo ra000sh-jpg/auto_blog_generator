@@ -11,6 +11,7 @@ KEYWORDS="${SMOKE_KEYWORDS:-테스트,AI토글,스모크}"
 CATEGORY="${SMOKE_CATEGORY:-it}"
 PERSONA="${SMOKE_PERSONA:-P1}"
 VERIFY_MIN_EXPECTED="${SMOKE_VERIFY_MIN_EXPECTED:-1}"
+HEADFUL_MODE="${SMOKE_HEADFUL:-true}"
 
 SESSION_FILE="data/sessions/naver/state.json"
 if [[ ! -f "$SESSION_FILE" ]]; then
@@ -31,19 +32,26 @@ echo "  keywords   : $KEYWORDS"
 echo "  category   : $CATEGORY"
 echo "  persona    : $PERSONA"
 echo "  toggleMode : $NAVER_AI_TOGGLE_MODE"
+echo "  headful    : $HEADFUL_MODE"
 echo "======================================================="
 
-python3 scripts/publish_once.py \
-  --title "$TITLE" \
-  --keywords "$KEYWORDS" \
-  --category "$CATEGORY" \
-  --persona "$PERSONA" \
-  --use-llm \
-  --headful \
-  --ai-only-images \
-  --ai-toggle-mode "$NAVER_AI_TOGGLE_MODE" \
-  --verify-ai-toggle \
+PUBLISH_ARGS=(
+  --title "$TITLE"
+  --keywords "$KEYWORDS"
+  --category "$CATEGORY"
+  --persona "$PERSONA"
+  --use-llm
+  --ai-only-images
+  --ai-toggle-mode "$NAVER_AI_TOGGLE_MODE"
+  --verify-ai-toggle
   --verify-min-expected "$VERIFY_MIN_EXPECTED"
+)
+
+if [[ "${HEADFUL_MODE,,}" == "true" ]]; then
+  PUBLISH_ARGS+=(--headful)
+fi
+
+python3 scripts/publish_once.py "${PUBLISH_ARGS[@]}"
 
 python3 - <<'PY'
 import json
