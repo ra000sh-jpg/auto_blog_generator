@@ -9,6 +9,7 @@ GUI_DOMAIN="gui/$(id -u)"
 LOG_DIR="${WORKSPACE_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/smoke.stdout.log"
 STDERR_LOG="${LOG_DIR}/smoke.stderr.log"
+AI_TOGGLE_REPORT="${WORKSPACE_DIR}/data/ai_toggle/last_report.json"
 ERROR_PATTERN="ERROR|FAILED|Traceback|AUTH_EXPIRED|CAPTCHA_REQUIRED|NETWORK_TIMEOUT|PUBLISH_FAILED"
 
 echo "== AutoBlog Smoke Status =="
@@ -51,6 +52,35 @@ if [[ -f "${STDERR_LOG}" ]]; then
   echo
   echo "== stderr 최근 30줄 =="
   tail -n 30 "${STDERR_LOG}"
+fi
+
+echo
+echo "== 최근 AI 토글 요약 =="
+if [[ -f "${AI_TOGGLE_REPORT}" ]]; then
+  REPORT_MODE="$(grep -E '^  "mode": ' "${AI_TOGGLE_REPORT}" | tail -n 1 | cut -d'"' -f4 || true)"
+  REPORT_URL="$(grep -E '^  "post_url": ' "${AI_TOGGLE_REPORT}" | tail -n 1 | cut -d'"' -f4 || true)"
+  REPORT_EXPECTED_ON="$(grep -E '^  "expected_on": [0-9]+' "${AI_TOGGLE_REPORT}" | tail -n 1 | sed -E 's/[^0-9]//g' || true)"
+  REPORT_POST_PASSED="$(grep -E '^  "post_verify_passed": [0-9]+' "${AI_TOGGLE_REPORT}" | tail -n 1 | sed -E 's/[^0-9]//g' || true)"
+  REPORT_CREATED_AT="$(grep -E '^  "created_at": [0-9]+' "${AI_TOGGLE_REPORT}" | tail -n 1 | sed -E 's/[^0-9]//g' || true)"
+
+  echo "mode: ${REPORT_MODE:-unknown}"
+  echo "expected_on: ${REPORT_EXPECTED_ON:-unknown}"
+  echo "post_verify_ok: ${REPORT_POST_PASSED:-unknown}"
+  if [[ -n "${REPORT_EXPECTED_ON}" ]] && [[ -n "${REPORT_POST_PASSED}" ]] && [[ "${REPORT_EXPECTED_ON}" = "${REPORT_POST_PASSED}" ]]; then
+    echo "ai_toggle_result: PASS"
+  elif [[ -n "${REPORT_EXPECTED_ON}" ]] && [[ -n "${REPORT_POST_PASSED}" ]]; then
+    echo "ai_toggle_result: FAIL"
+  else
+    echo "ai_toggle_result: UNKNOWN"
+  fi
+  if [[ -n "${REPORT_URL}" ]]; then
+    echo "last_post_url: ${REPORT_URL}"
+  fi
+  if [[ -n "${REPORT_CREATED_AT}" ]]; then
+    echo "report_created_at_unix: ${REPORT_CREATED_AT}"
+  fi
+else
+  echo "AI 토글 리포트 파일 없음: ${AI_TOGGLE_REPORT}"
 fi
 
 echo

@@ -47,7 +47,8 @@ PUBLISH_ARGS=(
   --verify-min-expected "$VERIFY_MIN_EXPECTED"
 )
 
-if [[ "${HEADFUL_MODE,,}" == "true" ]]; then
+HEADFUL_MODE_LOWER="$(printf '%s' "${HEADFUL_MODE}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${HEADFUL_MODE_LOWER}" == "true" ]]; then
   PUBLISH_ARGS+=(--headful)
 fi
 
