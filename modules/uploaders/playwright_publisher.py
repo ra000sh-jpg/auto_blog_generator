@@ -136,11 +136,11 @@ class PlaywrightPublisher:
             "NAVER_AI_REPORT_RETENTION_MAX",
             default=30,
         )
-        raw_width = str(os.getenv("IMAGE_UPLOAD_WIDTH", "500")).strip()
+        raw_width = str(os.getenv("IMAGE_UPLOAD_WIDTH", "800")).strip()
         try:
             self._image_upload_target_width = max(320, min(1200, int(raw_width)))
         except Exception:
-            self._image_upload_target_width = 500
+            self._image_upload_target_width = 800
 
         # 리소스 (명시적 정리)
         self._playwright = None
@@ -2148,9 +2148,10 @@ class PlaywrightPublisher:
 
         try:
             # 토글 시도 전에 가로채기 팝업을 강하게 정리한다.
+            # 0.6s 대기: React synthetic event 처리 완료 시간 확보
             for round_index in range(3):
                 await self._dismiss_blocking_layer_popup(page, max_rounds=4, preserve_reserved_publish=False)
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(0.6)
                 popup_state = await self._collect_popup_debug_state(page)
                 if popup_state.get("count", 0) == 0:
                     break
@@ -2926,6 +2927,8 @@ class PlaywrightPublisher:
             pass
 
         # 최후 폴백: 선택 이미지 우하단 토글 핫스팟 좌표 클릭
+        # 0.5s 대기: 에디터 DOM 렌더링이 완료된 후 좌표 계산을 정확히 하기 위해
+        await asyncio.sleep(0.5)
         for _ in range(2):
             try:
                 if await self._click_selected_image_ai_hotspot(page):
