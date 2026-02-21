@@ -7,8 +7,14 @@ from fastapi.testclient import TestClient
 
 from modules.automation.job_store import JobStore
 from modules.llm.idea_vault_parser import IdeaVaultParseResult, IdeaVaultParsedItem
+from modules.llm.llm_router import LLMRouter
 from modules.llm.magic_input_parser import MagicInputParseResult
-from server.dependencies import get_idea_vault_parser, get_job_store, get_magic_input_parser
+from server.dependencies import (
+    get_idea_vault_parser,
+    get_job_store,
+    get_llm_router,
+    get_magic_input_parser,
+)
 from server.main import app
 
 
@@ -19,6 +25,7 @@ def client(tmp_path) -> Generator[TestClient, None, None]:
     store = JobStore(db_path=str(db_path))
 
     app.dependency_overrides[get_job_store] = lambda: store
+    app.dependency_overrides[get_llm_router] = lambda: LLMRouter(job_store=store)
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -122,6 +129,42 @@ def test_metrics_returns_recent_rows(client: TestClient):
     assert payload["total"] == 1
     assert payload["summary"]["total_views"] == 123
     assert payload["items"][0]["job_id"] == job_id
+
+
+def test_llm_metrics_includes_token_averages(client: TestClient):
+    """LLM 메트릭 엔드포인트는 평균 입력/출력 토큰을 함께 반환해야 한다."""
+    create_response = client.post(
+        "/api/jobs",
+        json={
+            "title": "LLM 메트릭 테스트",
+            "seed_keywords": ["토큰", "메트릭"],
+            "platform": "naver",
+            "persona_id": "P1",
+        },
+    )
+    job_id = create_response.json()["job_id"]
+
+    store = app.dependency_overrides[get_job_store]()
+    store.record_job_metric(
+        job_id=job_id,
+        metric_type="quality_step",
+        status="ok",
+        duration_ms=250.0,
+        input_tokens=1200,
+        output_tokens=800,
+        provider="qwen",
+        detail={"model": "qwen-plus", "calls": 2},
+    )
+
+    response = client.get("/api/metrics/llm?hours=24")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_llm_calls"] >= 1
+
+    target = next((item for item in payload["by_type"] if item["metric_type"] == "quality_step"), None)
+    assert target is not None
+    assert target["avg_input_tokens"] >= 1200
+    assert target["avg_output_tokens"] >= 800
 
 
 def test_config_readonly_masked_keys(
@@ -288,7 +331,7 @@ def test_magic_input_parsing_and_job_creation(client: TestClient):
     created_payload = create_response.json()
     assert created_payload["job_id"] != ""
     assert created_payload["status"] == "queued"
-    assert created_payload["parser_used"] in {"heuristic", "qwen", "deepseek", "gemini"}
+    assert created_payload["parser_used"] in {"heuristic", "qwen", "deepseek", "gemini", "groq", "cerebras"}
 
     list_response = client.get("/api/jobs?page=1&size=20")
     assert list_response.status_code == 200
@@ -379,3 +422,54 @@ def test_idea_vault_ingest_and_stats(client: TestClient):
     stats_payload = stats_response.json()
     assert stats_payload["total"] == 2
     assert stats_payload["pending"] == 2
+
+
+def test_router_settings_quote_and_save(client: TestClient):
+    """제로-설정 라우터 견적/저장 API가 동작해야 한다."""
+    initial = client.get("/api/router-settings")
+    assert initial.status_code == 200
+    initial_payload = initial.json()
+    assert "matrix" in initial_payload
+    assert len(initial_payload["matrix"]["text_models"]) >= 1
+
+    quote = client.post(
+        "/api/router-settings/quote",
+        json={
+            "strategy_mode": "cost",
+            "text_api_keys": {"deepseek": "ds-test-key"},
+            "image_api_keys": {"pexels": "pex-test-key"},
+            "image_engine": "pexels",
+            "image_enabled": True,
+            "images_per_post": 1,
+        },
+    )
+    assert quote.status_code == 200
+    quote_payload = quote.json()
+    assert quote_payload["estimate"]["total_cost_krw"] >= 0
+    assert quote_payload["estimate"]["quality_score"] >= 0
+    assert quote_payload["strategy_mode"] == "cost"
+
+    saved = client.post(
+        "/api/router-settings/save",
+        json={
+            "strategy_mode": "quality",
+            "text_api_keys": {"gemini": "gm-test-key"},
+            "image_api_keys": {"fal": "fal-test-key"},
+            "image_engine": "fal_flux",
+            "image_enabled": True,
+            "images_per_post": 2,
+        },
+    )
+    assert saved.status_code == 200
+    saved_payload = saved.json()
+    assert saved_payload["settings"]["strategy_mode"] == "quality"
+    assert saved_payload["settings"]["image_engine"] == "fal_flux"
+
+
+def test_naver_connect_status_endpoint(client: TestClient):
+    """네이버 연동 상태 조회 API가 기본 필드를 반환해야 한다."""
+    response = client.get("/api/naver/connect/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "connected" in payload
+    assert "state_path" in payload

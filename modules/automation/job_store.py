@@ -125,6 +125,10 @@ class JobStore:
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
 
+    IDEA_STATUS_PENDING = "pending"
+    IDEA_STATUS_QUEUED = "queued"
+    IDEA_STATUS_CONSUMED = "consumed"
+
     # 재시도 불가 에러 코드
     NON_RETRYABLE_ERRORS = frozenset({
         "AUTH_EXPIRED",
@@ -265,6 +269,9 @@ class JobStore:
                     status TEXT NOT NULL,
                     error_code TEXT DEFAULT '',
                     duration_ms REAL DEFAULT 0.0,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0,
+                    provider TEXT DEFAULT '',
                     detail_json TEXT DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id)
@@ -283,7 +290,58 @@ class JobStore:
                     performance_history TEXT DEFAULT '[]',
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS idea_vault (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_text TEXT NOT NULL,
+                    mapped_category TEXT NOT NULL DEFAULT '',
+                    topic_mode TEXT NOT NULL DEFAULT 'cafe',
+                    parser_used TEXT NOT NULL DEFAULT 'heuristic',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    queued_job_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    consumed_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_idea_vault_status
+                ON idea_vault(status, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_idea_vault_queued_job
+                ON idea_vault(queued_job_id);
             """)
+
+            existing_metric_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(job_metrics)").fetchall()
+            }
+            if "input_tokens" not in existing_metric_columns:
+                conn.execute("ALTER TABLE job_metrics ADD COLUMN input_tokens INTEGER DEFAULT 0")
+            if "output_tokens" not in existing_metric_columns:
+                conn.execute("ALTER TABLE job_metrics ADD COLUMN output_tokens INTEGER DEFAULT 0")
+            if "provider" not in existing_metric_columns:
+                conn.execute("ALTER TABLE job_metrics ADD COLUMN provider TEXT DEFAULT ''")
+
+            existing_idea_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(idea_vault)").fetchall()
+            }
+            if "topic_mode" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN topic_mode TEXT NOT NULL DEFAULT 'cafe'")
+            if "parser_used" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN parser_used TEXT NOT NULL DEFAULT 'heuristic'")
+            if "status" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+            if "queued_job_id" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN queued_job_id TEXT NOT NULL DEFAULT ''")
+            if "updated_at" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+            if "consumed_at" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN consumed_at TEXT NOT NULL DEFAULT ''")
 
     def _generate_idempotency_key(self, title: str, scheduled_at: str, persona_id: str) -> str:
         """중복 방지용 idempotency key 생성"""
@@ -977,6 +1035,9 @@ class JobStore:
         status: str,
         duration_ms: float = 0.0,
         error_code: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        provider: str = "",
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
         """작업 단위 메트릭을 기록한다."""
@@ -989,9 +1050,12 @@ class JobStore:
                     status,
                     error_code,
                     duration_ms,
+                    input_tokens,
+                    output_tokens,
+                    provider,
                     detail_json,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -999,7 +1063,365 @@ class JobStore:
                     status,
                     error_code,
                     float(duration_ms),
+                    max(0, int(input_tokens or 0)),
+                    max(0, int(output_tokens or 0)),
+                    str(provider or "").strip(),
                     json.dumps(detail or {}),
                     now_utc(),
                 ),
             )
+
+    def upsert_persona_profile(
+        self,
+        persona_id: str,
+        persona_payload: Dict[str, Any],
+        profile_payload: Dict[str, Any],
+        performance_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """페르소나 프로필을 저장/갱신한다."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO persona_profiles (
+                    persona_id,
+                    persona_json,
+                    profile_json,
+                    performance_history,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(persona_id) DO UPDATE SET
+                    persona_json = excluded.persona_json,
+                    profile_json = excluded.profile_json,
+                    performance_history = excluded.performance_history,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    persona_id,
+                    json.dumps(persona_payload),
+                    json.dumps(profile_payload),
+                    json.dumps(performance_history or []),
+                    now_utc(),
+                ),
+            )
+
+    def get_persona_profile(self, persona_id: str) -> Optional[Dict[str, Any]]:
+        """페르소나 프로필 1건을 조회한다."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT persona_id, persona_json, profile_json, performance_history, updated_at
+                FROM persona_profiles
+                WHERE persona_id = ?
+                """,
+                (persona_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "persona_id": row["persona_id"],
+                "persona": json.loads(row["persona_json"] or "{}"),
+                "voice_profile": json.loads(row["profile_json"] or "{}"),
+                "performance_history": json.loads(row["performance_history"] or "[]"),
+                "updated_at": row["updated_at"],
+            }
+
+    def list_persona_profiles(self) -> List[Dict[str, Any]]:
+        """저장된 페르소나 프로필 목록을 최신순으로 반환한다."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT persona_id, persona_json, profile_json, performance_history, updated_at
+                FROM persona_profiles
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            results.append(
+                {
+                    "persona_id": row["persona_id"],
+                    "persona": json.loads(row["persona_json"] or "{}"),
+                    "voice_profile": json.loads(row["profile_json"] or "{}"),
+                    "performance_history": json.loads(row["performance_history"] or "[]"),
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return results
+
+    def set_system_setting(self, setting_key: str, setting_value: Any) -> None:
+        """시스템 설정값을 저장/갱신한다."""
+        normalized_key = str(setting_key).strip()
+        if not normalized_key:
+            raise ValueError("setting_key must not be empty")
+
+        value_text = setting_value
+        if not isinstance(setting_value, str):
+            value_text = json.dumps(setting_value, ensure_ascii=False)
+
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO system_settings(setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value,
+                    updated_at = excluded.updated_at
+                """,
+                (normalized_key, str(value_text), now_utc()),
+            )
+
+    def get_system_setting(self, setting_key: str, default: str = "") -> str:
+        """시스템 설정값 1건을 문자열로 조회한다."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT setting_value FROM system_settings WHERE setting_key = ?",
+                (setting_key,),
+            ).fetchone()
+            if not row:
+                return default
+            return str(row["setting_value"])
+
+    def get_system_settings(self, setting_keys: Optional[List[str]] = None) -> Dict[str, str]:
+        """시스템 설정값 목록을 조회한다."""
+        with self.connection() as conn:
+            if setting_keys:
+                placeholders = ",".join(["?"] * len(setting_keys))
+                rows = conn.execute(
+                    f"SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ({placeholders})",
+                    tuple(setting_keys),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT setting_key, setting_value FROM system_settings"
+                ).fetchall()
+        return {str(row["setting_key"]): str(row["setting_value"]) for row in rows}
+
+    def add_idea_vault_items(self, items: List[Dict[str, Any]]) -> int:
+        """아이디어 창고 아이템을 대량 저장한다."""
+        if not items:
+            return 0
+
+        now = now_utc()
+        inserted = 0
+        with self.connection() as conn:
+            for item in items:
+                raw_text = str(item.get("raw_text", "")).strip()
+                if not raw_text:
+                    continue
+                mapped_category = str(item.get("mapped_category", "")).strip() or "다양한 생각"
+                topic_mode = str(item.get("topic_mode", "cafe")).strip().lower() or "cafe"
+                parser_used = str(item.get("parser_used", "heuristic")).strip() or "heuristic"
+                conn.execute(
+                    """
+                    INSERT INTO idea_vault (
+                        raw_text,
+                        mapped_category,
+                        topic_mode,
+                        parser_used,
+                        status,
+                        queued_job_id,
+                        created_at,
+                        updated_at,
+                        consumed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        raw_text,
+                        mapped_category,
+                        topic_mode,
+                        parser_used,
+                        self.IDEA_STATUS_PENDING,
+                        "",
+                        now,
+                        now,
+                        "",
+                    ),
+                )
+                inserted += 1
+        return inserted
+
+    def get_idea_vault_pending_count(self) -> int:
+        """아이디어 창고 pending 재고 수량을 반환한다."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM idea_vault WHERE status = ?",
+                (self.IDEA_STATUS_PENDING,),
+            ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def get_idea_vault_stats(self) -> Dict[str, int]:
+        """아이디어 창고 상태별 수량을 반환한다."""
+        stats: Dict[str, int] = {
+            "total": 0,
+            self.IDEA_STATUS_PENDING: 0,
+            self.IDEA_STATUS_QUEUED: 0,
+            self.IDEA_STATUS_CONSUMED: 0,
+        }
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM idea_vault
+                GROUP BY status
+                """
+            ).fetchall()
+        for row in rows:
+            status_name = str(row["status"])
+            count = int(row["count"])
+            stats["total"] += count
+            stats[status_name] = count
+        return stats
+
+    def count_idea_vault_items(self, status_filter: Optional[str] = None) -> int:
+        """아이디어 창고 레코드 총 건수를 반환한다."""
+        with self.connection() as conn:
+            if status_filter:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM idea_vault WHERE status = ?",
+                    (status_filter,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM idea_vault",
+                ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def list_idea_vault_items(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        status_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """아이디어 창고 목록을 최신순으로 조회한다."""
+        safe_limit = max(1, min(500, int(limit)))
+        safe_offset = max(0, int(offset))
+        with self.connection() as conn:
+            if status_filter:
+                rows = conn.execute(
+                    """
+                    SELECT id, raw_text, mapped_category, topic_mode, status, queued_job_id, created_at, updated_at, consumed_at
+                    FROM idea_vault
+                    WHERE status = ?
+                    ORDER BY id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (status_filter, safe_limit, safe_offset),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, raw_text, mapped_category, topic_mode, status, queued_job_id, created_at, updated_at, consumed_at
+                    FROM idea_vault
+                    ORDER BY id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (safe_limit, safe_offset),
+                ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "raw_text": str(row["raw_text"]),
+                "mapped_category": str(row["mapped_category"] or ""),
+                "topic_mode": str(row["topic_mode"] or "cafe"),
+                "status": str(row["status"] or ""),
+                "queued_job_id": str(row["queued_job_id"] or ""),
+                "created_at": str(row["created_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+                "consumed_at": str(row["consumed_at"] or ""),
+            }
+            for row in rows
+        ]
+
+    def claim_random_idea_vault_items(self, job_ids: List[str]) -> List[Dict[str, Any]]:
+        """pending 아이디어를 랜덤으로 선점해 queued로 전환한다."""
+        normalized_job_ids = [str(job_id).strip() for job_id in job_ids if str(job_id).strip()]
+        if not normalized_job_ids:
+            return []
+
+        now = now_utc()
+        claimed_items: List[Dict[str, Any]] = []
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, raw_text, mapped_category, topic_mode
+                FROM idea_vault
+                WHERE status = ?
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (self.IDEA_STATUS_PENDING, len(normalized_job_ids)),
+            ).fetchall()
+            for index, row in enumerate(rows):
+                job_id = normalized_job_ids[index]
+                updated = conn.execute(
+                    """
+                    UPDATE idea_vault
+                    SET status = ?, queued_job_id = ?, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        self.IDEA_STATUS_QUEUED,
+                        job_id,
+                        now,
+                        int(row["id"]),
+                        self.IDEA_STATUS_PENDING,
+                    ),
+                )
+                if updated.rowcount <= 0:
+                    continue
+                claimed_items.append(
+                    {
+                        "id": int(row["id"]),
+                        "raw_text": str(row["raw_text"] or ""),
+                        "mapped_category": str(row["mapped_category"] or ""),
+                        "topic_mode": str(row["topic_mode"] or "cafe"),
+                        "queued_job_id": job_id,
+                    }
+                )
+        return claimed_items
+
+    def release_idea_vault_job_lock(self, job_id: str) -> int:
+        """선점 후 작업 생성 실패 시 아이디어 잠금을 해제한다."""
+        normalized = str(job_id).strip()
+        if not normalized:
+            return 0
+        now = now_utc()
+        with self.connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE idea_vault
+                SET status = ?, queued_job_id = '', updated_at = ?
+                WHERE queued_job_id = ? AND status = ?
+                """,
+                (
+                    self.IDEA_STATUS_PENDING,
+                    now,
+                    normalized,
+                    self.IDEA_STATUS_QUEUED,
+                ),
+            )
+            return max(0, int(updated.rowcount))
+
+    def mark_idea_vault_consumed_by_job(self, job_id: str) -> int:
+        """발행 완료된 작업과 연결된 아이디어를 consumed 처리한다."""
+        normalized = str(job_id).strip()
+        if not normalized:
+            return 0
+        now = now_utc()
+        with self.connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE idea_vault
+                SET status = ?, consumed_at = ?, updated_at = ?
+                WHERE queued_job_id = ? AND status = ?
+                """,
+                (
+                    self.IDEA_STATUS_CONSUMED,
+                    now,
+                    now,
+                    normalized,
+                    self.IDEA_STATUS_QUEUED,
+                ),
+            )
+            return max(0, int(updated.rowcount))

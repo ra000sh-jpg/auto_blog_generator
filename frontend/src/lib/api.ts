@@ -530,3 +530,24 @@ export async function startNaverConnect(
 export async function fetchAIToggleReport(): Promise<AIToggleReportResponse> {
   return requestJSON<AIToggleReportResponse>("/ai-toggle/report");
 }
+
+export type LLMProviderStat = {
+  metric_type: string;
+  total_calls: number;
+  success_calls: number;
+  error_calls: number;
+  error_rate: number;
+  avg_duration_ms: number;
+  avg_input_tokens: number;
+  avg_output_tokens: number;
+};
+
+export type LLMMetricsResponse = {
+  window_hours: number;
+  total_llm_calls: number;
+  by_type: LLMProviderStat[];
+};
+
+export async function fetchLLMMetrics(hours = 24): Promise<LLMMetricsResponse> {
+  return requestJSON<LLMMetricsResponse>(`/metrics/llm?hours=${hours}`);
+}

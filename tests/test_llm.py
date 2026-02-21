@@ -9,6 +9,7 @@ from modules.automation.pipeline_service import PipelineService
 from modules.llm import llm_generate_fn, reset_generator
 from modules.llm.claude_client import ClaudeClient, LLMResponse
 from modules.llm.content_generator import ContentGenerator, ContentResult
+from modules.llm.token_budget_calibrator import calibrate_token_budget
 from modules.llm.prompts import QUALITY_CHECK, SEO_OPTIMIZATION, USER_CONTENT_REQUEST
 from modules.uploaders.playwright_publisher import PublishResult
 
@@ -89,11 +90,12 @@ class DummyPublisher:
         content: str,
         thumbnail: Optional[str] = None,
         images: Optional[List[str]] = None,
+        image_sources: Optional[Dict[str, Dict[str, str]]] = None,
         image_points: Optional[List] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
     ) -> PublishResult:
-        del title, content, thumbnail, images, image_points, tags, category
+        del title, content, thumbnail, images, image_sources, image_points, tags, category
         return PublishResult(success=True, url="https://blog.naver.com/test/llm")
 
 
@@ -111,6 +113,7 @@ def test_content_generator_returns_valid_structure():
         "# 자동화 블로그 작성 가이드\n\n## 시작하기\n\n초안 본문",
         "# 자동화 블로그 작성 가이드\n\n## SEO 시작하기\n\n최적화 본문",
         '{"score": 88, "issues": [], "summary": "양호"}',
+        "# 자동화 블로그 작성 가이드\n\n## SEO 시작하기\n\n리라이트 본문",
         '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',  # 이미지 프롬프트 생성
     ]
     generator = ContentGenerator(client=FakeClaudeClient(outputs))
@@ -120,9 +123,13 @@ def test_content_generator_returns_valid_structure():
     assert result.quality_gate == "pass"
     assert result.quality_snapshot["score"] == 88
     assert "keywords" in result.seo_snapshot
-    assert result.llm_calls_used == 4  # draft + SEO + quality + image prompts
+    assert result.llm_calls_used == 5  # draft + SEO + quality + voice rewrite + image prompts
     assert result.provider_used in {"qwen", "deepseek", "claude"}
     assert len(result.image_prompts) >= 1
+    assert result.voice_rewrite_applied is True
+    assert result.llm_token_usage["quality_step"]["calls"] >= 4
+    assert result.llm_token_usage["voice_step"]["calls"] >= 1
+    assert result.llm_token_usage["quality_step"]["input_tokens"] > 0
 
 
 def test_llm_generate_fn_compatible_with_pipeline(monkeypatch: pytest.MonkeyPatch):
@@ -140,6 +147,7 @@ def test_llm_generate_fn_compatible_with_pipeline(monkeypatch: pytest.MonkeyPatc
         "seo_snapshot",
         "image_prompts",
         "llm_calls_used",
+        "llm_token_usage",
     }
     assert required_keys.issubset(result.keys())
     assert result["quality_gate"] == "pass"
@@ -189,3 +197,34 @@ def test_full_pipeline_with_mocked_llm(tmp_path: Path, monkeypatch: pytest.Monke
     assert final_job.status == store.STATUS_COMPLETED
     assert final_job.result_url == "https://blog.naver.com/test/llm"
     assert final_job.llm_call_count == 2
+
+
+def test_token_budget_calibrator_recommends_from_observed_metrics(tmp_path: Path):
+    """충분한 샘플이 쌓이면 보정 권장치가 기본값 이상으로 계산되어야 한다."""
+    store = JobStore(str(tmp_path / "calibrator.db"), config=JobConfig(max_llm_calls_per_job=20))
+    scheduled_at = "2026-02-19T01:00:00Z"
+    assert store.schedule_job(
+        job_id="calib-job-1",
+        title="보정 테스트",
+        seed_keywords=["토큰"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=scheduled_at,
+    )
+
+    # 품질 단계 샘플 3건 적재
+    for idx in range(3):
+        store.record_job_metric(
+            job_id="calib-job-1",
+            metric_type="quality_step",
+            status="ok",
+            input_tokens=4000 + (idx * 50),
+            output_tokens=2800 + (idx * 40),
+            provider="qwen",
+            detail={"model": "qwen-plus"},
+        )
+
+    result = calibrate_token_budget(store, min_samples=3, safety_margin=1.1)
+    assert result.observed_samples["quality_step"] == 3
+    assert result.recommended["quality_step"]["input"] >= 4000
+    assert result.recommended["quality_step"]["output"] >= 2800

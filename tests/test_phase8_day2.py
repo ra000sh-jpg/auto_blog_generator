@@ -43,11 +43,12 @@ class AlwaysNetworkTimeoutPublisher:
         content: str,
         thumbnail: Optional[str] = None,
         images: Optional[List[str]] = None,
+        image_sources: Optional[Dict[str, Dict[str, str]]] = None,
         image_points: Optional[List[Any]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
     ) -> PublishResult:
-        del title, content, thumbnail, images, image_points, tags, category
+        del title, content, thumbnail, images, image_sources, image_points, tags, category
         self.calls += 1
         return PublishResult(
             success=False,
@@ -65,11 +66,12 @@ class CaptchaPublisher:
         content: str,
         thumbnail: Optional[str] = None,
         images: Optional[List[str]] = None,
+        image_sources: Optional[Dict[str, Dict[str, str]]] = None,
         image_points: Optional[List[Any]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
     ) -> PublishResult:
-        del title, content, thumbnail, images, image_points, tags, category
+        del title, content, thumbnail, images, image_sources, image_points, tags, category
         return PublishResult(
             success=False,
             error_code="CAPTCHA_REQUIRED",
@@ -103,8 +105,11 @@ class DummyNotifier:
         failed: int,
         ready_count: int,
         queued_count: int,
+        idea_pending_count: int = -1,
+        idea_daily_quota: int = 0,
     ) -> bool:
         del local_date, target, completed, failed, ready_count, queued_count
+        del idea_pending_count, idea_daily_quota
         self.daily_calls += 1
         return True
 
@@ -142,16 +147,30 @@ def test_job_metrics_table_and_insert(tmp_path: Path):
         status="failed",
         duration_ms=12.5,
         error_code="QUALITY_FAILED",
+        input_tokens=11,
+        output_tokens=22,
+        provider="qwen",
         detail={"reason": "too_short"},
     )
 
     with store.connection() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS total FROM job_metrics WHERE job_id = ?",
+            """
+            SELECT
+                COUNT(*) AS total,
+                MAX(input_tokens) AS max_input_tokens,
+                MAX(output_tokens) AS max_output_tokens,
+                MAX(provider) AS provider
+            FROM job_metrics
+            WHERE job_id = ?
+            """,
             (job.job_id,),
         ).fetchone()
     assert row is not None
     assert int(row["total"]) == 1
+    assert int(row["max_input_tokens"]) == 11
+    assert int(row["max_output_tokens"]) == 22
+    assert str(row["provider"]) == "qwen"
 
 
 def test_fail_job_force_final_skips_retry_wait(tmp_path: Path):

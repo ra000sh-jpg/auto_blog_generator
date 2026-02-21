@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import uuid
 from dataclasses import asdict
 from time import perf_counter
@@ -46,6 +47,7 @@ class PublisherLike(Protocol):
         content: str,
         thumbnail: Optional[str] = None,
         images: Optional[list[str]] = None,
+        image_sources: Optional[dict[str, dict[str, str]]] = None,
         image_points: Optional[list[ImageInsertionPoint]] = None,
         tags: Optional[list[str]] = None,
         category: Optional[str] = None,
@@ -186,6 +188,10 @@ class PipelineService:
                 "duration_ms": round((perf_counter() - generation_start) * 1000, 2),
             },
         )
+        self._record_llm_usage_metrics(
+            job_id=job_id,
+            token_usage=content_result.get("llm_token_usage", {}),
+        )
 
         quality_outcome = content_result.get("quality_gate", "pass")
         if quality_outcome in {"retry_mask", "retry_all"}:
@@ -253,6 +259,7 @@ class PipelineService:
         # 이미지 생성은 실패해도 본문 발행을 계속 진행한다.
         thumbnail_path: Optional[str] = None
         content_image_paths: list[str] = []
+        image_sources: dict[str, dict[str, str]] = {}
         if self.image_generator:
             image_start = perf_counter()
             try:
@@ -263,6 +270,16 @@ class PipelineService:
                 )
                 thumbnail_path = images.thumbnail_path
                 content_image_paths = list(images.content_paths)
+                source_kind_by_path = getattr(images, "source_kind_by_path", {}) or {}
+                provider_by_path = getattr(images, "provider_by_path", {}) or {}
+                for path, source_kind in source_kind_by_path.items():
+                    normalized_path = str(path or "").strip()
+                    if not normalized_path:
+                        continue
+                    image_sources[normalized_path] = {
+                        "kind": str(source_kind or "unknown").strip().lower() or "unknown",
+                        "provider": str(provider_by_path.get(path, "unknown")).strip().lower() or "unknown",
+                    }
             except Exception:
                 logger.warning("Image generation failed, continue", extra={"job_id": job_id})
             logger.info(
@@ -330,6 +347,12 @@ class PipelineService:
         image_concepts = content_result.get("image_placements", [])
         concept_list = [p.get("concept", "") for p in image_concepts if isinstance(p, dict)]
 
+        raw_content = self._inject_markdown_images(
+            content=raw_content,
+            thumbnail_path=thumbnail_path,
+            content_image_paths=content_image_paths,
+        )
+
         if thumbnail_path or content_image_paths:
             processed_content, image_points = create_naver_editor_content(
                 content=raw_content,
@@ -358,6 +381,7 @@ class PipelineService:
             "content": processed_content,
             "thumbnail": thumbnail_path or "",
             "images": content_image_paths,
+            "image_sources": image_sources,
             "image_points": [asdict(point) for point in image_points],
             "tags": tags,
             "category": category,
@@ -390,6 +414,20 @@ class PipelineService:
 
         raw_images = payload.get("images", [])
         images = [str(path) for path in raw_images] if isinstance(raw_images, list) else []
+        raw_image_sources = payload.get("image_sources", {})
+        image_sources: dict[str, dict[str, str]] = {}
+        if isinstance(raw_image_sources, dict):
+            for path, meta in raw_image_sources.items():
+                normalized_path = str(path or "").strip()
+                if not normalized_path:
+                    continue
+                if isinstance(meta, dict):
+                    image_sources[normalized_path] = {
+                        "kind": str(meta.get("kind", "unknown")).strip().lower() or "unknown",
+                        "provider": str(meta.get("provider", "unknown")).strip().lower() or "unknown",
+                    }
+                else:
+                    image_sources[normalized_path] = {"kind": "unknown", "provider": "unknown"}
         raw_tags = payload.get("tags", [])
         tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
 
@@ -399,6 +437,7 @@ class PipelineService:
             content=str(payload.get("content", "")),
             thumbnail=str(payload.get("thumbnail", "")) or None,
             images=[path for path in images if path],
+            image_sources=image_sources,
             image_points=image_points,
             tags=[tag for tag in tags if tag] or None,
             category=str(payload.get("category", "")) or None,
@@ -420,6 +459,12 @@ class PipelineService:
                 quality_snapshot=payload.get("quality_snapshot", {}),
                 seo_snapshot=payload.get("seo_snapshot", {}),
             )
+            mark_consumed = getattr(self.job_store, "mark_idea_vault_consumed_by_job", None)
+            if mark_consumed and callable(mark_consumed):
+                try:
+                    mark_consumed(job_id)
+                except Exception:
+                    logger.debug("idea_vault consumed mark skipped", extra={"job_id": job_id})
             if self.metrics_store:
                 self.metrics_store.record_jobs_total("completed")
             logger.info(
@@ -488,6 +533,7 @@ class PipelineService:
         content: str,
         thumbnail: Optional[str],
         images: Optional[list[str]] = None,
+        image_sources: Optional[dict[str, dict[str, str]]] = None,
         image_points: Optional[list[ImageInsertionPoint]] = None,
         tags: Optional[list[str]] = None,
         category: Optional[str] = None,
@@ -513,6 +559,7 @@ class PipelineService:
                     content=content,
                     thumbnail=thumbnail,
                     images=images,
+                    image_sources=image_sources,
                     image_points=image_points,
                     tags=tags,
                     category=category,
@@ -587,6 +634,9 @@ class PipelineService:
         status: str,
         duration_ms: float = 0.0,
         error_code: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        provider: str = "",
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
         record = getattr(self.job_store, "record_job_metric", None)
@@ -597,7 +647,49 @@ class PipelineService:
                 status=status,
                 duration_ms=duration_ms,
                 error_code=error_code,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                provider=provider,
                 detail=detail or {},
+            )
+
+    def _record_llm_usage_metrics(
+        self,
+        *,
+        job_id: str,
+        token_usage: Any,
+    ) -> None:
+        """생성 결과에 포함된 토큰 사용량을 단계별 메트릭으로 기록한다."""
+        if not isinstance(token_usage, dict):
+            return
+
+        for metric_type in ("parser", "quality_step", "voice_step"):
+            raw = token_usage.get(metric_type, {})
+            if not isinstance(raw, dict):
+                continue
+
+            input_tokens = max(0, int(raw.get("input_tokens", 0) or 0))
+            output_tokens = max(0, int(raw.get("output_tokens", 0) or 0))
+            total_tokens = input_tokens + output_tokens
+            if total_tokens <= 0:
+                continue
+
+            provider = str(raw.get("provider", "")).strip()
+            model = str(raw.get("model", "")).strip()
+            call_count = max(0, int(raw.get("calls", 0) or 0))
+
+            self._record_job_metric(
+                job_id=job_id,
+                metric_type=metric_type,
+                status="ok",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                provider=provider,
+                detail={
+                    "model": model,
+                    "calls": call_count,
+                    "total_tokens": total_tokens,
+                },
             )
 
     def _evaluate_quality_gate(
@@ -739,6 +831,43 @@ class PipelineService:
 
         await self.run_job(jobs[0])
         return True
+
+    def _inject_markdown_images(
+        self,
+        *,
+        content: str,
+        thumbnail_path: Optional[str],
+        content_image_paths: list[str],
+    ) -> str:
+        """본문에 이미지 마크다운 장치를 삽입한다."""
+        text = str(content or "").strip()
+        if not text:
+            return text
+        if re.search(r"!\[[^\]]*\]\([^)]+\)", text):
+            return text
+
+        markdown_urls: list[str] = []
+        if thumbnail_path:
+            markdown_urls.append(str(thumbnail_path))
+        for path in content_image_paths:
+            normalized = str(path).strip()
+            if normalized:
+                markdown_urls.append(normalized)
+        if not markdown_urls:
+            return text
+
+        image_blocks = [f"![img]({url})" for url in markdown_urls]
+        lines = text.splitlines()
+        insert_index = max(1, len(lines) // 2)
+
+        merged_lines = [
+            *lines[:insert_index],
+            "",
+            *image_blocks,
+            "",
+            *lines[insert_index:],
+        ]
+        return "\n".join(merged_lines).strip()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stub generate_fn (Phase 1 로컬 테스트용)
