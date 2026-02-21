@@ -60,6 +60,13 @@ class QualityGate:
     )
     SOURCE_LINE_PATTERN = re.compile(r"^\s*참고 자료\s*:\s*.+\(\s*https?://[^)]+\s*\)\s*$")
 
+    # 환각 탐지: 현재 연도(2026)보다 미래인 연도 단독 등장
+    _FUTURE_YEAR_PATTERN = re.compile(r"\b(202[7-9]|20[3-9]\d)\b")
+    # 환각 탐지: 단락 내 구체적 수치(숫자+단위) 과밀 — 5개 이상
+    _NUMERIC_FACT_PATTERN = re.compile(r"\d+[\s]?(?:%|원|달러|배|명|회|개|번|점|배|분|시간|일|년|월|위)")
+    # 키워드 밀도 최소 임계값: 단락 수 대비 키워드 등장 비율
+    _MIN_KEYWORD_DENSITY = 0.15
+
     def __init__(
         self,
         min_content_chars: int = 500,
@@ -144,6 +151,10 @@ class QualityGate:
             for pattern, _code in self._compiled_patterns:
                 repaired = pattern.sub("[민감표현 제거]", repaired)
 
+        # 미래 연도 환각: 해당 연도를 "[연도 확인 필요]"로 교체한다.
+        if "hallucination_future_year" in issue_codes:
+            repaired = self._FUTURE_YEAR_PATTERN.sub("[연도 확인 필요]", repaired)
+
         # 길이 부족 시 보강 단락을 추가한다.
         if "content_too_short" in issue_codes:
             keyword_text = ", ".join(seed_keywords[:4]) or title
@@ -219,6 +230,53 @@ class QualityGate:
                 )
             )
 
+        # 환각 감지 1: 미래 연도(2027년 이후) 단독 등장
+        future_years = self._FUTURE_YEAR_PATTERN.findall(stripped)
+        if future_years:
+            issues.append(
+                GateIssue(
+                    stage="rules",
+                    code="hallucination_future_year",
+                    message=f"미래 연도 표현 감지: {', '.join(set(future_years))}",
+                    severity="medium",
+                )
+            )
+
+        # 환각 감지 2: 단락 내 수치 과밀 (단락당 5개 초과)
+        paragraphs = [p for p in stripped.split("\n\n") if p.strip()]
+        dense_paragraphs = 0
+        for para in paragraphs:
+            if len(self._NUMERIC_FACT_PATTERN.findall(para)) > 5:
+                dense_paragraphs += 1
+        if dense_paragraphs >= 2:
+            issues.append(
+                GateIssue(
+                    stage="rules",
+                    code="hallucination_numeric_dense",
+                    message=f"수치 과밀 단락 {dense_paragraphs}개 감지 (단락당 5개 초과)",
+                    severity="medium",
+                )
+            )
+
+        # 키워드 밀도 검사: 키워드 등장 단락 수 / 전체 단락 수 >= 0.15
+        keyword_density_score = 0.0
+        if seed_keywords and paragraphs:
+            keyword_para_hits = 0
+            for para in paragraphs:
+                para_lower = para.lower()
+                if any(str(kw).strip().lower() in para_lower for kw in seed_keywords if kw):
+                    keyword_para_hits += 1
+            keyword_density_score = keyword_para_hits / len(paragraphs)
+            if keyword_density_score < self._MIN_KEYWORD_DENSITY and keyword_hits == 0:
+                issues.append(
+                    GateIssue(
+                        stage="rules",
+                        code="keyword_density_low",
+                        message=f"키워드 밀도 부족: {keyword_density_score:.2f} (기준 {self._MIN_KEYWORD_DENSITY})",
+                        severity="medium",
+                    )
+                )
+
         payload = {
             "passed": self._is_stage_passed(issues),
             "content_length": content_length,
@@ -226,6 +284,9 @@ class QualityGate:
             "keyword_hits": keyword_hits,
             "keyword_total": len(seed_keywords),
             "banned_matches": banned_matches,
+            "future_years_detected": future_years,
+            "dense_paragraphs": dense_paragraphs,
+            "keyword_density_score": round(keyword_density_score, 3),
         }
         return self._is_stage_passed(issues), payload, issues
 
