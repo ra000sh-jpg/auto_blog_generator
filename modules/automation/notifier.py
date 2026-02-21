@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -26,11 +27,35 @@ class TelegramNotifier:
     CRITICAL_ERROR_CODES = frozenset({"CAPTCHA_REQUIRED", "AUTH_EXPIRED"})
 
     @classmethod
-    def from_env(cls) -> "TelegramNotifier":
-        """환경변수 기반 인스턴스를 생성한다."""
+    def from_env(cls, db_path: str = "data/automation.db") -> "TelegramNotifier":
+        """환경변수/DB 기반 인스턴스를 생성한다."""
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+        if bot_token and chat_id:
+            return cls(bot_token=bot_token, chat_id=chat_id)
+
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT setting_key, setting_value
+                    FROM system_settings
+                    WHERE setting_key IN ('telegram_bot_token', 'telegram_chat_id')
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+            mapped = {str(row[0]): str(row[1]) for row in rows}
+            bot_token = bot_token or mapped.get("telegram_bot_token", "").strip()
+            chat_id = chat_id or mapped.get("telegram_chat_id", "").strip()
+        except Exception:
+            pass
+
         return cls(
-            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
-            chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            bot_token=bot_token,
+            chat_id=chat_id,
         )
 
     @property
@@ -105,19 +130,29 @@ class TelegramNotifier:
         failed: int,
         ready_count: int,
         queued_count: int,
+        idea_pending_count: int = -1,
+        idea_daily_quota: int = 0,
     ) -> bool:
         """일일 목표 요약 메시지를 전송한다."""
         status = "달성" if completed >= target else "미달"
-        text = (
-            "AutoBlog 일일 요약 (22:30 KST)\n"
-            f"- date: {local_date}\n"
-            f"- target: {target}\n"
-            f"- completed: {completed}\n"
-            f"- failed: {failed}\n"
-            f"- ready_to_publish: {ready_count}\n"
-            f"- queued: {queued_count}\n"
-            f"- result: {status}"
-        )
+        lines = [
+            "AutoBlog 일일 요약 (22:30 KST)",
+            f"- date: {local_date}",
+            f"- target: {target}",
+            f"- completed: {completed}",
+            f"- failed: {failed}",
+            f"- ready_to_publish: {ready_count}",
+            f"- queued: {queued_count}",
+            f"- result: {status}",
+        ]
+
+        if idea_pending_count >= 0:
+            lines.append(f"- idea_vault_pending: {idea_pending_count}")
+            threshold = max(0, int(idea_daily_quota)) * 5
+            if threshold > 0 and idea_pending_count <= threshold:
+                lines.insert(0, "🚨 원자재 확충 요망: 아이디어 창고 재고가 5일 치 이하입니다.")
+
+        text = "\n".join(lines)
         return await self.send_message(text, disable_notification=False)
 
     def _send_blocking(self, url: str, encoded_payload: bytes) -> bool:

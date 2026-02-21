@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -23,11 +24,12 @@ class DummyPublisher:
         content: str,
         thumbnail: Optional[str] = None,
         images: Optional[List[str]] = None,
+        image_sources: Optional[Dict[str, Dict[str, str]]] = None,
         image_points: Optional[List[Any]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
     ) -> PublishResult:
-        del title, content, thumbnail, images, image_points, tags, category
+        del title, content, thumbnail, images, image_sources, image_points, tags, category
         return PublishResult(success=True, url="https://blog.naver.com/test/1")
 
 
@@ -265,3 +267,93 @@ def test_weighted_publish_slots_are_deterministic_with_seed():
     for index in range(1, len(slots_a)):
         gap_minutes = (slots_a[index] - slots_a[index - 1]).total_seconds() / 60.0
         assert gap_minutes >= 60.0
+
+
+def test_daily_quota_seed_mixes_idea_vault_and_non_vault(tmp_path: Path):
+    """자정 시드 생성 시 비율대로 일반 할당+아이디어 창고가 함께 생성되어야 한다."""
+    store = build_store(tmp_path, "scheduler_seed_mix.db")
+    store.set_system_setting("scheduler_daily_posts_target", "5")
+    store.set_system_setting("scheduler_idea_vault_daily_quota", "2")
+    store.set_system_setting(
+        "scheduler_category_allocations",
+        json.dumps(
+            [
+                {"category": "IT 자동화", "topic_mode": "it", "count": 2},
+                {"category": "경제 브리핑", "topic_mode": "finance", "count": 2},
+                {"category": "다양한 생각", "topic_mode": "cafe", "count": 1},
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    inserted = store.add_idea_vault_items(
+        [
+            {
+                "raw_text": "카페 오픈 루틴 개선 아이디어",
+                "mapped_category": "다양한 생각",
+                "topic_mode": "cafe",
+                "parser_used": "test",
+            },
+            {
+                "raw_text": "AI 자동화로 업무시간 절감한 경험",
+                "mapped_category": "IT 자동화",
+                "topic_mode": "it",
+                "parser_used": "test",
+            },
+            {
+                "raw_text": "이번 주 금리 흐름 정리",
+                "mapped_category": "경제 브리핑",
+                "topic_mode": "finance",
+                "parser_used": "test",
+            },
+        ]
+    )
+    assert inserted == 3
+
+    scheduler = SchedulerService(job_store=store)
+    scheduler._get_now_local = lambda: datetime(2026, 2, 22, 0, 6, 0)  # type: ignore[assignment]
+    asyncio.run(scheduler._run_daily_quota_seed())
+
+    with store.connection() as conn:
+        rows = conn.execute("SELECT tags FROM jobs ORDER BY created_at ASC").fetchall()
+    assert len(rows) == 5
+    idea_vault_jobs = 0
+    for row in rows:
+        tags = json.loads(row["tags"] or "[]")
+        if "idea_vault" in tags:
+            idea_vault_jobs += 1
+    assert idea_vault_jobs == 2
+
+    stats = store.get_idea_vault_stats()
+    assert stats["pending"] == 1
+    assert stats["queued"] == 2
+
+
+def test_daily_quota_seed_respects_strict_holiday_when_idea_stock_empty(tmp_path: Path):
+    """아이디어 재고가 없으면 빈자리를 일반 할당으로 대체하지 않아야 한다."""
+    store = build_store(tmp_path, "scheduler_seed_strict.db")
+    store.set_system_setting("scheduler_daily_posts_target", "5")
+    store.set_system_setting("scheduler_idea_vault_daily_quota", "2")
+    store.set_system_setting(
+        "scheduler_category_allocations",
+        json.dumps(
+            [
+                {"category": "IT 자동화", "topic_mode": "it", "count": 3},
+                {"category": "다양한 생각", "topic_mode": "cafe", "count": 2},
+            ],
+            ensure_ascii=False,
+        ),
+    )
+
+    scheduler = SchedulerService(job_store=store)
+    scheduler._get_now_local = lambda: datetime(2026, 2, 23, 0, 6, 0)  # type: ignore[assignment]
+    asyncio.run(scheduler._run_daily_quota_seed())
+
+    with store.connection() as conn:
+        total_row = conn.execute("SELECT COUNT(*) AS count FROM jobs").fetchone()
+        idea_row = conn.execute(
+            "SELECT COUNT(*) AS count FROM jobs WHERE tags LIKE '%idea_vault%'"
+        ).fetchone()
+    assert total_row is not None
+    assert int(total_row["count"]) == 3  # 5건 목표 중 idea_vault 2건 미충족 -> 엄격 휴업
+    assert idea_row is not None
+    assert int(idea_row["count"]) == 0

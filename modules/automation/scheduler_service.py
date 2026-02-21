@@ -416,13 +416,17 @@ class SchedulerService:
 
         ready_count = self._get_ready_draft_count()
         configured_target = self._get_configured_daily_target()
-        target_buffer = max(self.DRAFT_BUFFER_TARGET, configured_target + 2)
+        # CPU 여유 상태일 때 버퍼 목표를 동적으로 상향 (최대 9)
+        cpu_allowed, cpu_avg = self._cpu_monitor.check()
+        extended_buffer = min(9, self.DRAFT_BUFFER_TARGET + 3) if cpu_allowed and cpu_avg < self._cpu_monitor.start_threshold_percent else self.DRAFT_BUFFER_TARGET
+        target_buffer = max(extended_buffer, configured_target + 2)
         needed = max(0, target_buffer - ready_count)
         if needed <= 0:
             logger.debug(
-                "Draft buffer is enough (%d ready, target=%d)",
+                "Draft buffer is enough (%d ready, target=%d, cpu_avg=%.1f%%)",
                 ready_count,
                 target_buffer,
+                cpu_avg,
             )
             return
 
@@ -1091,6 +1095,7 @@ async def run_scheduler_forever(
     """스케줄러를 시작하고 종료 신호까지 대기한다."""
     from ..collectors.metrics_collector import MetricsCollector
     from ..config import load_config
+    from ..images.runtime_factory import build_runtime_image_generator
     from ..llm import get_generator, llm_generate_fn
     from ..logging_config import setup_logging
     from ..uploaders.playwright_publisher import PlaywrightPublisher
@@ -1118,10 +1123,25 @@ async def run_scheduler_forever(
 
     notifier = TelegramNotifier.from_env()
     publisher = PlaywrightPublisher(blog_id=blog_id or "dry-run")
+    image_generator = None
+    try:
+        image_generator = build_runtime_image_generator(
+            app_config=config,
+            job_store=job_store,
+        )
+        if image_generator:
+            logger.info("Scheduler image backend: router-driven runtime factory")
+    except Exception as exc:
+        logger.warning("Scheduler image runtime init failed: %s", exc)
+
     generate_fn = stub_generate_fn
     try:
         # 스케줄러는 LLM 생성기를 기본 사용하되, 초기화 실패 시 stub로 안전 폴백한다.
-        get_generator(config.llm)
+        get_generator(
+            config.llm,
+            job_store=job_store,
+            notifier=notifier,
+        )
         generate_fn = llm_generate_fn
         logger.info("Scheduler generation backend: llm")
     except Exception as exc:
@@ -1137,6 +1157,7 @@ async def run_scheduler_forever(
         retry_max_attempts=config.retry.max_retries,
         retry_backoff_base_sec=config.retry.backoff_base_sec,
         retry_backoff_max_sec=config.retry.backoff_max_sec,
+        image_generator=image_generator,
     )
 
     scheduler = SchedulerService(
@@ -1166,3 +1187,11 @@ async def run_scheduler_forever(
             await asyncio.sleep(3600)
     except (KeyboardInterrupt, asyncio.CancelledError):
         await scheduler.stop()
+    finally:
+        if image_generator:
+            close_fn = getattr(image_generator, "close", None)
+            if close_fn and callable(close_fn):
+                try:
+                    await close_fn()
+                except Exception:
+                    pass

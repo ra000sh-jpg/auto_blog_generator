@@ -21,11 +21,12 @@ class DummyPublisher:
         content: str,
         thumbnail: Optional[str] = None,
         images: Optional[List[str]] = None,
+        image_sources: Optional[Dict[str, Dict[str, str]]] = None,
         image_points: Optional[List[Any]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
     ) -> PublishResult:
-        del title, content, thumbnail, images, image_points, tags, category
+        del title, content, thumbnail, images, image_sources, image_points, tags, category
         return PublishResult(success=True, url="https://blog.naver.com/test/hybrid")
 
 
