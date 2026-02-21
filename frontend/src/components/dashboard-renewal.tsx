@@ -3,20 +3,28 @@
 import Image from "next/image";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import { AIToggleSummary } from "@/components/ai-toggle-summary";
 import { HealthWidget } from "@/components/health-widget";
 import { MetricsSummary } from "@/components/metrics-summary";
 import {
   completeOnboarding,
   createMagicJob,
+  fetchNaverConnectStatus,
   fetchIdeaVaultStats,
   fetchOnboardingStatus,
+  fetchRouterSettings,
   ingestIdeaVault,
+  quoteRouterSettings,
   saveOnboardingCategories,
   saveOnboardingSchedule,
+  saveRouterSettings,
   savePersonaLab,
+  startNaverConnect,
   testTelegramSetup,
   type IdeaVaultStatsResponse,
+  type NaverConnectStatusResponse,
   type OnboardingStatusResponse,
+  type RouterQuoteResponse,
   type ScheduleAllocationItem,
 } from "@/lib/api";
 
@@ -65,6 +73,20 @@ function sliderLabel(score: number, labels: [string, string, string]): string {
     return labels[1];
   }
   return labels[2];
+}
+
+function formatKrw(value: number): string {
+  return new Intl.NumberFormat("ko-KR").format(Math.max(0, Math.round(value)));
+}
+
+function compactKeys(input: Record<string, string>): Record<string, string> {
+  return Object.entries(input).reduce<Record<string, string>>((acc, [key, value]) => {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      acc[key] = normalized;
+    }
+    return acc;
+  }, {});
 }
 
 function inferTopicMode(categoryName: string): string {
@@ -145,9 +167,37 @@ export function DashboardRenewal() {
   const [loadingError, setLoadingError] = useState("");
   const [onboarding, setOnboarding] = useState<OnboardingStatusResponse | null>(null);
 
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [stepMessage, setStepMessage] = useState("");
+  const [routerSaving, setRouterSaving] = useState(false);
+  const [routerLoading, setRouterLoading] = useState(false);
+  const [routerMessage, setRouterMessage] = useState("");
+
+  const [strategyMode, setStrategyMode] = useState<"cost" | "quality">("cost");
+  const [textApiKeys, setTextApiKeys] = useState<Record<string, string>>({
+    qwen: "",
+    deepseek: "",
+    gemini: "",
+    openai: "",
+    claude: "",
+  });
+  const [textApiMasks, setTextApiMasks] = useState<Record<string, string>>({});
+  const [imageApiKeys, setImageApiKeys] = useState<Record<string, string>>({
+    pexels: "",
+    together: "",
+    fal: "",
+    openai_image: "",
+  });
+  const [imageApiMasks, setImageApiMasks] = useState<Record<string, string>>({});
+  const [imageEngine, setImageEngine] = useState("pexels");
+  const [imageEnabled, setImageEnabled] = useState(true);
+  const [imagesPerPost, setImagesPerPost] = useState(1);
+  const [routerQuote, setRouterQuote] = useState<RouterQuoteResponse | null>(null);
+  const [textModelMatrix, setTextModelMatrix] = useState<Array<Record<string, unknown>>>([]);
+  const [imageModelMatrix, setImageModelMatrix] = useState<Array<Record<string, unknown>>>([]);
+  const [naverStatus, setNaverStatus] = useState<NaverConnectStatusResponse | null>(null);
+  const [naverConnecting, setNaverConnecting] = useState(false);
 
   const [personaId, setPersonaId] = useState("P1");
   const [identity, setIdentity] = useState("");
@@ -193,7 +243,11 @@ export function DashboardRenewal() {
 
     async function loadStatus() {
       try {
-        const response = await fetchOnboardingStatus();
+        const [response, routerState, naverConnectState] = await Promise.all([
+          fetchOnboardingStatus(),
+          fetchRouterSettings(),
+          fetchNaverConnectStatus(),
+        ]);
         if (!isMounted) {
           return;
         }
@@ -223,6 +277,32 @@ export function DashboardRenewal() {
             response.category_allocations || [],
           ),
         );
+        setStrategyMode(
+          routerState.settings.strategy_mode === "quality" ? "quality" : "cost",
+        );
+        setTextApiMasks(routerState.settings.text_api_keys_masked || {});
+        setImageApiMasks(routerState.settings.image_api_keys_masked || {});
+        setImageEngine(routerState.settings.image_engine || "pexels");
+        setImageEnabled(Boolean(routerState.settings.image_enabled));
+        setImagesPerPost(Math.max(0, Math.min(4, Number(routerState.settings.images_per_post || 1))));
+        setRouterQuote({
+          strategy_mode:
+            routerState.settings.strategy_mode === "quality" ? "quality" : "cost",
+          roles: routerState.roles || {},
+          estimate: {
+            currency: "KRW",
+            text_cost_krw: Number(routerState.quote.text_cost_krw || 0),
+            image_cost_krw: Number(routerState.quote.image_cost_krw || 0),
+            total_cost_krw: Number(routerState.quote.total_cost_krw || 0),
+            quality_score: Number(routerState.quote.quality_score || 0),
+          },
+          image: {},
+          available_text_models: [],
+        });
+        setTextModelMatrix(routerState.matrix.text_models || []);
+        setImageModelMatrix(routerState.matrix.image_models || []);
+        setNaverStatus(naverConnectState);
+
         try {
           const vaultStats = await fetchIdeaVaultStats();
           if (isMounted) {
@@ -255,6 +335,7 @@ export function DashboardRenewal() {
 
   const stepTitles = useMemo(
     () => [
+      "0. Router",
       "1. Persona Lab",
       "2. Category Sync",
       "3. Schedule & Ratio",
@@ -271,6 +352,132 @@ export function DashboardRenewal() {
     () => Math.max(0, dailyPostsTarget - ideaVaultDailyQuota),
     [dailyPostsTarget, ideaVaultDailyQuota],
   );
+  const parserModelLabel = useMemo(() => {
+    const role = routerQuote?.roles?.parser;
+    if (!role || typeof role !== "object") {
+      return "-";
+    }
+    const label = (role as Record<string, unknown>).label;
+    return typeof label === "string" ? label : "-";
+  }, [routerQuote]);
+  const qualityModelLabel = useMemo(() => {
+    const role = routerQuote?.roles?.quality_step;
+    if (!role || typeof role !== "object") {
+      return "-";
+    }
+    const label = (role as Record<string, unknown>).label;
+    return typeof label === "string" ? label : "-";
+  }, [routerQuote]);
+  const voiceModelLabel = useMemo(() => {
+    const role = routerQuote?.roles?.voice_step;
+    if (!role || typeof role !== "object") {
+      return "-";
+    }
+    const label = (role as Record<string, unknown>).label;
+    return typeof label === "string" ? label : "-";
+  }, [routerQuote]);
+
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      setRouterLoading(true);
+      try {
+        const quoted = await quoteRouterSettings({
+          strategy_mode: strategyMode,
+          text_api_keys: compactKeys(textApiKeys),
+          image_api_keys: compactKeys(imageApiKeys),
+          image_engine: imageEngine,
+          image_enabled: imageEnabled,
+          images_per_post: imagesPerPost,
+        });
+        setRouterQuote(quoted);
+      } catch {
+        // 견적 API 실패는 화면 흐름을 막지 않는다.
+      } finally {
+        setRouterLoading(false);
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageEnabled, imagesPerPost]);
+
+  function handleTextKeyChange(keyId: string, value: string) {
+    setTextApiKeys((previous) => ({
+      ...previous,
+      [keyId]: value,
+    }));
+  }
+
+  function handleImageKeyChange(keyId: string, value: string) {
+    setImageApiKeys((previous) => ({
+      ...previous,
+      [keyId]: value,
+    }));
+  }
+
+  async function handleSaveRouterStep() {
+    setRouterSaving(true);
+    setRouterMessage("");
+    try {
+      const saved = await saveRouterSettings({
+        strategy_mode: strategyMode,
+        text_api_keys: compactKeys(textApiKeys),
+        image_api_keys: compactKeys(imageApiKeys),
+        image_engine: imageEngine,
+        image_enabled: imageEnabled,
+        images_per_post: imagesPerPost,
+      });
+      setTextApiMasks(saved.settings.text_api_keys_masked || {});
+      setImageApiMasks(saved.settings.image_api_keys_masked || {});
+      setStrategyMode(saved.settings.strategy_mode === "quality" ? "quality" : "cost");
+      setImageEngine(saved.settings.image_engine || "pexels");
+      setImageEnabled(Boolean(saved.settings.image_enabled));
+      setImagesPerPost(Math.max(0, Math.min(4, Number(saved.settings.images_per_post || 1))));
+      setTextModelMatrix(saved.matrix.text_models || []);
+      setImageModelMatrix(saved.matrix.image_models || []);
+      setRouterQuote((previous) => ({
+        strategy_mode: saved.settings.strategy_mode === "quality" ? "quality" : "cost",
+        roles: saved.roles || previous?.roles || {},
+        estimate: {
+          currency: "KRW",
+          text_cost_krw: Number(saved.quote.text_cost_krw || 0),
+          image_cost_krw: Number(saved.quote.image_cost_krw || 0),
+          total_cost_krw: Number(saved.quote.total_cost_krw || 0),
+          quality_score: Number(saved.quote.quality_score || 0),
+        },
+        image: previous?.image || {},
+        available_text_models: previous?.available_text_models || [],
+      }));
+      setStep(1);
+      setStepMessage("Step 0 저장 완료: 모델 오토 라우터가 활성화되었습니다.");
+      setRouterMessage("라우터 설정 저장 완료");
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : "Step 0 저장 중 오류가 발생했습니다.";
+      setRouterMessage(message);
+      setStepMessage(message);
+    } finally {
+      setRouterSaving(false);
+    }
+  }
+
+  async function handleNaverConnect() {
+    setNaverConnecting(true);
+    setRouterMessage("");
+    try {
+      const response = await startNaverConnect({ timeout_sec: 300 });
+      const statusResponse = await fetchNaverConnectStatus();
+      setNaverStatus(statusResponse);
+      setRouterMessage(response.message);
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : "네이버 연동 실행에 실패했습니다.";
+      setRouterMessage(message);
+    } finally {
+      setNaverConnecting(false);
+    }
+  }
 
   async function handleSavePersonaStep() {
     setSaving(true);
@@ -550,12 +757,12 @@ export function DashboardRenewal() {
             Onboarding Wizard
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            4단계 설정을 완료하면 매직 인풋만으로 예약 발행을 시작할 수 있습니다.
+            5단계 설정을 완료하면 매직 인풋만으로 예약 발행을 시작할 수 있습니다.
           </p>
-          <div className="mt-4 grid gap-2 sm:grid-cols-4">
+          <div className="mt-4 grid gap-2 sm:grid-cols-5">
             {stepTitles.map((title, index) => {
-              const active = step === index + 1;
-              const passed = step > index + 1;
+              const active = step === index;
+              const passed = step > index;
               return (
                 <div
                   key={title}
@@ -573,6 +780,188 @@ export function DashboardRenewal() {
             })}
           </div>
         </section>
+
+        {step === 0 && (
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="font-[family-name:var(--font-heading)] text-lg font-semibold">
+              Step 0. Zero-Config Router
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              API 키를 넣고 전략을 선택하면 파서/품질/보이스 모델이 자동 배정되고 1편당 예상 원가가 즉시 계산됩니다.
+            </p>
+
+            <div className="mt-4 inline-flex rounded-full border border-slate-300 p-1">
+              <button
+                type="button"
+                onClick={() => setStrategyMode("cost")}
+                className={`rounded-full px-4 py-1 text-sm font-medium transition ${
+                  strategyMode === "cost"
+                    ? "bg-slate-900 text-white"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                ⚖️ 가성비 우선
+              </button>
+              <button
+                type="button"
+                onClick={() => setStrategyMode("quality")}
+                className={`rounded-full px-4 py-1 text-sm font-medium transition ${
+                  strategyMode === "quality"
+                    ? "bg-slate-900 text-white"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                💎 품질 우선
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {Array.from(
+                new Set(
+                  textModelMatrix
+                    .map((item) => (typeof item.key_id === "string" ? item.key_id : ""))
+                    .filter((value) => value.length > 0),
+                ),
+              ).map((keyId) => (
+                <label key={keyId} className="block">
+                  <span className="mb-1 block text-sm font-medium text-slate-700">
+                    {keyId.toUpperCase()} API Key
+                  </span>
+                  <input
+                    type="password"
+                    value={textApiKeys[keyId] || ""}
+                    onChange={(event) => handleTextKeyChange(keyId, event.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                    placeholder={textApiMasks[keyId] ? `${textApiMasks[keyId]} (저장됨)` : "선택 입력"}
+                  />
+                </label>
+              ))}
+            </div>
+
+            <div className="mt-4 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-slate-700">이미지 엔진</span>
+                <select
+                  value={imageEngine}
+                  onChange={(event) => setImageEngine(event.target.value)}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                >
+                  {imageModelMatrix.map((item, index) => {
+                    const engineId =
+                      typeof item.engine_id === "string" ? item.engine_id : `engine-${index}`;
+                    const label =
+                      typeof item.label === "string" ? item.label : engineId;
+                    return (
+                      <option key={engineId} value={engineId}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-slate-700">이미지/포스트 수</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={4}
+                  value={imagesPerPost}
+                  onChange={(event) =>
+                    setImagesPerPost(Math.max(0, Math.min(4, Number(event.target.value))))
+                  }
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="flex items-center gap-2 sm:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={imageEnabled}
+                  onChange={(event) => setImageEnabled(event.target.checked)}
+                />
+                <span className="text-sm text-slate-700">이미지 엔진 활성화</span>
+              </label>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {Array.from(
+                new Set(
+                  imageModelMatrix
+                    .map((item) => (typeof item.key_id === "string" ? item.key_id : ""))
+                    .filter((value) => value.length > 0),
+                ),
+              ).map((keyId) => (
+                <label key={keyId} className="block">
+                  <span className="mb-1 block text-sm font-medium text-slate-700">
+                    {keyId.toUpperCase()} Key
+                  </span>
+                  <input
+                    type="password"
+                    value={imageApiKeys[keyId] || ""}
+                    onChange={(event) => handleImageKeyChange(keyId, event.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                    placeholder={imageApiMasks[keyId] ? `${imageApiMasks[keyId]} (저장됨)` : "선택 입력"}
+                  />
+                </label>
+              ))}
+            </div>
+
+            <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-800">실시간 견적서</h3>
+                {routerLoading && <span className="text-xs text-slate-500">계산 중...</span>}
+              </div>
+              <div className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
+                <p>
+                  예상 원가(1편):{" "}
+                  <strong>{formatKrw(routerQuote?.estimate.total_cost_krw || 0)}원</strong>
+                </p>
+                <p>
+                  예상 품질: <strong>{routerQuote?.estimate.quality_score || 0}점</strong>
+                </p>
+                <p className="sm:col-span-2">
+                  모델 배정: Parser <strong>{parserModelLabel}</strong> / Step1{" "}
+                  <strong>{qualityModelLabel}</strong> / Step2 <strong>{voiceModelLabel}</strong>
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-800">네이버 블로그 연동</p>
+                  <p className="text-xs text-slate-600">
+                    상태: {naverStatus?.connected ? "연결됨" : "미연결"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleNaverConnect}
+                  disabled={naverConnecting}
+                  className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  {naverConnecting ? "팝업 실행 중..." : "🟢 네이버 연동 시작"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSaveRouterStep}
+                disabled={routerSaving}
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700 disabled:opacity-50"
+              >
+                {routerSaving ? "저장 중..." : "Step 0 저장 후 다음"}
+              </button>
+            </div>
+
+            {routerMessage && (
+              <p className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                {routerMessage}
+              </p>
+            )}
+          </section>
+        )}
 
         {step === 1 && (
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -1177,12 +1566,15 @@ export function DashboardRenewal() {
         )}
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-5">
+      <div className="grid gap-4 lg:grid-cols-6">
         <div className="lg:col-span-3">
           <HealthWidget />
         </div>
-        <div className="lg:col-span-2">
+        <div className="lg:col-span-3">
           <MetricsSummary />
+        </div>
+        <div className="lg:col-span-6">
+          <AIToggleSummary />
         </div>
       </div>
     </div>

@@ -268,6 +268,88 @@ export type IdeaVaultIngestResponse = {
   }>;
 };
 
+export type RouterSettingsPayload = {
+  strategy_mode: string;
+  text_api_keys: Record<string, string>;
+  image_api_keys: Record<string, string>;
+  image_engine: string;
+  image_enabled: boolean;
+  images_per_post: number;
+};
+
+export type RouterQuoteResponse = {
+  strategy_mode: string;
+  roles: Record<string, Record<string, unknown>>;
+  estimate: {
+    currency: string;
+    text_cost_krw: number;
+    image_cost_krw: number;
+    total_cost_krw: number;
+    quality_score: number;
+  };
+  image: Record<string, unknown>;
+  available_text_models: Array<Record<string, unknown>>;
+};
+
+export type RouterSettingsResponse = {
+  settings: {
+    strategy_mode: string;
+    text_api_keys_masked: Record<string, string>;
+    image_api_keys_masked: Record<string, string>;
+    image_engine: string;
+    image_enabled: boolean;
+    images_per_post: number;
+  };
+  quote: RouterQuoteResponse["estimate"];
+  roles: Record<string, Record<string, unknown>>;
+  matrix: {
+    text_models: Array<Record<string, unknown>>;
+    image_models: Array<Record<string, unknown>>;
+  };
+};
+
+export type NaverConnectStatusResponse = {
+  connected: boolean;
+  state_path: string;
+  exists: boolean;
+  updated_at_epoch: number;
+};
+
+export type NaverConnectStartPayload = {
+  timeout_sec?: number;
+};
+
+export type NaverConnectStartResponse = {
+  success: boolean;
+  connected: boolean;
+  message: string;
+  state_path: string;
+  current_url: string;
+};
+
+export type AIToggleSummary = {
+  expected_on: number;
+  verified_on: number;
+  repaired: number;
+  failed: number;
+  passed: number;
+};
+
+export type AIToggleReportResponse = {
+  available: boolean;
+  mode: string;
+  post_url: string;
+  created_at: number;
+  created_at_iso: string;
+  expected_on: number;
+  actual_on: number;
+  post_verify_passed: number;
+  unresolved_images: string[];
+  recent_failure_streak: number;
+  prepublish: AIToggleSummary;
+  postverify: AIToggleSummary;
+};
+
 type RequestOptions = {
   method?: "GET" | "POST";
   body?: unknown;
@@ -408,4 +490,43 @@ export async function ingestIdeaVault(
     method: "POST",
     body: payload,
   });
+}
+
+export async function fetchRouterSettings(): Promise<RouterSettingsResponse> {
+  return requestJSON<RouterSettingsResponse>("/router-settings");
+}
+
+export async function quoteRouterSettings(
+  payload: RouterSettingsPayload,
+): Promise<RouterQuoteResponse> {
+  return requestJSON<RouterQuoteResponse>("/router-settings/quote", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function saveRouterSettings(
+  payload: RouterSettingsPayload,
+): Promise<RouterSettingsResponse> {
+  return requestJSON<RouterSettingsResponse>("/router-settings/save", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchNaverConnectStatus(): Promise<NaverConnectStatusResponse> {
+  return requestJSON<NaverConnectStatusResponse>("/naver/connect/status");
+}
+
+export async function startNaverConnect(
+  payload: NaverConnectStartPayload = {},
+): Promise<NaverConnectStartResponse> {
+  return requestJSON<NaverConnectStartResponse>("/naver/connect/start", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchAIToggleReport(): Promise<AIToggleReportResponse> {
+  return requestJSON<AIToggleReportResponse>("/ai-toggle/report");
 }
