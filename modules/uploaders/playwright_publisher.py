@@ -123,6 +123,14 @@ class PlaywrightPublisher:
         self._ai_toggle_post_verify = raw_post_verify in {"1", "true", "yes", "on"}
         raw_telegram_alert = str(os.getenv("NAVER_AI_TOGGLE_TELEGRAM_ALERT", "true")).strip().lower()
         self._ai_toggle_telegram_alert = raw_telegram_alert in {"1", "true", "yes", "on"}
+        self._screenshot_retention_max = self._read_retention_limit(
+            "NAVER_SCREENSHOT_RETENTION_MAX",
+            default=30,
+        )
+        self._ai_report_retention_max = self._read_retention_limit(
+            "NAVER_AI_REPORT_RETENTION_MAX",
+            default=30,
+        )
         raw_width = str(os.getenv("IMAGE_UPLOAD_WIDTH", "500")).strip()
         try:
             self._image_upload_target_width = max(320, min(1200, int(raw_width)))
@@ -1748,6 +1756,65 @@ class PlaywrightPublisher:
             or " active " in normalized
         )
 
+    @staticmethod
+    def _read_retention_limit(env_name: str, default: int) -> int:
+        """보관 개수 환경변수를 안전하게 정수로 읽는다."""
+        try:
+            raw = str(os.getenv(env_name, str(default))).strip()
+            value = int(raw)
+            return max(1, min(500, value))
+        except Exception:
+            return max(1, int(default))
+
+    @classmethod
+    def _is_ai_toggle_on_snapshot(cls, snapshot: Dict[str, Any]) -> bool:
+        """토글 DOM 스냅샷을 기준으로 ON 상태를 판정한다."""
+        class_fields = [
+            str(snapshot.get("buttonClass", "")),
+            str(snapshot.get("wrapperClass", "")),
+            str(snapshot.get("markClass", "")),
+            str(snapshot.get("toggleClass", "")),
+        ]
+        if any(cls._has_selected_class(value) for value in class_fields):
+            return True
+
+        attr_fields = [
+            str(snapshot.get("buttonAriaChecked", "")),
+            str(snapshot.get("buttonAriaPressed", "")),
+            str(snapshot.get("buttonDataActive", "")),
+            str(snapshot.get("toggleAriaChecked", "")),
+            str(snapshot.get("toggleAriaPressed", "")),
+            str(snapshot.get("toggleDataActive", "")),
+            str(snapshot.get("wrapperAriaChecked", "")),
+            str(snapshot.get("wrapperAriaPressed", "")),
+            str(snapshot.get("wrapperDataActive", "")),
+        ]
+        if any(value.strip().lower() == "true" for value in attr_fields):
+            return True
+
+        checked_fields = [
+            snapshot.get("buttonChecked"),
+            snapshot.get("toggleChecked"),
+            snapshot.get("wrapperChecked"),
+        ]
+        return any(value is True for value in checked_fields)
+
+    @staticmethod
+    def _prune_old_debug_files(directory: Path, pattern: str, keep: int) -> None:
+        """오래된 디버그 파일을 정리해 디스크 사용량을 억제한다."""
+        if keep <= 0 or not directory.exists():
+            return
+        try:
+            candidates = [path for path in directory.glob(pattern) if path.is_file()]
+            candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            for stale in candidates[keep:]:
+                try:
+                    stale.unlink(missing_ok=True)
+                except Exception:
+                    continue
+        except Exception:
+            return
+
     def _record_ai_toggle_audit(
         self,
         *,
@@ -1803,6 +1870,14 @@ class PlaywrightPublisher:
             report = self._build_ai_toggle_report(post_url)
             target = report_dir / "last_report.json"
             target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            timestamp = int(report.get("created_at", int(time.time())))
+            history_path = report_dir / f"report_{timestamp}.json"
+            history_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._prune_old_debug_files(
+                report_dir,
+                "report_*.json",
+                keep=self._ai_report_retention_max,
+            )
         except Exception as exc:
             logger.warning("AI 토글 리포트 저장 실패: %s", exc)
 
@@ -1826,6 +1901,25 @@ class PlaywrightPublisher:
         if notifier is None or not getattr(notifier, "enabled", False):
             return
         lines = [title, f"- blog_id: {self.blog_id}", f"- mode: {self._ai_toggle_mode}"]
+        pre = self._ai_toggle_summary.get("prepublish", {})
+        if isinstance(pre, dict) and pre:
+            lines.append(
+                "- prepublish: expected={expected} verified={verified} repaired={repaired} failed={failed}".format(
+                    expected=int(pre.get("expected_on", 0)),
+                    verified=int(pre.get("verified_on", 0)),
+                    repaired=int(pre.get("repaired", 0)),
+                    failed=int(pre.get("failed", 0)),
+                )
+            )
+        post = self._ai_toggle_summary.get("postverify", {})
+        if isinstance(post, dict) and post:
+            lines.append(
+                "- postverify: expected={expected} passed={passed} failed={failed}".format(
+                    expected=int(post.get("expected_on", 0)),
+                    passed=int(post.get("passed", 0)),
+                    failed=int(post.get("failed", 0)),
+                )
+            )
         lines.extend(details[:10])
         try:
             notifier.send_message_background("\n".join(lines), disable_notification=False)
@@ -1917,6 +2011,21 @@ class PlaywrightPublisher:
                     found: true,
                     on,
                     buttonClass,
+                    wrapperClass: String((wrapperNode && wrapperNode.className) || ""),
+                    markClass: String((markNode && markNode.className) || ""),
+                    toggleClass: String((toggleNode && toggleNode.className) || ""),
+                    buttonAriaChecked: String(aiButton.getAttribute("aria-checked") || ""),
+                    buttonAriaPressed: String(aiButton.getAttribute("aria-pressed") || ""),
+                    buttonDataActive: String(aiButton.getAttribute("data-active") || ""),
+                    buttonChecked: typeof aiButton.checked === "boolean" ? aiButton.checked : null,
+                    toggleAriaChecked: String((toggleNode && toggleNode.getAttribute ? toggleNode.getAttribute("aria-checked") : "") || ""),
+                    toggleAriaPressed: String((toggleNode && toggleNode.getAttribute ? toggleNode.getAttribute("aria-pressed") : "") || ""),
+                    toggleDataActive: String((toggleNode && toggleNode.getAttribute ? toggleNode.getAttribute("data-active") : "") || ""),
+                    toggleChecked: typeof (toggleNode && toggleNode.checked) === "boolean" ? toggleNode.checked : null,
+                    wrapperAriaChecked: String((wrapperNode && wrapperNode.getAttribute ? wrapperNode.getAttribute("aria-checked") : "") || ""),
+                    wrapperAriaPressed: String((wrapperNode && wrapperNode.getAttribute ? wrapperNode.getAttribute("aria-pressed") : "") || ""),
+                    wrapperDataActive: String((wrapperNode && wrapperNode.getAttribute ? wrapperNode.getAttribute("data-active") : "") || ""),
+                    wrapperChecked: typeof (wrapperNode && wrapperNode.checked) === "boolean" ? wrapperNode.checked : null,
                     sectionClass: String((section && section.className) || ""),
                   };
                 }
@@ -1924,9 +2033,10 @@ class PlaywrightPublisher:
             )
             if not isinstance(payload, dict):
                 return {"found": False, "on": False, "button_class": "", "section_class": ""}
+            normalized_on = bool(payload.get("on")) or self._is_ai_toggle_on_snapshot(payload)
             return {
                 "found": bool(payload.get("found")),
-                "on": bool(payload.get("on")),
+                "on": normalized_on,
                 "button_class": str(payload.get("buttonClass", "")),
                 "section_class": str(payload.get("sectionClass", "")),
             }
@@ -2416,13 +2526,28 @@ class PlaywrightPublisher:
                         on,
                         src: String((img && img.getAttribute("src")) || ""),
                         buttonClass,
+                        wrapperClass: String((wrapper && wrapper.className) || ""),
+                        markClass: String((markNode && markNode.className) || ""),
+                        toggleClass: String((toggleNode && toggleNode.className) || ""),
+                        buttonAriaChecked: String(button.getAttribute("aria-checked") || ""),
+                        buttonAriaPressed: String(button.getAttribute("aria-pressed") || ""),
+                        buttonDataActive: String(button.getAttribute("data-active") || ""),
+                        buttonChecked: typeof button.checked === "boolean" ? button.checked : null,
+                        toggleAriaChecked: String((toggleNode && toggleNode.getAttribute ? toggleNode.getAttribute("aria-checked") : "") || ""),
+                        toggleAriaPressed: String((toggleNode && toggleNode.getAttribute ? toggleNode.getAttribute("aria-pressed") : "") || ""),
+                        toggleDataActive: String((toggleNode && toggleNode.getAttribute ? toggleNode.getAttribute("data-active") : "") || ""),
+                        toggleChecked: typeof (toggleNode && toggleNode.checked) === "boolean" ? toggleNode.checked : null,
+                        wrapperAriaChecked: String((wrapper && wrapper.getAttribute ? wrapper.getAttribute("aria-checked") : "") || ""),
+                        wrapperAriaPressed: String((wrapper && wrapper.getAttribute ? wrapper.getAttribute("aria-pressed") : "") || ""),
+                        wrapperDataActive: String((wrapper && wrapper.getAttribute ? wrapper.getAttribute("data-active") : "") || ""),
+                        wrapperChecked: typeof (wrapper && wrapper.checked) === "boolean" ? wrapper.checked : null,
                       };
                     }
                     """,
                     {"tokens": tokens},
                 )
                 found = bool(payload.get("found")) if isinstance(payload, dict) else False
-                on = bool(payload.get("on")) if isinstance(payload, dict) and found else False
+                on = self._is_ai_toggle_on_snapshot(payload) if isinstance(payload, dict) and found else False
                 row["post_verify_found"] = found
                 row["post_verify_on"] = on
                 if not on:
@@ -3146,6 +3271,11 @@ class PlaywrightPublisher:
         try:
             await page.screenshot(path=str(path))
             logger.info(f"Screenshot saved: {path}")
+            self._prune_old_debug_files(
+                screenshots_dir,
+                "*.png",
+                keep=self._screenshot_retention_max,
+            )
         except Exception:
             pass
 
