@@ -123,6 +123,11 @@ class PlaywrightPublisher:
         self._ai_toggle_post_verify = raw_post_verify in {"1", "true", "yes", "on"}
         raw_telegram_alert = str(os.getenv("NAVER_AI_TOGGLE_TELEGRAM_ALERT", "true")).strip().lower()
         self._ai_toggle_telegram_alert = raw_telegram_alert in {"1", "true", "yes", "on"}
+        raw_streak = str(os.getenv("NAVER_AI_TOGGLE_ALERT_STREAK", "3")).strip()
+        try:
+            self._ai_toggle_alert_streak = max(1, min(20, int(raw_streak)))
+        except Exception:
+            self._ai_toggle_alert_streak = 3
         self._screenshot_retention_max = self._read_retention_limit(
             "NAVER_SCREENSHOT_RETENTION_MAX",
             default=30,
@@ -1815,6 +1820,42 @@ class PlaywrightPublisher:
         except Exception:
             return
 
+    @staticmethod
+    def _ai_toggle_report_dir() -> Path:
+        """AI 토글 리포트 디렉터리를 반환한다."""
+        raw = str(os.getenv("NAVER_AI_TOGGLE_REPORT_DIR", "data/ai_toggle")).strip()
+        return Path(raw or "data/ai_toggle")
+
+    def _count_recent_ai_toggle_failure_streak(self, max_scan: int = 20) -> int:
+        """최근 리포트 기준 연속 실패 횟수를 계산한다."""
+        report_dir = self._ai_toggle_report_dir()
+        if not report_dir.exists():
+            return 0
+        try:
+            history = [path for path in report_dir.glob("report_*.json") if path.is_file()]
+            history.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        except Exception:
+            return 0
+
+        streak = 0
+        for report_path in history[: max(1, int(max_scan))]:
+            try:
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+            if not isinstance(summary, dict):
+                break
+            pre = summary.get("prepublish", {}) if isinstance(summary.get("prepublish", {}), dict) else {}
+            post = summary.get("postverify", {}) if isinstance(summary.get("postverify", {}), dict) else {}
+            pre_failed = int(pre.get("failed", 0) or 0)
+            post_failed = int(post.get("failed", 0) or 0)
+            if pre_failed > 0 or post_failed > 0:
+                streak += 1
+                continue
+            break
+        return streak
+
     def _record_ai_toggle_audit(
         self,
         *,
@@ -1865,7 +1906,7 @@ class PlaywrightPublisher:
     def _persist_ai_toggle_report(self, post_url: str = "") -> None:
         """AI 토글 리포트를 파일로 저장한다."""
         try:
-            report_dir = Path("data/ai_toggle")
+            report_dir = self._ai_toggle_report_dir()
             report_dir.mkdir(parents=True, exist_ok=True)
             report = self._build_ai_toggle_report(post_url)
             target = report_dir / "last_report.json"
@@ -1920,6 +1961,17 @@ class PlaywrightPublisher:
                     failed=int(post.get("failed", 0)),
                 )
             )
+        current_failed = False
+        if isinstance(pre, dict) and int(pre.get("failed", 0)) > 0:
+            current_failed = True
+        if isinstance(post, dict) and int(post.get("failed", 0)) > 0:
+            current_failed = True
+        if current_failed:
+            previous_streak = self._count_recent_ai_toggle_failure_streak(max_scan=30)
+            streak = previous_streak + 1
+            lines.append(f"- recent_failure_streak: {streak}")
+            if streak >= self._ai_toggle_alert_streak:
+                lines.insert(0, f"🚨 연속 AI 토글 실패 {streak}회 (임계값 {self._ai_toggle_alert_streak})")
         lines.extend(details[:10])
         try:
             notifier.send_message_background("\n".join(lines), disable_notification=False)
