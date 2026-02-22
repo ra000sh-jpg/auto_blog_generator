@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections import deque
@@ -87,6 +88,52 @@ class CpuHysteresisMonitor:
             )
 
         return self._generation_enabled, float(avg_percent)
+
+    # ------------------------------------------------------------------
+    # Mid-generation interrupt watchdog
+    # ------------------------------------------------------------------
+
+    def make_interrupt_event(self) -> asyncio.Event:
+        """새로운 인터럽트 이벤트를 만들어 반환한다.
+
+        Generator 루프가 이 이벤트를 폴링하다가 set 되면 즉시 루프를 탈출한다.
+        매 `_run_draft_prefetch()` 호출마다 새 이벤트를 생성해 사용한다.
+        """
+        return asyncio.Event()
+
+    async def run_interrupt_watchdog(
+        self,
+        interrupt_event: asyncio.Event,
+        poll_interval_seconds: float = 3.0,
+    ) -> None:
+        """CPU를 짧은 주기로 폴링하다 급등 시 interrupt_event를 set 한다.
+
+        이 코루틴은 `asyncio.create_task()`로 백그라운드에서 실행한다.
+        interrupt_event가 이미 set 되어 있으면 즉시 반환한다.
+
+        Args:
+            interrupt_event: Generator 루프가 감시하는 asyncio.Event.
+            poll_interval_seconds: CPU 폴링 간격(초). 기본 3초.
+        """
+        while not interrupt_event.is_set():
+            await asyncio.sleep(poll_interval_seconds)
+            if interrupt_event.is_set():
+                break
+            sample = self._sampler()
+            if sample is None:
+                continue
+            bounded = max(0.0, min(100.0, float(sample)))
+            self._samples.append(bounded)
+            avg_percent = mean(self._samples)
+            if avg_percent >= self.stop_threshold_percent:
+                logger.info(
+                    "CPU watchdog triggered interrupt (avg=%.1f%% >= stop_threshold=%.1f%%)",
+                    avg_percent,
+                    self.stop_threshold_percent,
+                )
+                interrupt_event.set()
+                self._generation_enabled = False
+                break
 
     def _sample_cpu_percent(self) -> Optional[float]:
         """CPU 사용률 샘플을 가져온다."""

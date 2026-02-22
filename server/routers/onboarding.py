@@ -147,7 +147,6 @@ class ScheduleSetupResponse(BaseModel):
 
 
 class TelegramTestRequest(BaseModel):
-class TelegramTestRequest(BaseModel):
     """Step4 텔레그램 테스트 요청."""
 
     bot_token: str

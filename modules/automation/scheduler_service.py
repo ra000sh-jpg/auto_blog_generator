@@ -444,7 +444,11 @@ class SchedulerService:
             self._publish_wait_until_utc = datetime.now(timezone.utc) + timedelta(minutes=10)
 
     async def _run_draft_prefetch(self) -> None:
-        """리소스 여유 시 오늘 목표치만큼 초안을 선생성한다."""
+        """리소스 여유 시 오늘 목표치만큼 초안을 선생성한다.
+
+        LLM 다중 호출 도중 CPU 가 급등하면 watchdog 태스크가 interrupt_event 를
+        set 하고, for 루프는 매 반복마다 이를 확인해 즉시(mid-generation) 탈출한다.
+        """
         if not self.pipeline_service:
             return
 
@@ -474,15 +478,47 @@ class SchedulerService:
             ready_count,
             target_buffer,
         )
+
+        # mid-generation 인터럽트를 위한 이벤트 + watchdog 태스크 시작
+        interrupt_event = self._cpu_monitor.make_interrupt_event()
+        watchdog_task = asyncio.create_task(
+            self._cpu_monitor.run_interrupt_watchdog(interrupt_event),
+            name="cpu-interrupt-watchdog",
+        )
+
         prepared_count = 0
-        for _ in range(needed):
-            if not self._has_resource_headroom():
-                break
-            prepared = await self._prepare_next_available_job()
-            if not prepared:
-                break
-            prepared_count += 1
-            await asyncio.sleep(0.3)
+        try:
+            for _ in range(needed):
+                # watchdog 가 CPU 급등을 감지하면 즉시 루프 탈출
+                if interrupt_event.is_set():
+                    logger.info(
+                        "Draft prefetch interrupted by CPU watchdog "
+                        "(prepared=%d, needed=%d)",
+                        prepared_count,
+                        needed,
+                    )
+                    break
+                if not self._has_resource_headroom():
+                    logger.info(
+                        "Draft prefetch stopped: resource headroom lost "
+                        "(prepared=%d, needed=%d)",
+                        prepared_count,
+                        needed,
+                    )
+                    break
+                prepared = await self._prepare_next_available_job()
+                if not prepared:
+                    break
+                prepared_count += 1
+                await asyncio.sleep(0.3)
+        finally:
+            # watchdog 정리: 루프가 끝나면 이벤트를 set 해 watchdog 코루틴도 종료
+            interrupt_event.set()
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
 
         logger.info("Draft prefetch done (prepared=%d, needed=%d)", prepared_count, needed)
 
@@ -576,23 +612,51 @@ class SchedulerService:
             },
         )
 
+    def _get_publish_anchor_hours(self) -> tuple:
+        """발행 앵커 시간대를 반환한다.
+
+        DB system_settings 의 ``publish_anchor_hours`` 키에 쉼표 구분 정수 목록을
+        저장하면 런타임에 반영된다.  예) ``"9,12,19"``
+        설정이 없거나 파싱에 실패하면 클래스 상수 ``PUBLISH_ANCHOR_HOURS`` 를 사용한다.
+        """
+        if self.job_store:
+            raw = self.job_store.get_system_setting("publish_anchor_hours", "")
+            if raw and raw.strip():
+                try:
+                    hours = tuple(
+                        int(h.strip())
+                        for h in raw.split(",")
+                        if h.strip().isdigit()
+                    )
+                    if hours:
+                        return hours
+                except Exception:
+                    pass
+        return self.PUBLISH_ANCHOR_HOURS
+
     def _build_daily_publish_slots(self, target_date: date, daily_target: Optional[int] = None) -> List[datetime]:
-        """출/점/퇴 중심 가중 분포로 하루 발행 슬롯을 만든다."""
+        """출/점/퇴 중심 가우시안 분포로 하루 발행 슬롯을 만든다.
+
+        앵커 시간(기본 9·12·19시)마다 σ=20분 정규분포 지터(jitter)를 더해
+        자연스러운 발행 시간대를 구성한다.  앵커 시간은 DB 설정
+        ``publish_anchor_hours`` 에서 동적으로 읽어온다.
+        """
         local_tz = self._get_now_local().tzinfo
         if local_tz is None:
             local_tz = timezone(timedelta(hours=9))
 
+        anchor_hours = self._get_publish_anchor_hours()
         rng = self._build_rng_for_date(target_date)
         candidates: List[datetime] = []
         resolved_target = max(1, int(daily_target or self.daily_posts_target))
 
         for index in range(resolved_target):
-            if index < len(self.PUBLISH_ANCHOR_HOURS):
-                base_hour = self.PUBLISH_ANCHOR_HOURS[index]
+            if index < len(anchor_hours):
+                base_hour = anchor_hours[index]
             else:
                 base_hour = rng.choices(
-                    population=list(self.PUBLISH_ANCHOR_HOURS),
-                    weights=[0.45, 0.35, 0.20],
+                    population=list(anchor_hours),
+                    weights=[0.45, 0.35, 0.20][: len(anchor_hours)],
                     k=1,
                 )[0]
 
@@ -601,8 +665,9 @@ class SchedulerService:
                 time_obj(hour=base_hour, minute=0),
                 tzinfo=local_tz,
             )
-            jitter_minutes = int(rng.gauss(0, 25))
-            jitter_minutes = max(-45, min(55, jitter_minutes))
+            # σ=20분 가우시안 지터, ±40분 클램프 (기존 σ=25, ±45→55 에서 조정)
+            jitter_minutes = int(rng.gauss(0, 20))
+            jitter_minutes = max(-40, min(40, jitter_minutes))
             slot = base_time + timedelta(minutes=jitter_minutes)
 
             start_bound = datetime.combine(
