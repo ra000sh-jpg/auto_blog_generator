@@ -286,6 +286,72 @@ def test_onboarding_wizard_roundtrip(
     assert final_payload["telegram_configured"] is True
 
 
+def test_onboarding_persona_mbti_blending_optional(client: TestClient):
+    """MBTI 미입력 시 질문지만 사용하고, 입력 시 보조 혼합되어야 한다."""
+    # 1) MBTI 비활성: 질문지 점수 그대로 반영
+    disabled_response = client.post(
+        "/api/onboarding/persona",
+        json={
+            "persona_id": "P1",
+            "identity": "테스터",
+            "target_audience": "일반 독자",
+            "tone_hint": "담백한 설명체",
+            "interests": ["커피"],
+            "mbti": "ENFP",
+            "mbti_enabled": False,
+            "mbti_confidence": 80,
+            "age_group": "30대",
+            "gender": "비공개",
+            "structure_score": 61,
+            "evidence_score": 48,
+            "distance_score": 44,
+            "criticism_score": 53,
+            "density_score": 52,
+            "style_strength": 40,
+        },
+    )
+    assert disabled_response.status_code == 200
+    disabled_payload = disabled_response.json()
+    disabled_voice = disabled_payload["voice_profile"]
+    assert disabled_voice["mbti_enabled"] is False
+    assert disabled_voice["mbti"] == ""
+    assert disabled_voice["scores"]["structure"] == 61
+    assert disabled_voice["scores"]["evidence"] == 48
+    assert disabled_voice["blending"]["mbti_weight"] == 0.0
+
+    # 2) MBTI 활성: 질문지 + MBTI prior 혼합
+    enabled_response = client.post(
+        "/api/onboarding/persona",
+        json={
+            "persona_id": "P1",
+            "identity": "테스터",
+            "target_audience": "일반 독자",
+            "tone_hint": "담백한 설명체",
+            "interests": ["커피"],
+            "mbti": "ENTJ",
+            "mbti_enabled": True,
+            "mbti_confidence": 100,
+            "age_group": "30대",
+            "gender": "비공개",
+            "structure_score": 50,
+            "evidence_score": 50,
+            "distance_score": 50,
+            "criticism_score": 50,
+            "density_score": 50,
+            "style_strength": 40,
+        },
+    )
+    assert enabled_response.status_code == 200
+    enabled_payload = enabled_response.json()
+    enabled_voice = enabled_payload["voice_profile"]
+    assert enabled_voice["mbti_enabled"] is True
+    assert enabled_voice["mbti"] == "ENTJ"
+    assert enabled_voice["blending"]["mbti_applied"] is True
+    assert enabled_voice["blending"]["mbti_weight"] >= 0.1
+    assert enabled_voice["scores"]["structure"] > 50
+    assert enabled_voice["scores"]["criticism"] > 50
+
+
 def test_onboarding_schedule_clamps_idea_vault_quota(client: TestClient):
     """Idea Vault 할당량은 0~daily_posts_target 범위로 안전 보정해야 한다."""
     response = client.post(

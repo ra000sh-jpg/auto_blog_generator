@@ -496,7 +496,9 @@ export function DashboardRenewal() {
         criticism_score: criticismScore,
         density_score: densityScore,
         style_strength: styleStrength,
-        mbti: "ENFP",
+        mbti: "",
+        mbti_enabled: false,
+        mbti_confidence: 0,
         age_group: "30대",
         gender: "남성",
       });

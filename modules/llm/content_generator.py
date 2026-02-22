@@ -583,6 +583,50 @@ class ContentGenerator:
             lines.append(f"- scores: {json.dumps(scores, ensure_ascii=False)}")
         return "\n".join(lines) if lines else "- style_strength: 40"
 
+    def _extract_h2_headings(self, content: str) -> List[str]:
+        """본문의 H2 제목 목록을 추출한다."""
+        headings: List[str] = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                headings.append(stripped)
+        return headings
+
+    def _extract_urls(self, content: str) -> List[str]:
+        """본문 내 URL 목록을 추출한다."""
+        return re.findall(r"https?://[^\s)]+", content)
+
+    def _extract_numeric_tokens(self, content: str) -> List[str]:
+        """본문 내 주요 숫자 토큰을 추출한다."""
+        raw_tokens = re.findall(r"\b\d[\d,]*(?:\.\d+)?(?:%|원|달러|명|개|회|배|점|시간|일|년|월)?\b", content)
+        # 순서 보존 중복 제거
+        deduped: List[str] = []
+        for token in raw_tokens:
+            if token not in deduped:
+                deduped.append(token)
+        return deduped
+
+    def _is_voice_rewrite_safe(self, raw_content: str, rewritten: str) -> Tuple[bool, str]:
+        """Voice rewrite 결과가 정보 훼손 없이 안전한지 검증한다."""
+        raw_h2 = self._extract_h2_headings(raw_content)
+        rewritten_h2 = self._extract_h2_headings(rewritten)
+        if raw_h2 and raw_h2 != rewritten_h2:
+            return False, "h2_structure_changed"
+
+        raw_urls = self._extract_urls(raw_content)
+        rewritten_urls = self._extract_urls(rewritten)
+        if raw_urls and set(raw_urls) != set(rewritten_urls):
+            return False, "url_set_changed"
+
+        raw_numbers = self._extract_numeric_tokens(raw_content)
+        rewritten_numbers = self._extract_numeric_tokens(rewritten)
+        if raw_numbers:
+            missing_numbers = [token for token in raw_numbers if token not in rewritten_numbers]
+            if missing_numbers:
+                return False, f"numeric_token_missing:{','.join(missing_numbers[:5])}"
+
+        return True, "ok"
+
     async def _apply_voice_rewrite(
         self,
         *,
@@ -635,10 +679,17 @@ class ContentGenerator:
         raw_length = len(raw_content)
         rewritten_length = len(rewritten)
         ratio = rewritten_length / max(raw_length, 1)
-        if ratio < 0.8 or ratio > 1.2:
+        if ratio < 0.9 or ratio > 1.1:
             logger.warning(
                 "Voice rewrite length drift detected, fallback raw (ratio=%.2f)",
                 ratio,
+            )
+            return raw_content
+        safe, reason = self._is_voice_rewrite_safe(raw_content, rewritten)
+        if not safe:
+            logger.warning(
+                "Voice rewrite semantic drift detected, fallback raw (reason=%s)",
+                reason,
             )
             return raw_content
         return rewritten

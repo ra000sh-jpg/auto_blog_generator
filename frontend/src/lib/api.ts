@@ -147,6 +147,8 @@ export type PersonaLabPayload = {
   tone_hint: string;
   interests: string[];
   mbti: string;
+  mbti_enabled: boolean;
+  mbti_confidence: number;
   age_group: string;
   gender: string;
   structure_score: number;

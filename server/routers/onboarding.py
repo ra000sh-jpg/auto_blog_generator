@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import httpx
 
@@ -44,6 +44,8 @@ class PersonaLabRequest(BaseModel):
     tone_hint: str = ""
     interests: List[str] = Field(default_factory=list)
     mbti: str = ""
+    mbti_enabled: bool = False
+    mbti_confidence: int = Field(default=60, ge=0, le=100)
     age_group: str = ""
     gender: str = ""
     structure_score: int = Field(ge=0, le=100)
@@ -199,6 +201,114 @@ _MBTI_CATEGORY_MAP: Dict[str, List[str]] = {
     "ESFP": ["패션/뷰티", "맛집 투어", "일상 기록"],
 }
 
+_VALID_MBTI_CODES = set(_MBTI_CATEGORY_MAP.keys())
+_MBTI_LETTER_DELTAS: Dict[str, Dict[str, int]] = {
+    "E": {"distance": 10, "density": -2},
+    "I": {"distance": -10, "density": 2},
+    "S": {"evidence": 10, "density": 4},
+    "N": {"evidence": -6, "density": 8},
+    "T": {"criticism": 10},
+    "F": {"criticism": -10},
+    "J": {"structure": 10, "density": 4},
+    "P": {"structure": -10, "density": -4},
+}
+
+
+def _clamp_score(value: int) -> int:
+    """점수를 0~100 범위로 제한한다."""
+    return max(0, min(100, int(value)))
+
+
+def _normalize_mbti(raw_value: str) -> str:
+    """MBTI 코드를 표준화한다."""
+    normalized = str(raw_value or "").strip().upper()
+    return normalized if normalized in _VALID_MBTI_CODES else ""
+
+
+def _calculate_mbti_weight(confidence: int) -> float:
+    """MBTI 보정 가중치(10~20%)를 계산한다."""
+    normalized_confidence = max(0, min(100, int(confidence)))
+    return 0.10 + (normalized_confidence / 100.0) * 0.10
+
+
+def _build_mbti_prior_scores(mbti_code: str) -> Dict[str, int]:
+    """MBTI로부터 5차원 prior 점수를 계산한다."""
+    base = {
+        "structure": 50,
+        "evidence": 50,
+        "distance": 50,
+        "criticism": 50,
+        "density": 50,
+    }
+    for letter in mbti_code:
+        for dimension, delta in _MBTI_LETTER_DELTAS.get(letter, {}).items():
+            base[dimension] = _clamp_score(base[dimension] + delta)
+    return base
+
+
+def _blend_scores_with_mbti(
+    questionnaire_scores: Dict[str, int],
+    *,
+    mbti_code: str,
+    mbti_enabled: bool,
+    mbti_confidence: int,
+) -> Tuple[Dict[str, int], Dict[str, object]]:
+    """질문지 점수와 MBTI prior를 혼합한다."""
+    base_scores = {
+        key: _clamp_score(value)
+        for key, value in questionnaire_scores.items()
+    }
+    if not mbti_enabled:
+        return base_scores, {
+            "mbti_applied": False,
+            "questionnaire_weight": 1.0,
+            "mbti_weight": 0.0,
+            "mbti_confidence": 0,
+            "reason": "disabled",
+            "questionnaire_scores": base_scores,
+            "mbti_prior_scores": {},
+            "final_scores": base_scores,
+            "mbti_deltas": {key: 0 for key in base_scores.keys()},
+        }
+
+    normalized_mbti = _normalize_mbti(mbti_code)
+    if not normalized_mbti:
+        return base_scores, {
+            "mbti_applied": False,
+            "questionnaire_weight": 1.0,
+            "mbti_weight": 0.0,
+            "mbti_confidence": 0,
+            "reason": "invalid_or_empty_mbti",
+            "questionnaire_scores": base_scores,
+            "mbti_prior_scores": {},
+            "final_scores": base_scores,
+            "mbti_deltas": {key: 0 for key in base_scores.keys()},
+        }
+
+    mbti_weight = _calculate_mbti_weight(mbti_confidence)
+    questionnaire_weight = 1.0 - mbti_weight
+    mbti_prior = _build_mbti_prior_scores(normalized_mbti)
+
+    blended: Dict[str, int] = {}
+    for key, base_value in base_scores.items():
+        prior_value = mbti_prior.get(key, 50)
+        blended[key] = _clamp_score(round(base_value * questionnaire_weight + prior_value * mbti_weight))
+
+    return blended, {
+        "mbti_applied": True,
+        "questionnaire_weight": round(questionnaire_weight, 3),
+        "mbti_weight": round(mbti_weight, 3),
+        "mbti_confidence": max(0, min(100, int(mbti_confidence))),
+        "reason": "applied",
+        "questionnaire_scores": base_scores,
+        "mbti_prior_scores": mbti_prior,
+        "final_scores": blended,
+        "mbti_deltas": {
+            key: blended[key] - base_scores[key]
+            for key in blended.keys()
+        },
+    }
+
 def _recommend_categories(interests: List[str], mbti: str = "", age_group: str = "", gender: str = "") -> List[str]:
     """관심사 기반 카테고리 추천을 생성한다."""
     categories: List[str] = []
@@ -339,36 +449,50 @@ def _bucket_score(score: int, labels: List[str]) -> str:
 
 def _compile_voice_profile(request: PersonaLabRequest) -> Dict[str, object]:
     """슬라이더 점수를 Voice_Profile로 변환한다."""
-    structure_mode = "top_down" if request.structure_score >= 50 else "bottom_up"
-    evidence_mode = "objective" if request.evidence_score >= 50 else "subjective"
+    questionnaire_scores = {
+        "structure": request.structure_score,
+        "evidence": request.evidence_score,
+        "distance": request.distance_score,
+        "criticism": request.criticism_score,
+        "density": request.density_score,
+    }
+    final_scores, blending_meta = _blend_scores_with_mbti(
+        questionnaire_scores,
+        mbti_code=request.mbti,
+        mbti_enabled=request.mbti_enabled,
+        mbti_confidence=request.mbti_confidence,
+    )
+    mbti_applied = bool(blending_meta.get("mbti_applied", False))
+    normalized_mbti = _normalize_mbti(request.mbti) if mbti_applied else ""
+
+    structure_mode = "top_down" if final_scores["structure"] >= 50 else "bottom_up"
+    evidence_mode = "objective" if final_scores["evidence"] >= 50 else "subjective"
 
     return {
         "version": "v1",
-        "mbti": request.mbti,
+        "mbti": normalized_mbti,
+        "mbti_enabled": mbti_applied,
+        "mbti_confidence": int(blending_meta.get("mbti_confidence", 0)),
+        "blending": blending_meta,
         "age_group": request.age_group,
         "gender": request.gender,
         "structure": structure_mode,
         "evidence": evidence_mode,
         "distance": _bucket_score(
-            request.distance_score,
+            final_scores["distance"],
             ["authoritative", "peer", "inspiring"],
         ),
         "criticism": _bucket_score(
-            request.criticism_score,
+            final_scores["criticism"],
             ["avoidant", "mitigated", "direct"],
         ),
         "density": _bucket_score(
-            request.density_score,
+            final_scores["density"],
             ["light", "balanced", "dense"],
         ),
         "style_strength": request.style_strength,
-        "scores": {
-            "structure": request.structure_score,
-            "evidence": request.evidence_score,
-            "distance": request.distance_score,
-            "criticism": request.criticism_score,
-            "density": request.density_score,
-        },
+        "scores": final_scores,
+        "questionnaire_scores": questionnaire_scores,
     }
 
 
@@ -503,7 +627,7 @@ def save_persona_lab(
 
     recommended_categories = _recommend_categories(
         interests,
-        mbti=request.mbti,
+        mbti=request.mbti if bool(voice_profile.get("mbti_enabled")) else "",
         age_group=request.age_group,
         gender=request.gender
     )

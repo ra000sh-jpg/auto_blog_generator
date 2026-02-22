@@ -132,6 +132,23 @@ def test_content_generator_returns_valid_structure():
     assert result.llm_token_usage["quality_step"]["input_tokens"] > 0
 
 
+def test_voice_rewrite_falls_back_when_numeric_fact_changes():
+    """Voice 리라이트가 숫자 사실을 바꾸면 원문으로 폴백해야 한다."""
+    outputs = [
+        "# 테스트\n\n## 핵심 지표\n\n이번 달 전환율은 42% 입니다.\n",
+        "# 테스트\n\n## 핵심 지표\n\n이번 달 전환율은 42% 입니다.\n",
+        '{"score": 92, "issues": [], "summary": "좋음"}',
+        "# 테스트\n\n## 핵심 지표\n\n이번 달 전환율은 55% 입니다.\n",
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    generator = ContentGenerator(client=FakeClaudeClient(outputs))
+    result = asyncio.run(generator.generate(build_job("voice-guard-job")))
+
+    assert "42%" in result.final_content
+    assert "55%" not in result.final_content
+    assert result.voice_rewrite_applied is False
+
+
 def test_llm_generate_fn_compatible_with_pipeline(monkeypatch: pytest.MonkeyPatch):
     """PipelineService가 기대하는 결과 스키마를 반환하는지 검증한다."""
     import modules.llm as llm_module

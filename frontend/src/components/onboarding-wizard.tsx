@@ -125,7 +125,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const [identity, setIdentity] = useState("");
     const [toneHint, setToneHint] = useState("");
     const [interestsText, setInterestsText] = useState("");
-    const [mbti, setMbti] = useState("ENFP");
+    const [mbtiEnabled, setMbtiEnabled] = useState(false);
+    const [mbti, setMbti] = useState("");
+    const [mbtiConfidence, setMbtiConfidence] = useState(70);
     const [ageGroup, setAgeGroup] = useState("30대");
     const [gender, setGender] = useState("남성");
 
@@ -161,7 +163,15 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                 setInterestsText((response.interests || []).join(", "));
                 if (response.voice_profile) {
-                    setMbti((response.voice_profile.mbti as string) || "ENFP");
+                    const savedMbti = ((response.voice_profile.mbti as string) || "").trim().toUpperCase();
+                    const savedMbtiEnabled = Boolean(
+                        response.voice_profile.mbti_enabled && savedMbti,
+                    );
+                    setMbti(savedMbti);
+                    setMbtiEnabled(savedMbtiEnabled);
+                    setMbtiConfidence(
+                        Math.max(0, Math.min(100, Number(response.voice_profile.mbti_confidence ?? 70))),
+                    );
                     setAgeGroup((response.voice_profile.age_group as string) || "30대");
                     setGender((response.voice_profile.gender as string) || "남성");
                 }
@@ -211,6 +221,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         () => Math.max(0, dailyPostsTarget - ideaVaultDailyQuota),
         [dailyPostsTarget, ideaVaultDailyQuota],
     );
+
+    const mbtiWeightPercent = useMemo(() => {
+        if (!mbtiEnabled) return 0;
+        return Math.round(10 + (mbtiConfidence / 100) * 10);
+    }, [mbtiEnabled, mbtiConfidence]);
 
     async function handleVerifyKey(provider: string, key: string) {
         if (!key) return;
@@ -282,13 +297,21 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     async function handleSavePersonaStep() {
         setSaving(true);
         try {
+            const resolvedMbti = (mbti || "").trim().toUpperCase();
+            if (mbtiEnabled && !resolvedMbti) {
+                setStepMessage("MBTI 보정을 사용하려면 MBTI를 선택해주세요.");
+                setSaving(false);
+                return;
+            }
             await savePersonaLab({
                 persona_id: personaId,
                 identity,
                 target_audience: "일반 대중",
                 tone_hint: toneHint,
                 interests: parseCommaValues(interestsText),
-                mbti,
+                mbti: mbtiEnabled ? resolvedMbti : "",
+                mbti_enabled: mbtiEnabled,
+                mbti_confidence: mbtiEnabled ? mbtiConfidence : 0,
                 age_group: ageGroup,
                 gender,
                 structure_score: 50,
@@ -584,12 +607,51 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="font-semibold text-slate-800 block mb-1">MBTI</label>
-                                    <select value={mbti} onChange={(e) => setMbti(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2 bg-white">
-                                        {['ISTJ', 'ISFJ', 'INFJ', 'INTJ', 'ISTP', 'ISFP', 'INFP', 'INTP', 'ESTP', 'ESFP', 'ENFP', 'ENTP', 'ESTJ', 'ESFJ', 'ENFJ', 'ENTJ'].map(m => (
+                                    <label className="font-semibold text-slate-800 block mb-1">MBTI 보정 (선택)</label>
+                                    <label className="flex items-center gap-2 text-sm text-slate-600 mb-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={mbtiEnabled}
+                                            onChange={(e) => {
+                                                const enabled = e.target.checked;
+                                                setMbtiEnabled(enabled);
+                                                if (enabled && !mbti) {
+                                                    setMbti("ENFP");
+                                                }
+                                            }}
+                                        />
+                                        MBTI를 질문지 결과에 보조 반영
+                                    </label>
+                                    <select
+                                        value={mbti}
+                                        onChange={(e) => setMbti(e.target.value)}
+                                        disabled={!mbtiEnabled}
+                                        className="w-full rounded-xl border border-slate-300 px-4 py-2 bg-white disabled:bg-slate-100 disabled:text-slate-400"
+                                    >
+                                        <option value="">선택 안함</option>
+                                        {["ISTJ", "ISFJ", "INFJ", "INTJ", "ISTP", "ISFP", "INFP", "INTP", "ESTP", "ESFP", "ENFP", "ENTP", "ESTJ", "ESFJ", "ENFJ", "ENTJ"].map((m) => (
                                             <option key={m} value={m}>{m}</option>
                                         ))}
                                     </select>
+                                    {mbtiEnabled && (
+                                        <div className="mt-3">
+                                            <label className="text-xs text-slate-600 flex items-center justify-between">
+                                                MBTI 확신도
+                                                <span className="font-semibold text-indigo-700">{mbtiConfidence}</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={100}
+                                                value={mbtiConfidence}
+                                                onChange={(e) => setMbtiConfidence(Number(e.target.value))}
+                                                className="w-full accent-indigo-600"
+                                            />
+                                            <p className="text-[11px] text-slate-500 mt-1">
+                                                반영 비율: 질문지 {100 - mbtiWeightPercent}% + MBTI {mbtiWeightPercent}%
+                                            </p>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                             <div>
