@@ -28,6 +28,7 @@ data/test_automation.db-wal
 logs/
 data/
 config/
+dist/
 
 # 로컬 기획/핸드오프 문서(커밋 제외)
 HANDOFF_TO_CODEX*.md
