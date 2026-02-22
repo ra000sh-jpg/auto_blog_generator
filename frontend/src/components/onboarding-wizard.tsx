@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+    DEFAULT_FALLBACK_CATEGORY,
     completeOnboarding,
     fetchNaverConnectStatus,
     fetchOnboardingStatus,
@@ -11,6 +12,7 @@ import {
     saveRouterSettings,
     savePersonaLab,
     startNaverConnect,
+    verifyApiKey,
     type NaverConnectStatusResponse,
     type ScheduleAllocationItem,
 } from "@/lib/api";
@@ -46,7 +48,7 @@ function normalizeAllocations(
     const normalizedCategories = categories
         .map((value) => value.trim())
         .filter((value, index, list) => value.length > 0 && list.indexOf(value) === index);
-    const fallbackCategories = normalizedCategories.length > 0 ? normalizedCategories : ["다양한 생각"];
+    const fallbackCategories = normalizedCategories.length > 0 ? normalizedCategories : [DEFAULT_FALLBACK_CATEGORY];
 
     const existingMap = new Map(existingAllocations.map((item) => [item.category, item]));
     const rows: ScheduleAllocationItem[] = fallbackCategories.map((categoryName) => ({
@@ -110,32 +112,28 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         qwen: "", deepseek: "", gemini: "", openai: "", claude: "",
     });
     const [textApiMasks, setTextApiMasks] = useState<Record<string, string>>({});
-    const [imageApiKeys, _setImageApiKeys] = useState<Record<string, string>>({
+    const [imageApiKeys, setImageApiKeys] = useState<Record<string, string>>({
         pexels: "", together: "", fal: "", openai_image: "",
     });
     const [imageEngine, setImageEngine] = useState("pexels");
     const [imageEnabled, setImageEnabled] = useState(true);
     const [imagesPerPost, setImagesPerPost] = useState(1);
+    const [apiStatuses, setApiStatuses] = useState<Record<string, { valid: boolean; message: string; checking: boolean }>>({});
 
-    // Step 2: Naver & Blog Info
+    // Step 2: Persona Edit
+    const [personaId, setPersonaId] = useState("P1");
+    const [identity, setIdentity] = useState("");
+    const [toneHint, setToneHint] = useState("");
+    const [interestsText, setInterestsText] = useState("");
+    const [mbti, setMbti] = useState("ENFP");
+    const [ageGroup, setAgeGroup] = useState("30대");
+    const [gender, setGender] = useState("남성");
+
+    // Step 3: Naver & Blog Info
     const [naverStatus, setNaverStatus] = useState<NaverConnectStatusResponse | null>(null);
     const [naverConnecting, setNaverConnecting] = useState(false);
 
     const [categoriesText, setCategoriesText] = useState("");
-
-
-    // Step 3: Persona Edit
-    const [personaId, setPersonaId] = useState("P1");
-    const [identity, setIdentity] = useState("");
-    const [targetAudience, _setTargetAudience] = useState("");
-    const [toneHint, setToneHint] = useState("");
-    const [interestsText, setInterestsText] = useState("");
-    const [structureScore, _setStructureScore] = useState(50);
-    const [evidenceScore, _setEvidenceScore] = useState(50);
-    const [distanceScore, _setDistanceScore] = useState(50);
-    const [criticismScore, _setCriticismScore] = useState(50);
-    const [densityScore, _setDensityScore] = useState(50);
-    const [styleStrength, _setStyleStrength] = useState(40);
 
     // Step 4: Schedule
     const [dailyPostsTarget, setDailyPostsTarget] = useState(3);
@@ -156,12 +154,17 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                 setPersonaId(response.persona_id || "P1");
 
-                // Ensure "다양한 생각들" category exists
+                // fallback category가 항상 포함되도록 보장
                 const cats = response.categories || [];
-                if (!cats.includes("다양한 생각들")) cats.push("다양한 생각들");
+                if (!cats.includes(DEFAULT_FALLBACK_CATEGORY)) cats.push(DEFAULT_FALLBACK_CATEGORY);
                 setCategoriesText(cats.join(", "));
 
                 setInterestsText((response.interests || []).join(", "));
+                if (response.voice_profile) {
+                    setMbti((response.voice_profile.mbti as string) || "ENFP");
+                    setAgeGroup((response.voice_profile.age_group as string) || "30대");
+                    setGender((response.voice_profile.gender as string) || "남성");
+                }
 
                 const resolvedTarget = Math.max(3, Math.min(5, Number(response.daily_posts_target || 3)));
                 const resolvedIdeaVaultQuota = Math.max(0, Math.min(resolvedTarget, Number(response.idea_vault_daily_quota ?? Math.min(2, resolvedTarget))));
@@ -194,8 +197,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     const stepTitles = [
         "1. API 키 설정",
-        "2. 네이버 & 주제 설정",
-        "3. 페르소나 설계",
+        "2. 페르소나 설계",
+        "3. 네이버 & 주제 설정",
         "4. 스케줄 완성",
     ];
 
@@ -209,6 +212,17 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         [dailyPostsTarget, ideaVaultDailyQuota],
     );
 
+    async function handleVerifyKey(provider: string, key: string) {
+        if (!key) return;
+        setApiStatuses((prev) => ({ ...prev, [provider]: { valid: false, message: "", checking: true } }));
+        try {
+            const res = await verifyApiKey({ provider, api_key: key });
+            setApiStatuses((prev) => ({ ...prev, [provider]: { valid: res.valid, message: res.message, checking: false } }));
+        } catch {
+            setApiStatuses((prev) => ({ ...prev, [provider]: { valid: false, message: "검증 실패", checking: false } }));
+        }
+    }
+
     async function handleSaveRouterStep() {
         setRouterSaving(true);
         setRouterMessage("");
@@ -221,7 +235,6 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 image_enabled: imageEnabled,
                 images_per_post: imagesPerPost,
             });
-            setTextApiMasks(saved.settings.text_api_keys_masked || {});
             setTextApiMasks(saved.settings.text_api_keys_masked || {});
             setStep(1);
         } catch (error) {
@@ -247,18 +260,18 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     async function handleSaveCategoryStep() {
         setSaving(true);
         try {
-            // 강제 포함로직
+            // fallback category 강제 포함 로직
             let modifiedCatText = categoriesText;
-            if (!modifiedCatText.includes("다양한 생각들")) {
-                modifiedCatText = modifiedCatText ? modifiedCatText + ", 다양한 생각들" : "다양한 생각들";
+            if (!modifiedCatText.includes(DEFAULT_FALLBACK_CATEGORY)) {
+                modifiedCatText = modifiedCatText ? modifiedCatText + `, ${DEFAULT_FALLBACK_CATEGORY}` : DEFAULT_FALLBACK_CATEGORY;
             }
 
             await saveOnboardingCategories({
                 categories: parseCommaValues(modifiedCatText),
-                fallback_category: "다양한 생각들",
+                fallback_category: DEFAULT_FALLBACK_CATEGORY,
             });
             setCategoriesText(modifiedCatText);
-            setStep(2);
+            setStep(3);
         } catch (error) {
             setStepMessage(error instanceof Error ? error.message : "저장 실패");
         } finally {
@@ -272,17 +285,20 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             await savePersonaLab({
                 persona_id: personaId,
                 identity,
-                target_audience: targetAudience,
+                target_audience: "일반 대중",
                 tone_hint: toneHint,
                 interests: parseCommaValues(interestsText),
-                structure_score: structureScore,
-                evidence_score: evidenceScore,
-                distance_score: distanceScore,
-                criticism_score: criticismScore,
-                density_score: densityScore,
-                style_strength: styleStrength,
+                mbti,
+                age_group: ageGroup,
+                gender,
+                structure_score: 50,
+                evidence_score: 50,
+                distance_score: 50,
+                criticism_score: 50,
+                density_score: 50,
+                style_strength: 40,
             });
-            setStep(3);
+            setStep(2);
         } catch (error) {
             setStepMessage(error instanceof Error ? error.message : "저장 실패");
         } finally {
@@ -364,16 +380,137 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         <div className="grid gap-4 sm:grid-cols-2">
                             {["qwen", "deepseek", "gemini", "openai"].map((key) => (
                                 <div key={key}>
-                                    <label className="text-sm font-semibold uppercase">{key}</label>
-                                    <input
-                                        type="password"
-                                        value={textApiKeys[key] || ""}
-                                        onChange={(e) => setTextApiKeys(prev => ({ ...prev, [key]: e.target.value }))}
-                                        placeholder={textApiMasks[key] ? `${textApiMasks[key]} (이미 등록됨)` : "API 키 입력"}
-                                        className="mt-1 w-full rounded-xl border border-slate-300 px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 transition-all"
-                                    />
+                                    <label className="flex items-center gap-2 text-sm font-semibold uppercase">
+                                        {key}
+                                        {key === 'qwen' || key === 'deepseek' || key === 'openai' || key === 'claude' ? (
+                                            <span className="bg-indigo-100 text-indigo-700 font-bold px-2 py-0.5 rounded-full text-xs">필수/유료</span>
+                                        ) : (
+                                            <span className="bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded-full text-xs">무료가능</span>
+                                        )}
+                                        <a
+                                            href={
+                                                key === 'qwen' ? 'https://dash.aliyun.com/' :
+                                                    key === 'deepseek' ? 'https://platform.deepseek.com/' :
+                                                        key === 'gemini' ? 'https://aistudio.google.com/' :
+                                                            key === 'openai' ? 'https://platform.openai.com/' :
+                                                                key === 'claude' ? 'https://console.anthropic.com/' : '#'
+                                            }
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="ml-auto text-xs text-blue-500 hover:underline"
+                                        >
+                                            키 발급 →
+                                        </a>
+                                    </label>
+                                    <div className="relative mt-1">
+                                        <input
+                                            type="password"
+                                            value={textApiKeys[key] || ""}
+                                            onChange={(e) => setTextApiKeys(prev => ({ ...prev, [key]: e.target.value }))}
+                                            onBlur={(e) => handleVerifyKey(key, e.target.value)}
+                                            placeholder={textApiMasks[key] ? `${textApiMasks[key]} (이미 등록됨)` : "API 키 입력"}
+                                            className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 transition-all pr-12"
+                                        />
+                                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                                            {apiStatuses[key]?.checking ? "⏳" : apiStatuses[key]?.valid ? "✅" : apiStatuses[key]?.message ? "❌" : ""}
+                                        </div>
+                                    </div>
+                                    {apiStatuses[key]?.message && !apiStatuses[key].valid && (
+                                        <p className="text-red-500 text-xs mt-1">{apiStatuses[key].message}</p>
+                                    )}
                                 </div>
                             ))}
+                        </div>
+
+                        {/* 이미지 설정 섹션 */}
+                        <div className="border-t border-slate-200 pt-6 space-y-4">
+                            <div>
+                                <h3 className="text-base font-bold text-slate-800">이미지 설정 (선택사항)</h3>
+                                <p className="text-sm text-slate-500 mt-1">포스팅에 자동으로 이미지를 삽입할 경우 설정합니다.</p>
+                            </div>
+
+                            {/* 이미지 엔진 선택 */}
+                            <div>
+                                <label className="text-sm font-semibold text-slate-700 block mb-2">이미지 소스 전략</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        { value: "pexels", label: "무료 스톡만", desc: "Pexels 무료 사진" },
+                                        { value: "mixed", label: "혼합 (권장)", desc: "스톡 + AI 교대" },
+                                        { value: "ai_only", label: "AI 생성만", desc: "Together/Fal" },
+                                    ].map((opt) => (
+                                        <button
+                                            key={opt.value}
+                                            type="button"
+                                            onClick={() => setImageEngine(opt.value)}
+                                            className={`p-3 rounded-xl border-2 text-left transition-all ${imageEngine === opt.value ? "border-indigo-500 bg-indigo-50" : "border-slate-200 bg-white hover:border-slate-300"}`}
+                                        >
+                                            <div className="font-semibold text-xs text-slate-800">{opt.label}</div>
+                                            <div className="text-xs text-slate-500 mt-0.5">{opt.desc}</div>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* 조건부: pexels 또는 mixed 선택 시 Pexels 키 입력 */}
+                            {(imageEngine === "pexels" || imageEngine === "mixed") && (
+                                <div>
+                                    <label className="flex items-center gap-2 text-sm font-semibold">
+                                        PEXELS API KEY
+                                        <span className="bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded-full text-xs">무료</span>
+                                        <a href="https://www.pexels.com/api/" target="_blank" rel="noreferrer" className="ml-auto text-xs text-blue-500 hover:underline">키 발급 →</a>
+                                    </label>
+                                    <div className="relative mt-1">
+                                        <input
+                                            type="password"
+                                            value={imageApiKeys["pexels"] || ""}
+                                            onChange={(e) => setImageApiKeys(prev => ({ ...prev, pexels: e.target.value }))}
+                                            onBlur={(e) => handleVerifyKey("pexels", e.target.value)}
+                                            placeholder="Pexels API 키 입력"
+                                            className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 transition-all pr-12"
+                                        />
+                                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                                            {apiStatuses["pexels"]?.checking ? "⏳" : apiStatuses["pexels"]?.valid ? "✅" : apiStatuses["pexels"]?.message ? "❌" : ""}
+                                        </div>
+                                    </div>
+                                    {apiStatuses["pexels"]?.message && !apiStatuses["pexels"].valid && (
+                                        <p className="text-red-500 text-xs mt-1">{apiStatuses["pexels"].message}</p>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* 조건부: mixed 또는 ai_only 선택 시 AI 이미지 키 입력 */}
+                            {(imageEngine === "mixed" || imageEngine === "ai_only") && (
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                    {[
+                                        { key: "fal", label: "FAL API KEY", href: "https://fal.ai/", badge: "유료" },
+                                        { key: "together", label: "TOGETHER API KEY", href: "https://www.together.ai/", badge: "무료가능" },
+                                    ].map(({ key, label, href, badge }) => (
+                                        <div key={key}>
+                                            <label className="flex items-center gap-2 text-sm font-semibold">
+                                                {label}
+                                                <span className={`font-bold px-2 py-0.5 rounded-full text-xs ${badge === "무료가능" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{badge}</span>
+                                                <a href={href} target="_blank" rel="noreferrer" className="ml-auto text-xs text-blue-500 hover:underline">키 발급 →</a>
+                                            </label>
+                                            <div className="relative mt-1">
+                                                <input
+                                                    type="password"
+                                                    value={imageApiKeys[key] || ""}
+                                                    onChange={(e) => setImageApiKeys(prev => ({ ...prev, [key]: e.target.value }))}
+                                                    onBlur={(e) => handleVerifyKey(key, e.target.value)}
+                                                    placeholder={`${label} 입력`}
+                                                    className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 transition-all pr-12"
+                                                />
+                                                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                                                    {apiStatuses[key]?.checking ? "⏳" : apiStatuses[key]?.valid ? "✅" : apiStatuses[key]?.message ? "❌" : ""}
+                                                </div>
+                                            </div>
+                                            {apiStatuses[key]?.message && !apiStatuses[key].valid && (
+                                                <p className="text-red-500 text-xs mt-1">{apiStatuses[key].message}</p>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
                         <div className="flex justify-end pt-4">
@@ -385,9 +522,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     </div>
                 )}
 
-                {step === 1 && (
+                {step === 2 && (
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
-                        <h2 className="text-xl font-bold">2단계. 네이버 로그인 & 카테고리 (Naver 연동)</h2>
+                        <h2 className="text-xl font-bold">3단계. 네이버 로그인 & 카테고리 (Naver 연동)</h2>
                         <p className="text-sm text-slate-600">포스팅을 업로드 할 네이버와 연결하고, 블로그 카테고리를 설정해주세요.</p>
 
                         <div className="bg-indigo-50/50 p-6 rounded-2xl border border-indigo-100 flex items-center justify-between">
@@ -410,11 +547,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500"
                                 placeholder="카테고리를 입력해주세요"
                             />
-                            <p className="text-sm text-indigo-600 mt-2">✨ <b>다양한 생각들</b> 카테고리는 다양한 주제의 글을 모으기 위해 필수적으로 자동 추가됩니다. 블로그에도 <b>다양한 생각들</b> 카테고리를 꼭 하나 만들어주세요!</p>
+                            <p className="text-sm text-indigo-600 mt-2">✨ <b>{DEFAULT_FALLBACK_CATEGORY}</b> 카테고리는 다양한 주제의 글을 모으기 위해 필수적으로 자동 추가됩니다. 블로그에도 <b>{DEFAULT_FALLBACK_CATEGORY}</b> 카테고리를 꼭 하나 만들어주세요!</p>
                         </div>
 
                         <div className="flex justify-between pt-4">
-                            <button onClick={() => setStep(0)} className="text-slate-500 font-semibold px-4 py-2 hover:bg-slate-100 rounded-lg transition-colors">← 이전</button>
+                            <button onClick={() => setStep(1)} className="text-slate-500 font-semibold px-4 py-2 hover:bg-slate-100 rounded-lg transition-colors">← 이전</button>
                             <button onClick={handleSaveCategoryStep} disabled={saving} className="bg-gradient-to-r from-indigo-600 to-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-md hover:shadow-lg transition-all active:scale-95 text-lg">
                                 {saving ? "저장 중..." : "다음 단계로 →"}
                             </button>
@@ -422,12 +559,39 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     </div>
                 )}
 
-                {step === 2 && (
+                {step === 1 && (
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
-                        <h2 className="text-xl font-bold">3단계. 나만의 AI 페르소나 설계</h2>
-                        <p className="text-sm text-slate-600">블로그를 대신 작성해줄 AI의 직업, 성격, 말투를 세밀하게 설정합니다.</p>
+                        <h2 className="text-xl font-bold">2단계. 나만의 AI 페르소나 설계</h2>
+                        <p className="text-sm text-slate-600">블로그를 대신 작성해줄 AI의 직업, 성격, 성향을 세밀하게 설정합니다.</p>
 
                         <div className="space-y-4">
+                            <div className="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label className="font-semibold text-slate-800 block mb-1">성별</label>
+                                    <select value={gender} onChange={(e) => setGender(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2 bg-white">
+                                        <option value="남성">남성</option>
+                                        <option value="여성">여성</option>
+                                        <option value="비공개">비공개</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="font-semibold text-slate-800 block mb-1">연령대</label>
+                                    <select value={ageGroup} onChange={(e) => setAgeGroup(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2 bg-white">
+                                        <option value="20대">20대</option>
+                                        <option value="30대">30대</option>
+                                        <option value="40대">40대</option>
+                                        <option value="50대 이상">50대 이상</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="font-semibold text-slate-800 block mb-1">MBTI</label>
+                                    <select value={mbti} onChange={(e) => setMbti(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2 bg-white">
+                                        {['ISTJ', 'ISFJ', 'INFJ', 'INTJ', 'ISTP', 'ISFP', 'INFP', 'INTP', 'ESTP', 'ESFP', 'ENFP', 'ENTP', 'ESTJ', 'ESFJ', 'ENFJ', 'ENTJ'].map(m => (
+                                            <option key={m} value={m}>{m}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
                             <div>
                                 <label className="font-semibold text-slate-800 block mb-1">나는 누구인가요? (정체성 / 직업)</label>
                                 <input type="text" value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder="예: 5년 차 IT 개발자, 주식 투자 3년차 직장인" className="w-full rounded-xl border border-slate-300 px-4 py-2" />
@@ -445,7 +609,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         </div>
 
                         <div className="flex justify-between pt-4">
-                            <button onClick={() => setStep(1)} className="text-slate-500 font-semibold px-4 py-2 hover:bg-slate-100 rounded-lg transition-colors">← 이전</button>
+                            <button onClick={() => setStep(0)} className="text-slate-500 font-semibold px-4 py-2 hover:bg-slate-100 rounded-lg transition-colors">← 이전</button>
                             <button onClick={handleSavePersonaStep} disabled={saving} className="bg-gradient-to-r from-indigo-600 to-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-md hover:shadow-lg transition-all active:scale-95 text-lg">
                                 {saving ? "저장 중..." : "다음 단계로 →"}
                             </button>
@@ -465,7 +629,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 <span className="text-indigo-600 font-bold bg-indigo-100 px-3 py-1 rounded-lg">{dailyPostsTarget} 포스트</span>
                             </label>
                             <input
-                                type="range" min={1} max={5} value={dailyPostsTarget}
+                                type="range" min={3} max={5} value={dailyPostsTarget}
                                 onChange={(e) => handleDailyTargetChange(Number(e.target.value))}
                                 className="mt-4 w-full accent-indigo-600"
                             />

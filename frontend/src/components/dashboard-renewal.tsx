@@ -7,6 +7,7 @@ import { AIToggleSummary } from "@/components/ai-toggle-summary";
 import { HealthWidget } from "@/components/health-widget";
 import { MetricsSummary } from "@/components/metrics-summary";
 import {
+  DEFAULT_FALLBACK_CATEGORY,
   completeOnboarding,
   createMagicJob,
   fetchNaverConnectStatus,
@@ -111,7 +112,7 @@ function normalizeAllocations(
   const normalizedCategories = categories
     .map((value) => value.trim())
     .filter((value, index, list) => value.length > 0 && list.indexOf(value) === index);
-  const fallbackCategories = normalizedCategories.length > 0 ? normalizedCategories : ["다양한 생각"];
+  const fallbackCategories = normalizedCategories.length > 0 ? normalizedCategories : [DEFAULT_FALLBACK_CATEGORY];
 
   const existingMap = new Map(existingAllocations.map((item) => [item.category, item]));
   const rows: ScheduleAllocationItem[] = fallbackCategories.map((categoryName) => {
@@ -213,7 +214,7 @@ export function DashboardRenewal() {
 
   const [recommendedCategories, setRecommendedCategories] = useState<string[]>([]);
   const [categoriesText, setCategoriesText] = useState("");
-  const [fallbackCategory, setFallbackCategory] = useState("다양한 생각");
+  const [fallbackCategory, setFallbackCategory] = useState(DEFAULT_FALLBACK_CATEGORY);
 
   const [dailyPostsTarget, setDailyPostsTarget] = useState(3);
   const [ideaVaultDailyQuota, setIdeaVaultDailyQuota] = useState(2);
@@ -256,7 +257,7 @@ export function DashboardRenewal() {
         setAdvancedPersonaId(response.persona_id || "P1");
         setRecommendedCategories(response.recommended_categories || []);
         setCategoriesText((response.categories || []).join(", "));
-        setFallbackCategory(response.fallback_category || "다양한 생각");
+        setFallbackCategory(response.fallback_category || DEFAULT_FALLBACK_CATEGORY);
         setTelegramVerified(Boolean(response.telegram_configured));
         setInterestsText((response.interests || []).join(", "));
 
@@ -495,6 +496,9 @@ export function DashboardRenewal() {
         criticism_score: criticismScore,
         density_score: densityScore,
         style_strength: styleStrength,
+        mbti: "ENFP",
+        age_group: "30대",
+        gender: "남성",
       });
       setRecommendedCategories(response.recommended_categories);
       setCategoriesText(response.recommended_categories.join(", "));
@@ -515,7 +519,7 @@ export function DashboardRenewal() {
     try {
       const response = await saveOnboardingCategories({
         categories: parseCommaValues(categoriesText),
-        fallback_category: fallbackCategory || "다양한 생각",
+        fallback_category: fallbackCategory || DEFAULT_FALLBACK_CATEGORY,
       });
       setCategoriesText(response.categories.join(", "));
       setFallbackCategory(response.fallback_category);
@@ -641,16 +645,16 @@ export function DashboardRenewal() {
         setOnboarding((previous) =>
           previous
             ? {
-                ...previous,
-                completed: true,
-                persona_id: personaId,
-                categories: parseCommaValues(categoriesText),
-                fallback_category: fallbackCategory || "다양한 생각",
-                daily_posts_target: dailyPostsTarget,
-                idea_vault_daily_quota: ideaVaultDailyQuota,
-                category_allocations: categoryAllocations,
-                telegram_configured: telegramVerified,
-              }
+              ...previous,
+              completed: true,
+              persona_id: personaId,
+              categories: parseCommaValues(categoriesText),
+              fallback_category: fallbackCategory || DEFAULT_FALLBACK_CATEGORY,
+              daily_posts_target: dailyPostsTarget,
+              idea_vault_daily_quota: ideaVaultDailyQuota,
+              category_allocations: categoryAllocations,
+              telegram_configured: telegramVerified,
+            }
             : null,
         );
         setStepMessage("온보딩 완료! 이제 매직 인풋으로 바로 예약할 수 있습니다.");
@@ -766,13 +770,12 @@ export function DashboardRenewal() {
               return (
                 <div
                   key={title}
-                  className={`rounded-xl border px-3 py-2 text-sm ${
-                    active
+                  className={`rounded-xl border px-3 py-2 text-sm ${active
                       ? "border-slate-800 bg-slate-900 text-white"
                       : passed
                         ? "border-emerald-300 bg-emerald-50 text-emerald-700"
                         : "border-slate-200 bg-slate-50 text-slate-500"
-                  }`}
+                    }`}
                 >
                   {title}
                 </div>
@@ -794,22 +797,20 @@ export function DashboardRenewal() {
               <button
                 type="button"
                 onClick={() => setStrategyMode("cost")}
-                className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-                  strategyMode === "cost"
+                className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "cost"
                     ? "bg-slate-900 text-white"
                     : "text-slate-700 hover:bg-slate-100"
-                }`}
+                  }`}
               >
                 ⚖️ 가성비 우선
               </button>
               <button
                 type="button"
                 onClick={() => setStrategyMode("quality")}
-                className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-                  strategyMode === "quality"
+                className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "quality"
                     ? "bg-slate-900 text-white"
                     : "text-slate-700 hover:bg-slate-100"
-                }`}
+                  }`}
               >
                 💎 품질 우선
               </button>
@@ -1408,22 +1409,20 @@ export function DashboardRenewal() {
             <button
               type="button"
               onClick={() => setWorkspaceTab("magic")}
-              className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-                workspaceTab === "magic"
+              className={`rounded-full px-4 py-1 text-sm font-medium transition ${workspaceTab === "magic"
                   ? "bg-slate-900 text-white"
                   : "text-slate-700 hover:bg-slate-100"
-              }`}
+                }`}
             >
               Magic Input
             </button>
             <button
               type="button"
               onClick={() => setWorkspaceTab("vault")}
-              className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-                workspaceTab === "vault"
+              className={`rounded-full px-4 py-1 text-sm font-medium transition ${workspaceTab === "vault"
                   ? "bg-slate-900 text-white"
                   : "text-slate-700 hover:bg-slate-100"
-              }`}
+                }`}
             >
               Idea Vault
             </button>

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .trend_job_service import TrendJobService
 
 from .resource_monitor import CpuHysteresisMonitor
+from ..constants import DEFAULT_FALLBACK_CATEGORY
 
 logger = logging.getLogger(__name__)
 
@@ -675,7 +676,7 @@ class SchedulerService:
                 for claimed in claimed_items:
                     idea_job_id = str(claimed.get("queued_job_id", "")).strip()
                     raw_text = str(claimed.get("raw_text", "")).strip()
-                    category_name = str(claimed.get("mapped_category", "")).strip() or "다양한 생각"
+                    category_name = str(claimed.get("mapped_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
                     topic_mode = self._normalize_topic_mode(str(claimed.get("topic_mode", "")).strip())
                     if not idea_job_id or not raw_text:
                         continue
@@ -876,7 +877,7 @@ class SchedulerService:
         if not self.job_store:
             return [
                 {
-                    "category": "다양한 생각",
+                    "category": DEFAULT_FALLBACK_CATEGORY,
                     "topic_mode": "cafe",
                     "count": max(1, daily_target),
                 }
@@ -886,7 +887,7 @@ class SchedulerService:
         if not get_setting or not callable(get_setting):
             return [
                 {
-                    "category": "다양한 생각",
+                    "category": DEFAULT_FALLBACK_CATEGORY,
                     "topic_mode": "cafe",
                     "count": max(1, daily_target),
                 }
@@ -905,7 +906,9 @@ class SchedulerService:
             categories = []
 
         if not categories:
-            categories = ["다양한 생각"]
+            # DB에 저장된 fallback_category를 우선 사용하고, 없으면 전역 상수 사용
+            saved_fallback = str(get_setting("fallback_category", "")).strip()
+            categories = [saved_fallback if saved_fallback else DEFAULT_FALLBACK_CATEGORY]
 
         allocations = [
             {

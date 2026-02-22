@@ -574,8 +574,8 @@ class ContentGenerator:
             return "- structure: balanced\n- evidence: balanced\n- tone: natural\n- style_strength: 40"
 
         lines = []
-        for key in ("structure", "evidence", "distance", "criticism", "density", "style_strength"):
-            if key not in voice_profile:
+        for key in ("mbti", "age_group", "gender", "structure", "evidence", "distance", "criticism", "density", "style_strength"):
+            if key not in voice_profile or not voice_profile[key]:
                 continue
             lines.append(f"- {key}: {voice_profile.get(key)}")
         scores = voice_profile.get("scores", {})

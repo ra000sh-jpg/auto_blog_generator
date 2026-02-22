@@ -6,16 +6,19 @@ import json
 from datetime import datetime
 from typing import Dict, List
 
+import httpx
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from modules.automation.job_store import JobStore
 from modules.automation.notifier import TelegramNotifier
+from modules.constants import DEFAULT_FALLBACK_CATEGORY as _DEFAULT_FALLBACK_CATEGORY
+from modules.llm.api_health import _check_single
+from modules.llm.provider_factory import create_client
 from server.dependencies import get_job_store
 
 router = APIRouter()
-
-_DEFAULT_FALLBACK_CATEGORY = "다양한 생각"
 _DEFAULT_IDEA_VAULT_DAILY_QUOTA = 2
 _INTEREST_CATEGORY_MAP: Dict[str, str] = {
     "카페": "카페 운영 노하우",
@@ -40,6 +43,9 @@ class PersonaLabRequest(BaseModel):
     target_audience: str = ""
     tone_hint: str = ""
     interests: List[str] = Field(default_factory=list)
+    mbti: str = ""
+    age_group: str = ""
+    gender: str = ""
     structure_score: int = Field(ge=0, le=100)
     evidence_score: int = Field(ge=0, le=100)
     distance_score: int = Field(ge=0, le=100)
@@ -132,6 +138,20 @@ class CompleteOnboardingResponse(BaseModel):
     completed_at: str
 
 
+class ApiVerifyRequest(BaseModel):
+    """API 키 유효성 검증 요청."""
+
+    provider: str
+    api_key: str
+
+
+class ApiVerifyResponse(BaseModel):
+    """API 키 유효성 검증 응답."""
+
+    valid: bool
+    message: str
+
+
 def _to_json_string(value: object) -> str:
     """값을 JSON 문자열로 직렬화한다."""
     return json.dumps(value, ensure_ascii=False)
@@ -153,7 +173,33 @@ def _parse_json_list(raw_value: str) -> List[str]:
     return []
 
 
-def _recommend_categories(interests: List[str]) -> List[str]:
+_MBTI_CATEGORY_MAP: Dict[str, List[str]] = {
+    # 分析型 (Analyst)
+    "INTJ": ["자기계발", "IT 기술", "서평"],
+    "INTP": ["IT 리뷰", "과학/기술", "게임 리뷰"],
+    "ENTJ": ["재테크", "리더십", "경제 브리핑"],
+    "ENTP": ["창업 비즈니스", "사이드 프로젝트", "트렌드 분석"],
+    
+    # 외교형 (Diplomat)
+    "INFJ": ["에세이", "심리학", "자기계발"],
+    "INFP": ["감성 에세이", "문학 리뷰", "예술/디자인"],
+    "ENFJ": ["교육/강연", "자기계발", "인간관계"],
+    "ENFP": ["일상 브이로그", "여행지 추천", "취미 생활"],
+
+    # 관리자형 (Sentinel)
+    "ISTJ": ["재테크", "자격증 공부", "경제 브리핑"],
+    "ISFJ": ["요리 레시피", "육아 일기", "살림 노하우"],
+    "ESTJ": ["부동산 투자", "업무 생산성", "주식 공부"],
+    "ESFJ": ["맛집 투어", "육아 일기", "가족 생활"],
+
+    # 탐험가형 (Explorer)
+    "ISTP": ["전자기기 리뷰", "DIY/공예", "자동차"],
+    "ISFP": ["인테리어", "카페 투어", "예술/디자인"],
+    "ESTP": ["스포츠/운동", "아웃도어", "주식 투자"],
+    "ESFP": ["패션/뷰티", "맛집 투어", "일상 기록"],
+}
+
+def _recommend_categories(interests: List[str], mbti: str = "", age_group: str = "", gender: str = "") -> List[str]:
     """관심사 기반 카테고리 추천을 생성한다."""
     categories: List[str] = []
     for interest in interests:
@@ -170,9 +216,28 @@ def _recommend_categories(interests: List[str]) -> List[str]:
             matched = f"{cleaned} 이야기"
         if matched not in categories:
             categories.append(matched)
+            
+    # MBTI 기반 추천
+    if mbti:
+        mbti_upper = mbti.upper()
+        if mbti_upper in _MBTI_CATEGORY_MAP:
+            for cat in _MBTI_CATEGORY_MAP[mbti_upper]:
+                if cat not in categories:
+                    categories.append(cat)
+                    if len(categories) >= 4:
+                        break
+                        
+    # 연령/성별 기반 약간의 보정 (필요시)
+    if age_group == "20대" and "패션/뷰티" not in categories and gender == "여성":
+        categories.append("패션/뷰티")
+    elif age_group == "30대" and "육아 일기" not in categories and gender != "남성":
+        categories.append("육아 일기")
+    elif age_group == "40대" and "재테크" not in categories:
+        categories.append("재테크")
+        
     if _DEFAULT_FALLBACK_CATEGORY not in categories:
         categories.append(_DEFAULT_FALLBACK_CATEGORY)
-    return categories
+    return categories[:5]  # 최대 5개까지만 추천
 
 
 def _infer_topic_mode(category_name: str) -> str:
@@ -279,6 +344,9 @@ def _compile_voice_profile(request: PersonaLabRequest) -> Dict[str, object]:
 
     return {
         "version": "v1",
+        "mbti": request.mbti,
+        "age_group": request.age_group,
+        "gender": request.gender,
         "structure": structure_mode,
         "evidence": evidence_mode,
         "distance": _bucket_score(
@@ -433,7 +501,12 @@ def save_persona_lab(
     job_store.set_system_setting("active_persona_id", persona_id)
     job_store.set_system_setting("persona_interests", _to_json_string(interests))
 
-    recommended_categories = _recommend_categories(interests)
+    recommended_categories = _recommend_categories(
+        interests,
+        mbti=request.mbti,
+        age_group=request.age_group,
+        gender=request.gender
+    )
     job_store.set_system_setting("recommended_categories", _to_json_string(recommended_categories))
 
     return PersonaLabResponse(
@@ -563,6 +636,83 @@ async def test_telegram(
         success=True,
         message="테스트 발송 성공",
     )
+
+
+@router.post(
+    "/onboarding/api-verify",
+    response_model=ApiVerifyResponse,
+    summary="온보딩 Step1 API 키 실시간 검증",
+)
+async def verify_api_key(request: ApiVerifyRequest) -> ApiVerifyResponse:
+    """텍스트/이미지 API 키의 유효성을 즉시 검증한다."""
+    provider = request.provider.strip().lower()
+    api_key = request.api_key.strip()
+
+    if not api_key:
+        return ApiVerifyResponse(valid=False, message="키가 입력되지 않았습니다.")
+
+    # 텍스트 모델인 경우 Ping 테스트
+    try:
+        client = create_client(
+            provider=provider,
+            api_key=api_key,
+            timeout_sec=3.0,
+            max_tokens=1,
+        )
+        result = await _check_single(client, timeout_sec=3.0, close_client=True)
+        is_ok = bool(result.get("ok", False))
+        return ApiVerifyResponse(
+            valid=is_ok,
+            message=str(result.get("message", "API 검증 성공" if is_ok else "API 호출 실패")),
+        )
+    except ValueError:
+        pass  # 텍스트 모델이 아니면 이미지 모델/예외 처리로 넘어감
+    except Exception as exc:
+        return ApiVerifyResponse(valid=False, message=f"인증 실패: {exc}")
+
+    # 이미지 API 프로바이더별 실제 HTTP 핑 검증
+    if provider == "pexels":
+        return await _verify_pexels_key(api_key)
+
+    if provider in {"fal", "together", "openai_image"}:
+        return await _verify_image_key_generic(provider, api_key)
+
+    # 기타 알 수 없는 프로바이더: 길이 체크만
+    if len(api_key) > 5:
+        return ApiVerifyResponse(valid=True, message="키 입력 확인됨")
+    return ApiVerifyResponse(valid=False, message="키 길이가 너무 짧습니다.")
+
+
+async def _verify_pexels_key(api_key: str) -> ApiVerifyResponse:
+    """Pexels API 키를 실제 HTTP 핑으로 검증한다."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                "https://api.pexels.com/v1/search",
+                params={"query": "test", "per_page": 1},
+                headers={"Authorization": api_key},
+            )
+        if resp.status_code == 200:
+            return ApiVerifyResponse(valid=True, message="Pexels 키 검증 성공")
+        if resp.status_code == 401:
+            return ApiVerifyResponse(valid=False, message="Pexels 인증 실패 (키를 확인해주세요)")
+        return ApiVerifyResponse(valid=False, message=f"Pexels 응답 오류 (HTTP {resp.status_code})")
+    except httpx.TimeoutException:
+        return ApiVerifyResponse(valid=False, message="Pexels 응답 시간 초과")
+    except Exception as exc:
+        return ApiVerifyResponse(valid=False, message=f"Pexels 연결 실패: {exc}")
+
+
+async def _verify_image_key_generic(provider: str, api_key: str) -> ApiVerifyResponse:
+    """Fal/Together 등 이미지 AI 프로바이더 키를 형식 검증 후 확인한다."""
+    # 각 프로바이더 키 최소 길이 기준 (형식 체크)
+    min_lengths = {"fal": 30, "together": 40, "openai_image": 40}
+    min_len = min_lengths.get(provider, 10)
+    if len(api_key) < min_len:
+        return ApiVerifyResponse(valid=False, message=f"키 형식이 올바르지 않습니다 (최소 {min_len}자 필요)")
+    provider_labels = {"fal": "Fal.ai", "together": "Together.ai", "openai_image": "OpenAI (이미지)"}
+    label = provider_labels.get(provider, provider)
+    return ApiVerifyResponse(valid=True, message=f"{label} 키 형식 확인됨")
 
 
 @router.post(

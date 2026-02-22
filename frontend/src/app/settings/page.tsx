@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  DEFAULT_FALLBACK_CATEGORY,
   fetchConfig,
   fetchNaverConnectStatus,
   fetchOnboardingStatus,
@@ -46,7 +47,7 @@ function normalizeAllocations(
   const normalizedCategories = categories
     .map((value) => value.trim())
     .filter((value, index, list) => value.length > 0 && list.indexOf(value) === index);
-  const fallbackCategories = normalizedCategories.length > 0 ? normalizedCategories : ["다양한 생각"];
+  const fallbackCategories = normalizedCategories.length > 0 ? normalizedCategories : [DEFAULT_FALLBACK_CATEGORY];
 
   const existingMap = new Map(existingAllocations.map((item) => [item.category, item]));
   const rows: ScheduleAllocationItem[] = fallbackCategories.map((categoryName) => {

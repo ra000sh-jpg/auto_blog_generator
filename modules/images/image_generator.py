@@ -156,7 +156,7 @@ class ImageGenerator:
             for idx, prompt in enumerate(content_prompts):
                 stock_query = stock_queries[idx] if idx < len(stock_queries) else None
                 tasks.append(
-                    self._generate_content_image(prompt, strategy, stock_query)
+                    self._generate_content_image(prompt, strategy, stock_query, idx)
                 )
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -226,6 +226,7 @@ class ImageGenerator:
                     prompt,
                     strategy,
                     stock_query,
+                    idx,
                 )
                 if content_result.success and content_result.local_path:
                     generated.content_paths.append(content_result.local_path)
@@ -250,6 +251,7 @@ class ImageGenerator:
         prompt: str,
         strategy: str,
         stock_query: Optional[str] = None,
+        image_index: int = 0,
     ) -> Tuple["ImageResult", str, str]:
         """본문 이미지를 전략에 따라 생성한다.
 
@@ -257,6 +259,7 @@ class ImageGenerator:
             prompt: AI 이미지 생성 프롬프트
             strategy: 'stock_first', 'mixed', 'ai_only'
             stock_query: 스톡 포토 검색어 (없으면 prompt에서 추출)
+            image_index: 생성 중인 본문 이미지의 인덱스 (mixed 전략에 사용)
         """
         from .dashscope_image_client import ImageResult
 
@@ -293,8 +296,27 @@ class ImageGenerator:
                 prompt, self.content_style.suffix, self.content_size
             )
 
-        # mixed 전략: 짝수 인덱스는 스톡, 홀수는 AI (또는 둘 다 시도)
-        # 단순화: 스톡 먼저 시도, 실패 시 AI
+        # mixed 전략: 짝수 인덱스는 스톡, 홀수는 AI (첫 본문은 스톡)
+        if strategy == "mixed":
+            if image_index % 2 == 0:
+                # 스톡 시도 후 실패하면 AI
+                stock_result = await self.stock_client.generate(
+                    prompt=query,
+                    size=self.content_size,
+                )
+                if stock_result.success:
+                    provider = self._provider_name_from_client(self.stock_client)
+                    return stock_result, "stock", provider
+                return await self._generate_with_fallback(
+                    prompt, self.content_style.suffix, self.content_size
+                )
+            else:
+                # 홀수인덱스 = 무조건 AI 
+                return await self._generate_with_fallback(
+                    prompt, self.content_style.suffix, self.content_size
+                )
+                
+        # 기타 혹은 fallback 스톡 시도
         stock_result = await self.stock_client.generate(
             prompt=query,
             size=self.content_size,

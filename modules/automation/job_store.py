@@ -26,6 +26,7 @@ import json
 import logging
 
 from .time_utils import now_utc, add_seconds, calculate_retry_delay, parse_iso
+from ..constants import DEFAULT_FALLBACK_CATEGORY
 
 logger = logging.getLogger(__name__)
 
@@ -1208,7 +1209,7 @@ class JobStore:
                 raw_text = str(item.get("raw_text", "")).strip()
                 if not raw_text:
                     continue
-                mapped_category = str(item.get("mapped_category", "")).strip() or "다양한 생각"
+                mapped_category = str(item.get("mapped_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
                 topic_mode = str(item.get("topic_mode", "cafe")).strip().lower() or "cafe"
                 parser_used = str(item.get("parser_used", "heuristic")).strip() or "heuristic"
                 conn.execute(

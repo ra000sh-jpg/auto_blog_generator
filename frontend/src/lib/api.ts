@@ -1,6 +1,9 @@
 export const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
 
+// 백엔드 modules/constants.py의 DEFAULT_FALLBACK_CATEGORY와 반드시 동기화할 것
+export const DEFAULT_FALLBACK_CATEGORY = "다양한 생각들";
+
 export type ProviderHealth = {
   provider: string;
   model: string;
@@ -143,6 +146,9 @@ export type PersonaLabPayload = {
   target_audience: string;
   tone_hint: string;
   interests: string[];
+  mbti: string;
+  age_group: string;
+  gender: string;
   structure_score: number;
   evidence_score: number;
   distance_score: number;
@@ -361,12 +367,12 @@ async function requestJSON<T>(path: string, options: RequestOptions = {}): Promi
     method,
     headers: body
       ? {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        }
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      }
       : {
-          Accept: "application/json",
-        },
+        Accept: "application/json",
+      },
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
   });
@@ -423,6 +429,23 @@ export async function fetchOnboardingStatus(): Promise<OnboardingStatusResponse>
 
 export async function savePersonaLab(payload: PersonaLabPayload): Promise<PersonaLabResponse> {
   return requestJSON<PersonaLabResponse>("/onboarding/persona", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export type ApiVerifyPayload = {
+  provider: string;
+  api_key: string;
+};
+
+export type ApiVerifyResponse = {
+  valid: boolean;
+  message: string;
+};
+
+export async function verifyApiKey(payload: ApiVerifyPayload): Promise<ApiVerifyResponse> {
+  return requestJSON<ApiVerifyResponse>("/onboarding/api-verify", {
     method: "POST",
     body: payload,
   });

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from modules.automation.job_store import JobStore
+from modules.constants import DEFAULT_FALLBACK_CATEGORY
 from modules.llm.idea_vault_parser import IdeaVaultBatchParser
 from server.dependencies import get_idea_vault_parser, get_job_store
 
@@ -88,7 +89,9 @@ def _get_allowed_categories(job_store: JobStore) -> List[str]:
     raw = job_store.get_system_setting("custom_categories", "[]")
     categories = _parse_json_list(raw)
     if not categories:
-        categories = ["다양한 생각"]
+        # DB에 저장된 fallback_category를 우선 사용하고, 없으면 전역 상수 사용
+        saved_fallback = job_store.get_system_setting("fallback_category", "").strip()
+        categories = [saved_fallback if saved_fallback else DEFAULT_FALLBACK_CATEGORY]
     return categories
 
 

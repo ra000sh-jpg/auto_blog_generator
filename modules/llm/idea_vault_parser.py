@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..config import LLMConfig
+from ..constants import DEFAULT_FALLBACK_CATEGORY
 from .base_client import BaseLLMClient
 from .prompts import normalize_topic_mode
 from .provider_factory import create_client
@@ -73,7 +74,7 @@ class IdeaVaultBatchParser:
         safe_batch_size = max(1, min(50, int(batch_size)))
         allowed_categories = [category for category in categories if str(category).strip()]
         if not allowed_categories:
-            allowed_categories = ["다양한 생각"]
+            allowed_categories = [DEFAULT_FALLBACK_CATEGORY]
 
         accepted_items: List[IdeaVaultParsedItem] = []
         rejected_lines: List[Dict[str, str]] = []
@@ -372,7 +373,7 @@ class IdeaVaultBatchParser:
         if stripped in allowed_categories:
             return stripped
 
-        best_category = allowed_categories[0] if allowed_categories else "다양한 생각"
+        best_category = allowed_categories[0] if allowed_categories else DEFAULT_FALLBACK_CATEGORY
         best_score = -1
         lowered_text = str(text).lower()
         for category in allowed_categories:
