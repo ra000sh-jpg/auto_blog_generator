@@ -751,7 +751,9 @@ class ContentGenerator:
         client = fallback_chain[0]
         news_data_text = self._build_news_data_text(news_context or [])
         tone_suffix = "" if quality_only else tone_profile.prompt_suffix
-        system_prompt = QUALITY_LAYER_SYSTEM_PROMPT if quality_only else SYSTEM_BLOG_WRITER
+        voice_profile_text = self._build_voice_profile_text(self._load_saved_voice_profile(job.persona_id or "P1"))
+        voice_injection = f"\n\n[Voice Profile (Writing Style)]\n{voice_profile_text}"
+        system_prompt = QUALITY_LAYER_SYSTEM_PROMPT if quality_only else f"{SYSTEM_BLOG_WRITER}{voice_injection}"
 
         # Step 1: 아웃라인 생성
         outline_prompt = OUTLINE_GENERATION.format(
@@ -920,6 +922,9 @@ class ContentGenerator:
         platform_strategy = get_platform_strategy(job.platform)
         seo_snippet = platform_strategy.to_prompt_snippet()
 
+        voice_profile_text = self._build_voice_profile_text(self._load_saved_voice_profile(job.persona_id or "P1"))
+        voice_injection = f"\n\n[Voice Profile (Writing Style)]\n{voice_profile_text}"
+
         use_economy_rag = bool(news_data_text) and self._is_economy_topic(topic_mode)
         if quality_only and use_economy_rag:
             user_prompt = QUALITY_LAYER_ECONOMY_PROMPT.format(
@@ -953,7 +958,7 @@ class ContentGenerator:
                 persona_prefix=persona.prompt_prefix,
                 tone_suffix=tone_profile.prompt_suffix,
             )
-            system_prompt = f"{SYSTEM_BLOG_WRITER}\n\n{ECONOMY_SYSTEM_PROMPT}"
+            system_prompt = f"{SYSTEM_BLOG_WRITER}{voice_injection}\n\n{ECONOMY_SYSTEM_PROMPT}"
         else:
             user_prompt = USER_CONTENT_REQUEST.format(
                 title=job.title,
@@ -962,7 +967,7 @@ class ContentGenerator:
                 persona_prefix=persona.prompt_prefix,
                 tone_suffix=tone_profile.prompt_suffix,
             )
-            system_prompt = SYSTEM_BLOG_WRITER
+            system_prompt = f"{SYSTEM_BLOG_WRITER}{voice_injection}"
 
         # SEO 전략 지침 삽입
         user_prompt = f"{user_prompt}\n\n{seo_snippet}"
