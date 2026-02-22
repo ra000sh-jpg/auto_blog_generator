@@ -147,10 +147,12 @@ class ScheduleSetupResponse(BaseModel):
 
 
 class TelegramTestRequest(BaseModel):
+class TelegramTestRequest(BaseModel):
     """Step4 텔레그램 테스트 요청."""
 
     bot_token: str
     chat_id: str
+    webhook_secret: str = ""
     save: bool = True
 
 
@@ -175,6 +177,9 @@ class OnboardingStatusResponse(BaseModel):
     idea_vault_daily_quota: int
     category_allocations: List[ScheduleAllocationItem]
     telegram_configured: bool
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_webhook_secret: str = ""
 
 
 class CompleteOnboardingResponse(BaseModel):
@@ -608,6 +613,7 @@ def get_onboarding_status(
             "scheduler_category_allocations",
             "telegram_bot_token",
             "telegram_chat_id",
+            "telegram_webhook_secret",
         ]
     )
     persona_id = settings.get("active_persona_id", "P1")
@@ -651,10 +657,10 @@ def get_onboarding_status(
         except Exception:
             allocations = []
     completed = settings.get("onboarding_completed", "false").lower() == "true"
-    telegram_configured = bool(
-        settings.get("telegram_bot_token", "").strip()
-        and settings.get("telegram_chat_id", "").strip()
-    )
+    telegram_bot_token = settings.get("telegram_bot_token", "").strip()
+    telegram_chat_id = settings.get("telegram_chat_id", "").strip()
+    telegram_webhook_secret = settings.get("telegram_webhook_secret", "").strip()
+    telegram_configured = bool(telegram_bot_token and telegram_chat_id)
 
     if not recommended:
         recommended = _recommend_categories(interests)
@@ -681,6 +687,9 @@ def get_onboarding_status(
         idea_vault_daily_quota=idea_vault_daily_quota,
         category_allocations=allocations,
         telegram_configured=telegram_configured,
+        telegram_bot_token=_mask_secret(telegram_bot_token) if telegram_bot_token else "",
+        telegram_chat_id=telegram_chat_id,
+        telegram_webhook_secret=_mask_secret(telegram_webhook_secret) if telegram_webhook_secret else "",
     )
 
 
@@ -848,6 +857,7 @@ async def test_telegram(
     if request.save:
         job_store.set_system_setting("telegram_bot_token", request.bot_token.strip())
         job_store.set_system_setting("telegram_chat_id", request.chat_id.strip())
+        job_store.set_system_setting("telegram_webhook_secret", request.webhook_secret.strip())
 
     return TelegramTestResponse(
         success=True,

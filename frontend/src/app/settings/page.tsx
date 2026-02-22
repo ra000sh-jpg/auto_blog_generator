@@ -12,6 +12,7 @@ import {
   saveRouterSettings,
   saveOnboardingSchedule,
   startNaverConnect,
+  testTelegramSetup,
   type ConfigResponse,
   type NaverConnectStatusResponse,
   type RouterQuoteResponse,
@@ -152,6 +153,12 @@ export default function SettingsPage() {
   const [naverStatus, setNaverStatus] = useState<NaverConnectStatusResponse | null>(null);
   const [naverConnecting, setNaverConnecting] = useState(false);
 
+  const [botToken, setBotToken] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [telegramLoading, setTelegramLoading] = useState(false);
+  const [telegramMessage, setTelegramMessage] = useState("");
+
   useEffect(() => {
     let isMounted = true;
 
@@ -180,6 +187,10 @@ export default function SettingsPage() {
           onboardingResponse.categories.length > 0
             ? onboardingResponse.categories
             : onboardingResponse.recommended_categories;
+
+        setBotToken(onboardingResponse.telegram_bot_token || "");
+        setChatId(onboardingResponse.telegram_chat_id || "");
+        setWebhookSecret(onboardingResponse.telegram_webhook_secret || "");
 
         setDailyPostsTarget(resolvedTarget);
         setIdeaVaultDailyQuota(resolvedIdeaVaultQuota);
@@ -443,6 +454,24 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleTestTelegram() {
+    setTelegramLoading(true);
+    setTelegramMessage("");
+    try {
+      const resp = await testTelegramSetup({
+        bot_token: botToken,
+        chat_id: chatId,
+        webhook_secret: webhookSecret,
+        save: true,
+      });
+      setTelegramMessage(resp.message || "설정이 저장되었습니다.");
+    } catch (e) {
+      setTelegramMessage(e instanceof Error ? e.message : "저장에 실패했습니다.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -480,22 +509,20 @@ export default function SettingsPage() {
               <button
                 type="button"
                 onClick={() => setStrategyMode("cost")}
-                className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-                  strategyMode === "cost"
-                    ? "bg-slate-900 text-white"
-                    : "text-slate-700 hover:bg-slate-100"
-                }`}
+                className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "cost"
+                  ? "bg-slate-900 text-white"
+                  : "text-slate-700 hover:bg-slate-100"
+                  }`}
               >
                 ⚖️ 가성비 우선
               </button>
               <button
                 type="button"
                 onClick={() => setStrategyMode("quality")}
-                className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-                  strategyMode === "quality"
-                    ? "bg-slate-900 text-white"
-                    : "text-slate-700 hover:bg-slate-100"
-                }`}
+                className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "quality"
+                  ? "bg-slate-900 text-white"
+                  : "text-slate-700 hover:bg-slate-100"
+                  }`}
               >
                 💎 품질 우선
               </button>
@@ -643,6 +670,70 @@ export default function SettingsPage() {
             {routerMessage && (
               <p className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
                 {routerMessage}
+              </p>
+            )}
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="font-[family-name:var(--font-heading)] text-lg font-semibold">
+              Telegram 알림 연동 (Track B)
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              텔레그램 봇 토큰과 Webhook 옵션을 설정하여 알림과 아이디어 금고 수집 기능을 활성화합니다.
+            </p>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-slate-700">Bot Token</span>
+                <input
+                  type="password"
+                  value={botToken}
+                  onChange={(e) => setBotToken(e.target.value)}
+                  placeholder="예: 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-slate-700">Chat ID</span>
+                <input
+                  type="text"
+                  value={chatId}
+                  onChange={(e) => setChatId(e.target.value)}
+                  placeholder="예: 123456789"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block sm:col-span-2">
+                <span className="mb-1 block text-sm font-medium text-slate-700">Webhook Secret Token</span>
+                <input
+                  type="password"
+                  value={webhookSecret}
+                  onChange={(e) => setWebhookSecret(e.target.value)}
+                  placeholder="보안을 위한 암호 키를 입력하세요 (선택 사항)"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  봇 웹훅 검증용 헤더와 비교될 시크릿 키입니다. 비워두면 검증하지 않을 수 있습니다.
+                </p>
+              </label>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleTestTelegram}
+                disabled={telegramLoading || !botToken}
+                className="rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+              >
+                {telegramLoading ? "테스트 및 저장 중..." : "🚀 텔레그램 연동 테스트 및 저장"}
+              </button>
+            </div>
+
+            {telegramMessage && (
+              <p className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                {telegramMessage}
               </p>
             )}
           </section>

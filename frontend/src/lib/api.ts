@@ -138,6 +138,9 @@ export type OnboardingStatusResponse = {
     count: number;
   }>;
   telegram_configured: boolean;
+  telegram_bot_token: string;
+  telegram_chat_id: string;
+  telegram_webhook_secret: string;
 };
 
 export type PersonaLabPayload = {
@@ -226,6 +229,7 @@ export type ScheduleSetupResponse = {
 export type TelegramTestPayload = {
   bot_token: string;
   chat_id: string;
+  webhook_secret?: string;
   save?: boolean;
 };
 
