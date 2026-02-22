@@ -610,3 +610,39 @@ export type LLMMetricsResponse = {
 export async function fetchLLMMetrics(hours = 24): Promise<LLMMetricsResponse> {
   return requestJSON<LLMMetricsResponse>(`/metrics/llm?hours=${hours}`);
 }
+
+export type SchedulerStatusResponse = {
+  scheduler_running: boolean;
+  today_date: string;
+  daily_target: number;
+  today_completed: number;
+  today_failed: number;
+  ready_to_publish: number;
+  queued: number;
+  next_publish_slot_kst: string | null;
+  active_hours: string;
+  last_seed_date: string;
+  last_seed_count: number;
+};
+
+export type TriggerResponse = {
+  ok: boolean;
+  message: string;
+  detail?: string | null;
+};
+
+export async function fetchSchedulerStatus(): Promise<SchedulerStatusResponse> {
+  return requestJSON<SchedulerStatusResponse>("/scheduler/status");
+}
+
+export async function triggerSchedulerSeed(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/trigger/seed", { method: "POST" });
+}
+
+export async function triggerSchedulerDraft(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/trigger/draft", { method: "POST" });
+}
+
+export async function triggerSchedulerPublish(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/trigger/publish", { method: "POST" });
+}

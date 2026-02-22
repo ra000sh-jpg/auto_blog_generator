@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AIToggleSummary } from "@/components/ai-toggle-summary";
 import { HealthWidget } from "@/components/health-widget";
 import { MetricsSummary } from "@/components/metrics-summary";
+import SchedulerWidget from "@/components/scheduler-widget";
 import {
   DEFAULT_FALLBACK_CATEGORY,
   completeOnboarding,
@@ -1574,7 +1575,10 @@ export function DashboardRenewal() {
         <div className="lg:col-span-3">
           <MetricsSummary />
         </div>
-        <div className="lg:col-span-6">
+        <div className="lg:col-span-3">
+          <SchedulerWidget />
+        </div>
+        <div className="lg:col-span-3">
           <AIToggleSummary />
         </div>
       </div>
