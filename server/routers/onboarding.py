@@ -16,10 +16,16 @@ from modules.automation.notifier import TelegramNotifier
 from modules.constants import DEFAULT_FALLBACK_CATEGORY as _DEFAULT_FALLBACK_CATEGORY
 from modules.llm.api_health import _check_single
 from modules.llm.provider_factory import create_client
+from modules.persona.questionnaire import (
+    QUESTIONNAIRE_VERSION,
+    get_question_bank_payload,
+    score_questionnaire_answers,
+)
 from server.dependencies import get_job_store
 
 router = APIRouter()
 _DEFAULT_IDEA_VAULT_DAILY_QUOTA = 2
+_QUESTIONNAIRE_REQUIRED_COUNT = 5
 _INTEREST_CATEGORY_MAP: Dict[str, str] = {
     "카페": "카페 운영 노하우",
     "맛집": "맛집 탐방",
@@ -35,6 +41,13 @@ _INTEREST_CATEGORY_MAP: Dict[str, str] = {
 }
 
 
+class PersonaQuestionAnswerItem(BaseModel):
+    """질문지 단일 응답."""
+
+    question_id: str
+    option_id: str
+
+
 class PersonaLabRequest(BaseModel):
     """Step1 페르소나 랩 저장 요청."""
 
@@ -46,6 +59,8 @@ class PersonaLabRequest(BaseModel):
     mbti: str = ""
     mbti_enabled: bool = False
     mbti_confidence: int = Field(default=60, ge=0, le=100)
+    questionnaire_version: str = QUESTIONNAIRE_VERSION
+    questionnaire_answers: List[PersonaQuestionAnswerItem] = Field(default_factory=list)
     age_group: str = ""
     gender: str = ""
     structure_score: int = Field(ge=0, le=100)
@@ -62,6 +77,35 @@ class PersonaLabResponse(BaseModel):
     persona_id: str
     voice_profile: Dict[str, object]
     recommended_categories: List[str]
+
+
+class PersonaQuestionOptionModel(BaseModel):
+    """질문지 선택지 응답 모델."""
+
+    option_id: str
+    label: str
+    description: str
+    effects: Dict[str, int]
+
+
+class PersonaQuestionModel(BaseModel):
+    """질문지 문항 응답 모델."""
+
+    question_id: str
+    title: str
+    scenario: str
+    target_dimension: str
+    weight: int
+    options: List[PersonaQuestionOptionModel]
+
+
+class PersonaQuestionBankResponse(BaseModel):
+    """온보딩 질문지 뱅크 응답."""
+
+    version: str
+    required_count: int
+    dimensions: List[str]
+    questions: List[PersonaQuestionModel]
 
 
 class CategorySetupRequest(BaseModel):
@@ -447,15 +491,52 @@ def _bucket_score(score: int, labels: List[str]) -> str:
     return labels[2]
 
 
-def _compile_voice_profile(request: PersonaLabRequest) -> Dict[str, object]:
-    """슬라이더 점수를 Voice_Profile로 변환한다."""
-    questionnaire_scores = {
+def _resolve_questionnaire_scores(request: PersonaLabRequest) -> Tuple[Dict[str, int], Dict[str, object]]:
+    """요청 페이로드에서 최종 질문지 점수를 산출한다."""
+    default_scores = {
         "structure": request.structure_score,
         "evidence": request.evidence_score,
         "distance": request.distance_score,
         "criticism": request.criticism_score,
         "density": request.density_score,
     }
+
+    answer_pairs = [
+        (item.question_id, item.option_id)
+        for item in request.questionnaire_answers
+    ]
+    if not answer_pairs:
+        return default_scores, {
+            "version": request.questionnaire_version or QUESTIONNAIRE_VERSION,
+            "source": "manual_slider",
+            "scores": default_scores,
+            "answered_count": 0,
+            "total_questions": 0,
+            "completion_ratio": 0.0,
+            "dimension_confidence": {key: 0.0 for key in default_scores.keys()},
+            "resolved_answers": [],
+            "missing_question_ids": [],
+        }
+
+    scored = score_questionnaire_answers(answer_pairs)
+    scored_map = scored.get("scores", {})
+    final_scores = {
+        "structure": _clamp_score(int(scored_map.get("structure", 50))),
+        "evidence": _clamp_score(int(scored_map.get("evidence", 50))),
+        "distance": _clamp_score(int(scored_map.get("distance", 50))),
+        "criticism": _clamp_score(int(scored_map.get("criticism", 50))),
+        "density": _clamp_score(int(scored_map.get("density", 50))),
+    }
+    return final_scores, {
+        **scored,
+        "source": "questionnaire",
+        "requested_version": request.questionnaire_version or QUESTIONNAIRE_VERSION,
+    }
+
+
+def _compile_voice_profile(request: PersonaLabRequest) -> Dict[str, object]:
+    """슬라이더 점수를 Voice_Profile로 변환한다."""
+    questionnaire_scores, questionnaire_meta = _resolve_questionnaire_scores(request)
     final_scores, blending_meta = _blend_scores_with_mbti(
         questionnaire_scores,
         mbti_code=request.mbti,
@@ -493,7 +574,19 @@ def _compile_voice_profile(request: PersonaLabRequest) -> Dict[str, object]:
         "style_strength": request.style_strength,
         "scores": final_scores,
         "questionnaire_scores": questionnaire_scores,
+        "questionnaire_meta": questionnaire_meta,
     }
+
+
+@router.get(
+    "/onboarding/persona/questions",
+    response_model=PersonaQuestionBankResponse,
+    summary="온보딩 페르소나 질문지 조회",
+)
+def get_persona_questions() -> PersonaQuestionBankResponse:
+    """상황형 페르소나 질문지 뱅크를 반환한다."""
+    payload = get_question_bank_payload(required_count=_QUESTIONNAIRE_REQUIRED_COUNT)
+    return PersonaQuestionBankResponse(**payload)
 
 
 @router.get("/onboarding", response_model=OnboardingStatusResponse, summary="온보딩 상태 조회")

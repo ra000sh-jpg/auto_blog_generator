@@ -286,6 +286,60 @@ def test_onboarding_wizard_roundtrip(
     assert final_payload["telegram_configured"] is True
 
 
+def test_onboarding_persona_question_bank_endpoint(client: TestClient):
+    """온보딩 페르소나 질문지 API가 기본 스키마를 반환해야 한다."""
+    response = client.get("/api/onboarding/persona/questions")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["version"] == "v1"
+    assert payload["required_count"] >= 5
+    assert len(payload["questions"]) >= 7
+    first_question = payload["questions"][0]
+    assert first_question["question_id"] != ""
+    assert len(first_question["options"]) >= 3
+
+
+def test_onboarding_persona_questionnaire_answers_apply_scores(client: TestClient):
+    """질문지 응답이 있으면 슬라이더 대신 질문지 점수를 우선 반영해야 한다."""
+    response = client.post(
+        "/api/onboarding/persona",
+        json={
+            "persona_id": "P2",
+            "identity": "테스터",
+            "target_audience": "일반 독자",
+            "tone_hint": "명확한 설명",
+            "interests": ["AI"],
+            "mbti": "",
+            "mbti_enabled": False,
+            "mbti_confidence": 0,
+            "questionnaire_version": "v1",
+            "questionnaire_answers": [
+                {"question_id": "q1_opening_flow", "option_id": "a_scan_then_map"},
+                {"question_id": "q2_evidence_conflict", "option_id": "a_add_sources"},
+                {"question_id": "q3_reader_distance", "option_id": "a_calm_data_reply"},
+                {"question_id": "q5_density_tradeoff", "option_id": "a_checklist_numbers"},
+                {"question_id": "q7_uncertain_fact", "option_id": "a_mark_unknown"},
+            ],
+            "age_group": "30대",
+            "gender": "비공개",
+            "structure_score": 10,
+            "evidence_score": 10,
+            "distance_score": 10,
+            "criticism_score": 10,
+            "density_score": 10,
+            "style_strength": 40,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    voice_profile = payload["voice_profile"]
+    assert voice_profile["scores"]["structure"] > 50
+    assert voice_profile["scores"]["evidence"] > 50
+    assert voice_profile["questionnaire_meta"]["source"] == "questionnaire"
+    assert voice_profile["questionnaire_meta"]["answered_count"] == 5
+    assert voice_profile["blending"]["mbti_applied"] is False
+
+
 def test_onboarding_persona_mbti_blending_optional(client: TestClient):
     """MBTI 미입력 시 질문지만 사용하고, 입력 시 보조 혼합되어야 한다."""
     # 1) MBTI 비활성: 질문지 점수 그대로 반영

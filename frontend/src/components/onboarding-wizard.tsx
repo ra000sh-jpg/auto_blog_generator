@@ -6,6 +6,7 @@ import {
     completeOnboarding,
     fetchNaverConnectStatus,
     fetchOnboardingStatus,
+    fetchPersonaQuestionBank,
     fetchRouterSettings,
     saveOnboardingCategories,
     saveOnboardingSchedule,
@@ -14,6 +15,8 @@ import {
     startNaverConnect,
     verifyApiKey,
     type NaverConnectStatusResponse,
+    type PersonaQuestionBankResponse,
+    type PersonaQuestionItem,
     type ScheduleAllocationItem,
 } from "@/lib/api";
 
@@ -92,6 +95,113 @@ function normalizeAllocations(
     return rows;
 }
 
+const QUESTIONNAIRE_DIMENSIONS = [
+    "structure",
+    "evidence",
+    "distance",
+    "criticism",
+    "density",
+] as const;
+
+type QuestionnaireScores = {
+    structure: number;
+    evidence: number;
+    distance: number;
+    criticism: number;
+    density: number;
+};
+
+type QuestionnairePreview = {
+    scores: QuestionnaireScores;
+    answeredCount: number;
+    requiredCount: number;
+    completionRatio: number;
+};
+
+function calculateQuestionnairePreview(
+    questions: PersonaQuestionItem[],
+    answers: Record<string, string>,
+    requiredCount: number,
+): QuestionnairePreview {
+    const baseScores: QuestionnaireScores = {
+        structure: 50,
+        evidence: 50,
+        distance: 50,
+        criticism: 50,
+        density: 50,
+    };
+
+    if (questions.length === 0) {
+        return {
+            scores: baseScores,
+            answeredCount: 0,
+            requiredCount: Math.max(1, requiredCount || 5),
+            completionRatio: 0,
+        };
+    }
+
+    const resolvedAnswers = new Map<string, string>();
+    for (const [questionId, optionId] of Object.entries(answers)) {
+        if (!questionId || !optionId) continue;
+        resolvedAnswers.set(questionId, optionId);
+    }
+
+    const idealCaps: Record<string, number> = {};
+    const weightedSums: Record<string, number> = {};
+    const weightedCaps: Record<string, number> = {};
+    for (const dimension of QUESTIONNAIRE_DIMENSIONS) {
+        idealCaps[dimension] = 0;
+        weightedSums[dimension] = 0;
+        weightedCaps[dimension] = 0;
+    }
+
+    let answeredCount = 0;
+    for (const question of questions) {
+        const safeWeight = Math.max(1, Number(question.weight || 1));
+        for (const dimension of QUESTIONNAIRE_DIMENSIONS) {
+            const hasEffect = question.options.some(
+                (option) => Number(option.effects?.[dimension] || 0) !== 0,
+            );
+            if (hasEffect) {
+                idealCaps[dimension] += 2 * safeWeight;
+            }
+        }
+
+        const selectedOptionId = resolvedAnswers.get(question.question_id);
+        if (!selectedOptionId) continue;
+        const selectedOption = question.options.find((option) => option.option_id === selectedOptionId);
+        if (!selectedOption) continue;
+        answeredCount += 1;
+
+        for (const dimension of QUESTIONNAIRE_DIMENSIONS) {
+            const effect = Number(selectedOption.effects?.[dimension] || 0);
+            if (effect === 0) continue;
+            weightedSums[dimension] += effect * safeWeight;
+            weightedCaps[dimension] += 2 * safeWeight;
+        }
+    }
+
+    const nextScores: QuestionnaireScores = { ...baseScores };
+    for (const dimension of QUESTIONNAIRE_DIMENSIONS) {
+        const cap = weightedCaps[dimension];
+        if (cap <= 0) {
+            nextScores[dimension] = 50;
+            continue;
+        }
+        const normalized = weightedSums[dimension] / cap;
+        const rawScore = Math.round(50 + normalized * 35);
+        nextScores[dimension] = Math.max(0, Math.min(100, rawScore));
+    }
+
+    const safeRequiredCount = Math.max(1, Math.min(questions.length, requiredCount || 5));
+    return {
+        scores: nextScores,
+        answeredCount,
+        requiredCount: safeRequiredCount,
+        completionRatio: Number((answeredCount / questions.length).toFixed(3)),
+    };
+}
+
 interface OnboardingWizardProps {
     onComplete: () => void;
 }
@@ -125,6 +235,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const [identity, setIdentity] = useState("");
     const [toneHint, setToneHint] = useState("");
     const [interestsText, setInterestsText] = useState("");
+    const [questionBank, setQuestionBank] = useState<PersonaQuestionBankResponse | null>(null);
+    const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
     const [mbtiEnabled, setMbtiEnabled] = useState(false);
     const [mbti, setMbti] = useState("");
     const [mbtiConfidence, setMbtiConfidence] = useState(70);
@@ -147,14 +259,18 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         let isMounted = true;
         async function loadStatus() {
             try {
-                const [response, routerState, naverConnectState] = await Promise.all([
+                const [response, routerState, naverConnectState, questionBankResponse] = await Promise.all([
                     fetchOnboardingStatus(),
                     fetchRouterSettings(),
                     fetchNaverConnectStatus(),
+                    fetchPersonaQuestionBank().catch(() => null),
                 ]);
                 if (!isMounted) return;
 
                 setPersonaId(response.persona_id || "P1");
+                if (questionBankResponse && Array.isArray(questionBankResponse.questions)) {
+                    setQuestionBank(questionBankResponse);
+                }
 
                 // fallback category가 항상 포함되도록 보장
                 const cats = response.categories || [];
@@ -174,6 +290,23 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     );
                     setAgeGroup((response.voice_profile.age_group as string) || "30대");
                     setGender((response.voice_profile.gender as string) || "남성");
+                    setIdentity((response.voice_profile.identity as string) || "");
+                    setToneHint((response.voice_profile.tone_hint as string) || "");
+
+                    const meta = response.voice_profile.questionnaire_meta as Record<string, unknown> | undefined;
+                    const resolvedAnswers = Array.isArray(meta?.resolved_answers) ? meta?.resolved_answers : [];
+                    const restoredAnswers: Record<string, string> = {};
+                    for (const item of resolvedAnswers) {
+                        if (!item || typeof item !== "object") continue;
+                        const payload = item as Record<string, unknown>;
+                        const questionId = String(payload.question_id || "").trim();
+                        const optionId = String(payload.option_id || "").trim();
+                        if (!questionId || !optionId) continue;
+                        restoredAnswers[questionId] = optionId;
+                    }
+                    if (Object.keys(restoredAnswers).length > 0) {
+                        setQuestionAnswers(restoredAnswers);
+                    }
                 }
 
                 const resolvedTarget = Math.max(3, Math.min(5, Number(response.daily_posts_target || 3)));
@@ -226,6 +359,16 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         if (!mbtiEnabled) return 0;
         return Math.round(10 + (mbtiConfidence / 100) * 10);
     }, [mbtiEnabled, mbtiConfidence]);
+
+    const questionnairePreview = useMemo(
+        () =>
+            calculateQuestionnairePreview(
+                questionBank?.questions || [],
+                questionAnswers,
+                questionBank?.required_count || 5,
+            ),
+        [questionBank, questionAnswers],
+    );
 
     async function handleVerifyKey(provider: string, key: string) {
         if (!key) return;
@@ -294,6 +437,13 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         }
     }
 
+    function handleQuestionSelect(questionId: string, optionId: string) {
+        setQuestionAnswers((previous) => ({
+            ...previous,
+            [questionId]: optionId,
+        }));
+    }
+
     async function handleSavePersonaStep() {
         setSaving(true);
         try {
@@ -303,6 +453,21 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 setSaving(false);
                 return;
             }
+            if (
+                questionBank &&
+                questionnairePreview.answeredCount < questionnairePreview.requiredCount
+            ) {
+                setStepMessage(
+                    `상황형 질문을 최소 ${questionnairePreview.requiredCount}개 이상 선택해주세요.`,
+                );
+                setSaving(false);
+                return;
+            }
+
+            const questionnaireAnswers = Object.entries(questionAnswers).map(([questionId, optionId]) => ({
+                question_id: questionId,
+                option_id: optionId,
+            }));
             await savePersonaLab({
                 persona_id: personaId,
                 identity,
@@ -312,13 +477,15 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 mbti: mbtiEnabled ? resolvedMbti : "",
                 mbti_enabled: mbtiEnabled,
                 mbti_confidence: mbtiEnabled ? mbtiConfidence : 0,
+                questionnaire_version: questionBank?.version || "v1",
+                questionnaire_answers: questionnaireAnswers,
                 age_group: ageGroup,
                 gender,
-                structure_score: 50,
-                evidence_score: 50,
-                distance_score: 50,
-                criticism_score: 50,
-                density_score: 50,
+                structure_score: questionnairePreview.scores.structure,
+                evidence_score: questionnairePreview.scores.evidence,
+                distance_score: questionnairePreview.scores.distance,
+                criticism_score: questionnairePreview.scores.criticism,
+                density_score: questionnairePreview.scores.density,
                 style_strength: 40,
             });
             setStep(2);
@@ -586,6 +753,86 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
                         <h2 className="text-xl font-bold">2단계. 나만의 AI 페르소나 설계</h2>
                         <p className="text-sm text-slate-600">블로그를 대신 작성해줄 AI의 직업, 성격, 성향을 세밀하게 설정합니다.</p>
+
+                        <div className="rounded-2xl border border-indigo-100 bg-indigo-50/40 p-5 space-y-4">
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <h3 className="font-semibold text-slate-900">상황형 질문지 (Persona Lab)</h3>
+                                    <p className="text-xs text-slate-600 mt-1">
+                                        취향이 아닌 행동 패턴을 기반으로 5차원 글쓰기 성향을 계산합니다.
+                                    </p>
+                                </div>
+                                <div className="text-right">
+                                    <p className="text-xs text-slate-500">진행률</p>
+                                    <p className="text-sm font-bold text-indigo-700">
+                                        {questionnairePreview.answeredCount}/{questionBank?.questions?.length || 0}
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="h-2 w-full overflow-hidden rounded-full bg-indigo-100">
+                                <div
+                                    className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-blue-500 transition-all"
+                                    style={{ width: `${Math.round(questionnairePreview.completionRatio * 100)}%` }}
+                                />
+                            </div>
+
+                            {questionBank && questionBank.questions.length > 0 ? (
+                                <div className="space-y-3">
+                                    {questionBank.questions.map((question) => (
+                                        <div key={question.question_id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                                            <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">
+                                                {question.title}
+                                            </p>
+                                            <p className="mt-1 text-sm font-medium text-slate-800">{question.scenario}</p>
+                                            <div className="mt-3 grid gap-2">
+                                                {question.options.map((option) => {
+                                                    const selected = questionAnswers[question.question_id] === option.option_id;
+                                                    return (
+                                                        <button
+                                                            key={option.option_id}
+                                                            type="button"
+                                                            onClick={() => handleQuestionSelect(question.question_id, option.option_id)}
+                                                            className={`rounded-lg border px-3 py-2 text-left transition-all ${selected
+                                                                ? "border-indigo-500 bg-indigo-50 text-indigo-900 shadow-sm"
+                                                                : "border-slate-200 bg-white text-slate-700 hover:border-indigo-300 hover:bg-slate-50"
+                                                                }`}
+                                                        >
+                                                            <p className="text-sm font-semibold">{option.label}</p>
+                                                            <p className="text-xs text-slate-500 mt-1">{option.description}</p>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                                    질문지 로딩에 실패했습니다. 임시로 기본 점수(50) 기반으로 저장됩니다.
+                                </div>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                                {[
+                                    { key: "structure", label: "구조성" },
+                                    { key: "evidence", label: "근거성" },
+                                    { key: "distance", label: "심리적 거리" },
+                                    { key: "criticism", label: "비판 수위" },
+                                    { key: "density", label: "문체 밀도" },
+                                ].map((item) => (
+                                    <div key={item.key} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-center">
+                                        <p className="text-[11px] text-slate-500">{item.label}</p>
+                                        <p className="text-lg font-bold text-indigo-700">
+                                            {questionnairePreview.scores[item.key as keyof QuestionnaireScores]}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+                            <p className="text-xs text-slate-500">
+                                저장 조건: 최소 {questionnairePreview.requiredCount}개 이상 응답
+                            </p>
+                        </div>
 
                         <div className="space-y-4">
                             <div className="grid grid-cols-3 gap-4">

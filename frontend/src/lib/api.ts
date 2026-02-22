@@ -149,6 +149,8 @@ export type PersonaLabPayload = {
   mbti: string;
   mbti_enabled: boolean;
   mbti_confidence: number;
+  questionnaire_version?: string;
+  questionnaire_answers?: PersonaQuestionAnswerItem[];
   age_group: string;
   gender: string;
   structure_score: number;
@@ -163,6 +165,34 @@ export type PersonaLabResponse = {
   persona_id: string;
   voice_profile: Record<string, unknown>;
   recommended_categories: string[];
+};
+
+export type PersonaQuestionAnswerItem = {
+  question_id: string;
+  option_id: string;
+};
+
+export type PersonaQuestionOption = {
+  option_id: string;
+  label: string;
+  description: string;
+  effects: Record<string, number>;
+};
+
+export type PersonaQuestionItem = {
+  question_id: string;
+  title: string;
+  scenario: string;
+  target_dimension: string;
+  weight: number;
+  options: PersonaQuestionOption[];
+};
+
+export type PersonaQuestionBankResponse = {
+  version: string;
+  required_count: number;
+  dimensions: string[];
+  questions: PersonaQuestionItem[];
 };
 
 export type CategorySetupPayload = {
@@ -434,6 +464,10 @@ export async function savePersonaLab(payload: PersonaLabPayload): Promise<Person
     method: "POST",
     body: payload,
   });
+}
+
+export async function fetchPersonaQuestionBank(): Promise<PersonaQuestionBankResponse> {
+  return requestJSON<PersonaQuestionBankResponse>("/onboarding/persona/questions");
 }
 
 export type ApiVerifyPayload = {
