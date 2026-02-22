@@ -118,6 +118,18 @@ type QuestionnairePreview = {
     completionRatio: number;
 };
 
+type PersonaSummaryCard = {
+    title: string;
+    subtitle: string;
+    tags: string[];
+};
+
+type RadarGeometry = {
+    dataPoints: string;
+    basePoints: string;
+    axes: Array<{ x1: number; y1: number; x2: number; y2: number; labelX: number; labelY: number; label: string }>;
+};
+
 function calculateQuestionnairePreview(
     questions: PersonaQuestionItem[],
     answers: Record<string, string>,
@@ -199,6 +211,93 @@ function calculateQuestionnairePreview(
         answeredCount,
         requiredCount: safeRequiredCount,
         completionRatio: Number((answeredCount / questions.length).toFixed(3)),
+    };
+}
+
+function derivePersonaSummary(scores: QuestionnaireScores): PersonaSummaryCard {
+    const { structure, evidence, distance, criticism, density } = scores;
+    const isHigh = (value: number) => value >= 65;
+    const isLow = (value: number) => value <= 35;
+
+    if (isHigh(structure) && isHigh(evidence) && isHigh(criticism)) {
+        return {
+            title: "냉철한 팩트폭격기",
+            subtitle: "데이터 중심으로 논점을 날카롭게 정리하는 분석형 페르소나",
+            tags: ["#두괄식", "#근거중심", "#직설형"],
+        };
+    }
+    if (isHigh(structure) && isHigh(evidence) && isHigh(distance)) {
+        return {
+            title: "분석적 전문가",
+            subtitle: "권위 있는 톤으로 근거와 논리를 촘촘히 전달하는 타입",
+            tags: ["#전문가톤", "#체계적", "#객관성"],
+        };
+    }
+    if (isLow(distance) && isLow(criticism) && isLow(density)) {
+        return {
+            title: "친근한 생활 코치",
+            subtitle: "부담 없이 읽히는 말투로 실전 팁을 전달하는 공감형 페르소나",
+            tags: ["#친근한톤", "#부드러운피드백", "#가독성"],
+        };
+    }
+    if (isHigh(density) && isHigh(structure)) {
+        return {
+            title: "치밀한 아카이버",
+            subtitle: "정보량과 구조를 동시에 챙기는 리서치형 페르소나",
+            tags: ["#정보밀도", "#체계정리", "#실무형"],
+        };
+    }
+    return {
+        title: "균형 잡힌 실전 가이드",
+        subtitle: "상황에 맞게 톤과 강도를 조절하는 하이브리드 페르소나",
+        tags: ["#균형형", "#실전중심", "#유연한스타일"],
+    };
+}
+
+function buildRadarGeometry(scores: QuestionnaireScores): RadarGeometry {
+    const axes = [
+        { key: "structure", label: "구조" },
+        { key: "evidence", label: "근거" },
+        { key: "distance", label: "거리" },
+        { key: "criticism", label: "비판" },
+        { key: "density", label: "밀도" },
+    ] as const;
+
+    const center = 90;
+    const radius = 68;
+    const step = (Math.PI * 2) / axes.length;
+    const startAngle = -Math.PI / 2;
+
+    const dataPoints: string[] = [];
+    const basePoints: string[] = [];
+    const lines: RadarGeometry["axes"] = [];
+
+    axes.forEach((axis, index) => {
+        const angle = startAngle + step * index;
+        const maxX = center + radius * Math.cos(angle);
+        const maxY = center + radius * Math.sin(angle);
+        const value = Math.max(0, Math.min(100, Number(scores[axis.key])));
+        const ratio = value / 100;
+        const px = center + radius * ratio * Math.cos(angle);
+        const py = center + radius * ratio * Math.sin(angle);
+
+        dataPoints.push(`${px.toFixed(2)},${py.toFixed(2)}`);
+        basePoints.push(`${maxX.toFixed(2)},${maxY.toFixed(2)}`);
+        lines.push({
+            x1: center,
+            y1: center,
+            x2: maxX,
+            y2: maxY,
+            labelX: center + (radius + 18) * Math.cos(angle),
+            labelY: center + (radius + 18) * Math.sin(angle),
+            label: axis.label,
+        });
+    });
+
+    return {
+        dataPoints: dataPoints.join(" "),
+        basePoints: basePoints.join(" "),
+        axes: lines,
     };
 }
 
@@ -368,6 +467,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 questionBank?.required_count || 5,
             ),
         [questionBank, questionAnswers],
+    );
+    const personaSummary = useMemo(
+        () => derivePersonaSummary(questionnairePreview.scores),
+        [questionnairePreview.scores],
+    );
+    const radarGeometry = useMemo(
+        () => buildRadarGeometry(questionnairePreview.scores),
+        [questionnairePreview.scores],
     );
 
     async function handleVerifyKey(provider: string, key: string) {
@@ -828,6 +935,56 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                         </p>
                                     </div>
                                 ))}
+                            </div>
+
+                            <div className="rounded-xl border border-slate-200 bg-white p-4">
+                                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                                    <div>
+                                        <p className="text-xs uppercase tracking-wide text-indigo-600">Persona Result</p>
+                                        <h4 className="mt-1 text-lg font-bold text-slate-900">{personaSummary.title}</h4>
+                                        <p className="mt-1 text-sm text-slate-600">{personaSummary.subtitle}</p>
+                                        <div className="mt-2 flex flex-wrap gap-2">
+                                            {personaSummary.tags.map((tag) => (
+                                                <span
+                                                    key={tag}
+                                                    className="rounded-full bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700"
+                                                >
+                                                    {tag}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="mx-auto w-full max-w-[220px]">
+                                        <svg viewBox="0 0 180 180" className="h-[180px] w-full">
+                                            <circle cx="90" cy="90" r="68" fill="none" stroke="#E2E8F0" strokeWidth="1.2" />
+                                            <circle cx="90" cy="90" r="46" fill="none" stroke="#E2E8F0" strokeWidth="1" />
+                                            <circle cx="90" cy="90" r="24" fill="none" stroke="#E2E8F0" strokeWidth="1" />
+                                            <polygon points={radarGeometry.basePoints} fill="rgba(99,102,241,0.04)" stroke="#CBD5E1" strokeWidth="1" />
+                                            {radarGeometry.axes.map((axis) => (
+                                                <g key={`${axis.label}-${axis.x2}`}>
+                                                    <line x1={axis.x1} y1={axis.y1} x2={axis.x2} y2={axis.y2} stroke="#CBD5E1" strokeWidth="1" />
+                                                    <text
+                                                        x={axis.labelX}
+                                                        y={axis.labelY}
+                                                        textAnchor="middle"
+                                                        dominantBaseline="middle"
+                                                        fontSize="10"
+                                                        fill="#475569"
+                                                    >
+                                                        {axis.label}
+                                                    </text>
+                                                </g>
+                                            ))}
+                                            <polygon
+                                                points={radarGeometry.dataPoints}
+                                                fill="rgba(79,70,229,0.32)"
+                                                stroke="#4338CA"
+                                                strokeWidth="2"
+                                            />
+                                            <circle cx="90" cy="90" r="2.5" fill="#4338CA" />
+                                        </svg>
+                                    </div>
+                                </div>
                             </div>
                             <p className="text-xs text-slate-500">
                                 저장 조건: 최소 {questionnairePreview.requiredCount}개 이상 응답
