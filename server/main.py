@@ -23,6 +23,8 @@ from server.routers.onboarding import router as onboarding_router
 from server.routers.router_settings import router as router_settings_router
 from server.routers.scheduler import router as scheduler_router
 from server.routers.scheduler import set_scheduler_instance
+from server.routers.telegram_webhook import router as telegram_webhook_router
+from server.routers.telegram_webhook import collect_pending_updates
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     스케줄러는 큐 시드·상태 조회 전용으로 동작한다.
     실제 LLM 생성·발행은 run_scheduler_forever() 별도 프로세스에서 수행한다.
     """
-    _ = get_job_store()
+    job_store = get_job_store()
+
+    # Telegram 오프라인 폴백: 서버 재시작 시 수면 중 쌓인 메시지 수집
+    try:
+        stored = await collect_pending_updates(job_store)
+        if stored > 0:
+            logger.info("Telegram offline fallback: stored %d items on startup", stored)
+    except Exception as exc:
+        logger.warning("Telegram offline fallback failed (non-fatal): %s", exc)
 
     scheduler = _build_scheduler()
     if scheduler is not None:
@@ -128,6 +138,7 @@ app.include_router(idea_vault_router, prefix="/api", tags=["idea-vault"])
 app.include_router(router_settings_router, prefix="/api", tags=["router-settings"])
 app.include_router(naver_connect_router, prefix="/api", tags=["naver-connect"])
 app.include_router(scheduler_router, prefix="/api", tags=["scheduler"])
+app.include_router(telegram_webhook_router, prefix="/api", tags=["telegram"])
 
 
 @app.get("/", tags=["root"])

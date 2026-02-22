@@ -343,6 +343,16 @@ class JobStore:
                 conn.execute("ALTER TABLE idea_vault ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
             if "consumed_at" not in existing_idea_columns:
                 conn.execute("ALTER TABLE idea_vault ADD COLUMN consumed_at TEXT NOT NULL DEFAULT ''")
+            if "source_url" not in existing_idea_columns:
+                conn.execute("ALTER TABLE idea_vault ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
+            # source_url 중복 차단 인덱스 (빈 문자열 제외)
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_idea_vault_source_url
+                ON idea_vault(source_url)
+                WHERE source_url != ''
+                """
+            )
 
     def _generate_idempotency_key(self, title: str, scheduled_at: str, persona_id: str) -> str:
         """중복 방지용 idempotency key 생성"""
@@ -1198,7 +1208,11 @@ class JobStore:
         return {str(row["setting_key"]): str(row["setting_value"]) for row in rows}
 
     def add_idea_vault_items(self, items: List[Dict[str, Any]]) -> int:
-        """아이디어 창고 아이템을 대량 저장한다."""
+        """아이디어 창고 아이템을 대량 저장한다.
+
+        source_url 이 제공된 경우 UNIQUE INDEX 를 통해 중복 URL 을 자동 차단한다.
+        중복 충돌 시 해당 아이템을 조용히 건너뛴다(OR IGNORE).
+        """
         if not items:
             return 0
 
@@ -1212,33 +1226,41 @@ class JobStore:
                 mapped_category = str(item.get("mapped_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
                 topic_mode = str(item.get("topic_mode", "cafe")).strip().lower() or "cafe"
                 parser_used = str(item.get("parser_used", "heuristic")).strip() or "heuristic"
-                conn.execute(
-                    """
-                    INSERT INTO idea_vault (
-                        raw_text,
-                        mapped_category,
-                        topic_mode,
-                        parser_used,
-                        status,
-                        queued_job_id,
-                        created_at,
-                        updated_at,
-                        consumed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        raw_text,
-                        mapped_category,
-                        topic_mode,
-                        parser_used,
-                        self.IDEA_STATUS_PENDING,
-                        "",
-                        now,
-                        now,
-                        "",
-                    ),
-                )
-                inserted += 1
+                source_url = str(item.get("source_url", "")).strip()
+                try:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO idea_vault (
+                            raw_text,
+                            mapped_category,
+                            topic_mode,
+                            parser_used,
+                            status,
+                            queued_job_id,
+                            created_at,
+                            updated_at,
+                            consumed_at,
+                            source_url
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            raw_text,
+                            mapped_category,
+                            topic_mode,
+                            parser_used,
+                            self.IDEA_STATUS_PENDING,
+                            "",
+                            now,
+                            now,
+                            "",
+                            source_url,
+                        ),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                        inserted += 1
+                except Exception:
+                    # 중복 URL 등 예외 시 조용히 건너뜀
+                    pass
         return inserted
 
     def get_idea_vault_pending_count(self) -> int:

@@ -13,6 +13,7 @@ from datetime import date, datetime, time as time_obj, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
+    from ..collectors.idea_vault_auto_collector import IdeaVaultAutoCollector
     from ..collectors.metrics_collector import MetricsCollector
     from ..seo.feedback_analyzer import FeedbackAnalyzer
     from .job_store import JobStore
@@ -91,6 +92,7 @@ class SchedulerService:
         metrics_collector: Optional["MetricsCollector"] = None,
         feedback_analyzer: Optional["FeedbackAnalyzer"] = None,
         job_store: Optional["JobStore"] = None,
+        idea_vault_collector: Optional["IdeaVaultAutoCollector"] = None,
         timezone_name: str = "Asia/Seoul",
         daily_posts_target: int = 3,
         min_post_interval_minutes: int = 60,
@@ -110,6 +112,7 @@ class SchedulerService:
         self.metrics_collector = metrics_collector
         self.feedback_analyzer = feedback_analyzer
         self.job_store = job_store
+        self.idea_vault_collector = idea_vault_collector
         self.timezone_name = timezone_name
         self.daily_posts_target = max(1, daily_posts_target)
         self.min_post_interval_minutes = max(1, min_post_interval_minutes)
@@ -211,6 +214,25 @@ class SchedulerService:
                 misfire_grace_time=self.MISFIRE_GRACE_TIME,
             )
 
+        if self.idea_vault_collector:
+            # Track A: 매일 06:00 / 15:00 두 번 RSS 자동 수집
+            self._scheduler.add_job(
+                self._run_idea_vault_auto_collect,
+                cron_trigger(hour=6, minute=0),
+                id="idea_vault_collect_morning",
+                name="아이디어 금고 자동 수집 (오전)",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+            self._scheduler.add_job(
+                self._run_idea_vault_auto_collect,
+                cron_trigger(hour=15, minute=0),
+                id="idea_vault_collect_afternoon",
+                name="아이디어 금고 자동 수집 (오후)",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+
         logger.info("Scheduler setup complete")
 
     async def start(self) -> None:
@@ -291,6 +313,17 @@ class SchedulerService:
         await self._run_daily_quota_seed()
         await self._run_draft_prefetch()
         await self._run_daily_target_check()
+
+    async def _run_idea_vault_auto_collect(self) -> None:
+        """RSS 피드에서 아이디어를 수집해 idea_vault 에 저장한다 (Track A)."""
+        logger.info("Running idea vault auto collect")
+        if not self.idea_vault_collector:
+            return
+        try:
+            saved = await self.idea_vault_collector.run_once()
+            logger.info("Idea vault auto collect: saved %d items", saved)
+        except Exception as exc:
+            logger.error("Idea vault auto collect failed: %s", exc)
 
     async def _run_trend_collection(self) -> None:
         logger.info("Running trend collection")
