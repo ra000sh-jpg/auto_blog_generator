@@ -14,7 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ko">
-      <body className="antialiased">
+      <body className="antialiased" suppressHydrationWarning>
         <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#ebf5ff_0%,_#f4f8f2_40%,_#fcfcf9_100%)] text-slate-900">
           <header className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/90 backdrop-blur">
             <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-3 sm:px-6">

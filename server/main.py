@@ -23,6 +23,7 @@ from server.routers.onboarding import router as onboarding_router
 from server.routers.router_settings import router as router_settings_router
 from server.routers.scheduler import router as scheduler_router
 from server.routers.scheduler import set_scheduler_instance
+from server.routers.stats import router as stats_router
 from server.routers.telegram_webhook import router as telegram_webhook_router
 from server.routers.telegram_webhook import collect_pending_updates
 
@@ -138,6 +139,7 @@ app.include_router(idea_vault_router, prefix="/api", tags=["idea-vault"])
 app.include_router(router_settings_router, prefix="/api", tags=["router-settings"])
 app.include_router(naver_connect_router, prefix="/api", tags=["naver-connect"])
 app.include_router(scheduler_router, prefix="/api", tags=["scheduler"])
+app.include_router(stats_router, prefix="/api", tags=["stats"])
 app.include_router(telegram_webhook_router, prefix="/api", tags=["telegram"])
 
 

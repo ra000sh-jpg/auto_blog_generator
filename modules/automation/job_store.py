@@ -122,6 +122,12 @@ class JobStore:
     STATUS_QUEUED = "queued"
     STATUS_RUNNING = "running"
     STATUS_RETRY_WAIT = "retry_wait"
+    
+    # 품질 게이트 관련 상태 (Phase 25 신규)
+    STATUS_GENERATED = "generated"
+    STATUS_EVALUATING = "evaluating"
+    STATUS_FAILED_QUALITY = "failed_quality"
+    
     STATUS_READY = "ready_to_publish"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
@@ -658,7 +664,7 @@ class JobStore:
                     return True
 
             else:
-                # failed로 전환
+                final_status = self.STATUS_FAILED_QUALITY if error_code == "QUALITY_REJECTED" else self.STATUS_FAILED
                 cursor = conn.execute("""
                     UPDATE jobs
                     SET status = ?,
@@ -671,7 +677,7 @@ class JobStore:
                     WHERE job_id = ?
                     AND status = ?
                 """, (
-                    self.STATUS_FAILED,
+                    final_status,
                     error_code,
                     error_message,
                     now,

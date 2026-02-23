@@ -307,3 +307,68 @@ async def collect_pending_updates(job_store: Any) -> int:
 
     logger.info("Telegram offline fallback: stored %d new vault items", stored)
     return stored
+
+
+# ---------------------------------------------------------------------------
+# 텔레그램 라이브 상태 엔드포인트
+# ---------------------------------------------------------------------------
+
+
+from pydantic import BaseModel  # noqa: E402 (파일 하단 import)
+
+
+class TelegramStatusResponse(BaseModel):
+    """텔레그램 봇 라이브 연결 상태."""
+
+    configured: bool
+    live_ok: bool
+    bot_username: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.get(
+    "/telegram/status",
+    response_model=TelegramStatusResponse,
+    summary="텔레그램 봇 라이브 상태 확인",
+)
+async def get_telegram_status(
+    job_store: Any = Depends(get_job_store),
+) -> TelegramStatusResponse:
+    """Telegram getMe API를 호출해 봇 연결 상태를 실시간으로 확인한다."""
+    bot_token = _get_bot_token(job_store)
+
+    if not bot_token:
+        return TelegramStatusResponse(
+            configured=False,
+            live_ok=False,
+            error="봇 토큰 미설정",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"https://api.telegram.org/bot{bot_token}/getMe"
+            )
+            data = resp.json()
+
+        if data.get("ok"):
+            username = data.get("result", {}).get("username")
+            return TelegramStatusResponse(
+                configured=True,
+                live_ok=True,
+                bot_username=username,
+            )
+        else:
+            description = data.get("description", "알 수 없는 오류")
+            return TelegramStatusResponse(
+                configured=True,
+                live_ok=False,
+                error=description,
+            )
+    except Exception as exc:
+        logger.warning("Telegram status check failed: %s", exc)
+        return TelegramStatusResponse(
+            configured=True,
+            live_ok=False,
+            error=str(exc),
+        )

@@ -98,6 +98,7 @@ class PipelineService:
         notifier: Optional[NotifierLike] = None,
         internal_retry_attempts: int = 1,
         queue_retry_limit: int = 1,
+        quality_evaluator: Optional[Any] = None,  # Phase 25: QualityEvaluator (optional)
     ):
         self.job_store = job_store
         self.publisher = publisher
@@ -113,6 +114,7 @@ class PipelineService:
         self.notifier = notifier
         self.internal_retry_attempts = max(0, internal_retry_attempts)
         self.queue_retry_limit = max(0, queue_retry_limit)
+        self.quality_evaluator = quality_evaluator  # Phase 25
 
     async def run_job(self, job: Job) -> None:
         """
@@ -757,6 +759,96 @@ class PipelineService:
         payload = await self._build_publish_payload(job, allow_internal_retry=True)
         if not payload:
             return False
+
+        # ──────────────────────────────────────────────────────────
+        # Phase 25: Gate 2 - LLM 기반 페르소나 톤앤매너 평가
+        # quality_evaluator가 주입된 경우에만 실행 (선택적)
+        # ──────────────────────────────────────────────────────────
+        if self.quality_evaluator is not None:
+            # 페르소나 설명 문자열 수집
+            persona_id = str(getattr(job, "persona_id", ""))
+            persona_desc = f"persona_id={persona_id}"
+            # content_generator가 quality_snapshot에 persona 정보를 저장한 경우 활용
+            q_snap = payload.get("quality_snapshot", {})
+            if isinstance(q_snap, dict):
+                tone = q_snap.get("tone_hint") or q_snap.get("persona_tone", "")
+                if tone:
+                    persona_desc = f"persona_id={persona_id}, tone={tone}"
+
+            final_content = str(payload.get("final_content", ""))
+
+            # 현재 평가 횟수는 job 메타 quality_snapshot에 체크포인트로 저장
+            q_meta = q_snap if isinstance(q_snap, dict) else {}
+            eval_retry_count = int(q_meta.get("evaluator_retry_count", 0))
+
+            eval_result = await self.quality_evaluator.evaluate(
+                content=final_content,
+                persona_desc=persona_desc,
+                retry_count=eval_retry_count,
+            )
+
+            # 점수를 quality_snapshot에 기록
+            if not isinstance(payload.get("quality_snapshot"), dict):
+                payload["quality_snapshot"] = {}
+            payload["quality_snapshot"]["gate2_score"] = eval_result.score
+            payload["quality_snapshot"]["gate2_passed"] = eval_result.passed
+            payload["quality_snapshot"]["gate2_feedback"] = eval_result.feedback
+
+            if not eval_result.passed:
+                if eval_result.gate == "correction_needed":
+                    # 재작성 루프: feedback을 generate_fn에 주입하고 재생성
+                    correction_prompt = self.quality_evaluator.build_correction_prompt(
+                        original_content=final_content,
+                        feedback=eval_result.feedback,
+                        persona_desc=persona_desc,
+                    )
+                    logger.info(
+                        "Gate 2 correction loop triggered (retry %d/%d)",
+                        eval_retry_count + 1,
+                        self.quality_evaluator.max_retries,
+                        extra={"job_id": job.job_id},
+                    )
+                    # Job 메타데이터에 피드백 기록 후 재시도
+                    with self.job_store.connection() as conn:
+                        from .time_utils import now_utc
+                        import json as _json
+                        _snap = {**q_meta,
+                                 "evaluator_retry_count": eval_retry_count + 1,
+                                 "evaluator_feedback": eval_result.feedback,
+                                 "correction_prompt": correction_prompt}
+                        conn.execute(
+                            "UPDATE jobs SET quality_snapshot=?, updated_at=? WHERE job_id=?",
+                            (_json.dumps(_snap), now_utc(), job.job_id)
+                        )
+                    # 재생성 시도 (한 번만): 기존 _build_publish_payload 재사용
+                    payload = await self._build_publish_payload(job, allow_internal_retry=False)
+                    if not payload:
+                        return False
+
+                elif eval_result.gate == "rejected":
+                    # 최대 재시도 초과: 품질 실패 상태로 확정
+                    logger.warning(
+                        "Gate 2 rejected: QUALITY_REJECTED (job=%s, score=%d)",
+                        job.job_id, eval_result.score,
+                    )
+                    self._fail_with_retry_policy(
+                        job=job,
+                        error_code="QUALITY_REJECTED",
+                        error_message=f"페르소나 일치도 미달 (score={eval_result.score}/100): {eval_result.feedback[:200]}",
+                    )
+                    if self.notifier:
+                        self.notifier.notify_critical_background(
+                            error_code="QUALITY_REJECTED",
+                            message=(
+                                f"🚫 [Quality Gate 2] Job 품질 반려\n"
+                                f"• job_id: {job.job_id}\n"
+                                f"• score: {eval_result.score}/100\n"
+                                f"• 사유: {eval_result.feedback[:150]}"
+                            ),
+                            job_id=job.job_id,
+                        )
+                    return False
+        # ──────────────────────────────────────────────────────────
 
         saved = self.job_store.save_prepared_payload(job.job_id, payload)
         if saved:

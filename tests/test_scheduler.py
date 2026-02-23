@@ -103,6 +103,9 @@ def test_post_interval_check():
         def get_last_completed_time(self) -> Optional[datetime]:
             return datetime.now(timezone.utc) - timedelta(minutes=30)
 
+        def get_system_setting(self, key: str, default: str = "") -> str:
+            return default
+
     scheduler = SchedulerService(
         pipeline_service=PipelineStub(),  # type: ignore[arg-type]
         job_store=JobStoreStub(),  # type: ignore[arg-type]

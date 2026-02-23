@@ -1248,6 +1248,20 @@ async def run_scheduler_forever(
     except Exception as exc:
         logger.warning("Scheduler LLM init failed, fallback to stub: %s", exc)
 
+    quality_evaluator = None
+    try:
+        from ..llm.provider_factory import create_client
+        from .quality_evaluator import QualityEvaluator
+        eval_client = create_client(
+            provider=config.llm.primary_provider,
+            model=config.llm.primary_model,
+            timeout_sec=config.llm.timeout_sec,
+        )
+        quality_evaluator = QualityEvaluator(llm_client=eval_client)
+        logger.info("Scheduler quality evaluator backend: llm")
+    except Exception as exc:
+        logger.warning("Scheduler quality evaluator init failed: %s", exc)
+
     pipeline_service = PipelineService(
         job_store=job_store,
         publisher=publisher,
@@ -1259,6 +1273,7 @@ async def run_scheduler_forever(
         retry_backoff_base_sec=config.retry.backoff_base_sec,
         retry_backoff_max_sec=config.retry.backoff_max_sec,
         image_generator=image_generator,
+        quality_evaluator=quality_evaluator,
     )
 
     scheduler = SchedulerService(

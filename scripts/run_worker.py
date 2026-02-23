@@ -158,6 +158,22 @@ async def main_async(args: argparse.Namespace):
         except Exception as exc:
             logger.warning("Image generator initialization skipped: %s", exc)
 
+    quality_evaluator = None
+    if args.use_llm:
+        try:
+            from modules.llm.provider_factory import create_client
+            from modules.automation.quality_evaluator import QualityEvaluator
+
+            eval_client = create_client(
+                provider=app_config.llm.primary_provider,
+                model=app_config.llm.primary_model,
+                timeout_sec=app_config.llm.timeout_sec,
+            )
+            quality_evaluator = QualityEvaluator(llm_client=eval_client)
+            logger.info("QualityEvaluator initialized for worker")
+        except Exception as exc:
+            logger.warning("QualityEvaluator initialization skipped: %s", exc)
+
     # 컴포넌트 초기화
     store = JobStore(db_path=args.db)
     metrics_store = MetricsStore(db_path=args.db)
@@ -171,6 +187,7 @@ async def main_async(args: argparse.Namespace):
         retry_backoff_base_sec=app_config.retry.backoff_base_sec,
         retry_backoff_max_sec=app_config.retry.backoff_max_sec,
         image_generator=image_generator,
+        quality_evaluator=quality_evaluator,
     )
 
     worker_config = WorkerConfig(

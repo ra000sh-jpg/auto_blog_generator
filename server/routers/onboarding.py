@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -128,6 +128,7 @@ class ScheduleAllocationItem(BaseModel):
     category: str
     topic_mode: str = "cafe"
     count: int = Field(default=0, ge=0, le=20)
+    percentage: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 
 
 class ScheduleSetupRequest(BaseModel):
@@ -200,6 +201,14 @@ class ApiVerifyResponse(BaseModel):
 
     valid: bool
     message: str
+
+
+def _mask_secret(value: str) -> str:
+    """민감 정보를 부분 마스킹한다. (앞 4자리 노출 + 나머지 *)"""
+    stripped = str(value or "").strip()
+    if len(stripped) <= 4:
+        return "****"
+    return stripped[:4] + "*" * (len(stripped) - 4)
 
 
 def _to_json_string(value: object) -> str:
@@ -780,9 +789,32 @@ def save_schedule(
         min(normalized_target, int(request.idea_vault_daily_quota)),
     )
     non_vault_target = max(0, normalized_target - normalized_idea_vault_quota)
+
+    # percentage 필드가 지정된 경우 count로 자동 변환
+    resolved_allocations: List[ScheduleAllocationItem] = []
+    has_percentage = any(
+        item.percentage is not None for item in request.allocations
+    )
+    if has_percentage and non_vault_target > 0:
+        total_pct = sum(
+            float(item.percentage or 0.0) for item in request.allocations
+        )
+        effective_pct = max(total_pct, 0.01)  # 0 분모 방지
+        for item in request.allocations:
+            raw_count = (float(item.percentage or 0.0) / effective_pct) * non_vault_target
+            resolved_allocations.append(
+                ScheduleAllocationItem(
+                    category=item.category,
+                    topic_mode=item.topic_mode,
+                    count=max(0, int(round(raw_count))),
+                )
+            )
+    else:
+        resolved_allocations = list(request.allocations)
+
     categories = _parse_json_list(job_store.get_system_setting("custom_categories", "[]"))
     allocations = _normalize_allocations(
-        requested=request.allocations,
+        requested=resolved_allocations,
         daily_posts_target=non_vault_target,
         fallback_categories=categories,
     )

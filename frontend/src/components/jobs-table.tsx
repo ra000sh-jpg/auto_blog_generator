@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { fetchJobs, type JobsResponse } from "@/lib/api";
+import { fetchJobs, fetchJobDetail, type JobsResponse, type JobDetailResponse } from "@/lib/api";
 
 const STATUS_STYLE: Record<string, string> = {
   queued: "bg-violet-100 text-violet-800 border-violet-300",
@@ -37,9 +37,39 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [jobDetail, setJobDetail] = useState<JobDetailResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+
   useEffect(() => {
     setPage(1);
   }, [reloadToken]);
+
+  useEffect(() => {
+    if (!selectedJobId) {
+      setJobDetail(null);
+      setDetailError("");
+      return;
+    }
+    let isMounted = true;
+    async function loadDetail() {
+      setDetailLoading(true);
+      setDetailError("");
+      try {
+        const res = await fetchJobDetail(selectedJobId as string);
+        if (isMounted) setJobDetail(res);
+      } catch (err) {
+        if (isMounted) {
+          setDetailError(err instanceof Error ? err.message : "상세 정보를 불러오지 못했습니다.");
+        }
+      } finally {
+        if (isMounted) setDetailLoading(false);
+      }
+    }
+    loadDetail();
+    return () => { isMounted = false; };
+  }, [selectedJobId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -149,7 +179,13 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
               return (
                 <tr key={job.job_id} className="border-t border-slate-200">
                   <td className="px-3 py-3">
-                    <p className="font-medium text-slate-900">{job.title}</p>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedJobId(job.job_id)}
+                      className="text-left font-medium text-slate-900 transition hover:text-blue-600 hover:underline"
+                    >
+                      {job.title}
+                    </button>
                     <p className="text-xs text-slate-500">{job.job_id}</p>
                   </td>
                   <td className="px-3 py-3">
@@ -173,6 +209,68 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
           </tbody>
         </table>
       </div>
+
+      {selectedJobId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-xl">
+            <header className="flex items-center justify-between border-b border-slate-200 p-4">
+              <h3 className="font-semibold text-slate-900">Job DetailViewer</h3>
+              <button
+                type="button"
+                className="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                onClick={() => setSelectedJobId(null)}
+              >
+                ✕
+              </button>
+            </header>
+            <div className="flex-1 overflow-y-auto p-4">
+              {detailLoading && <p className="text-sm text-slate-500">불러오는 중...</p>}
+              {detailError && <p className="text-sm text-rose-600">{detailError}</p>}
+              {jobDetail && !detailLoading && !detailError && (
+                <div className="space-y-4 text-sm">
+                  <div>
+                    <span className="font-semibold text-slate-800">Job ID:</span>{" "}
+                    <span className="text-slate-600">{jobDetail.job_id}</span>
+                  </div>
+                  <div>
+                    <span className="font-semibold text-slate-800">Title:</span>{" "}
+                    <span className="text-slate-600">{jobDetail.title}</span>
+                  </div>
+                  <div className="flex gap-4">
+                    <div>
+                      <span className="font-semibold text-slate-800">Status:</span>{" "}
+                      <span className="text-slate-600">{jobDetail.status}</span>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-800">Platform:</span>{" "}
+                      <span className="text-slate-600">{jobDetail.platform}</span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <h4 className="mb-2 font-semibold text-slate-800">Final Content</h4>
+                    {jobDetail.final_content ? (
+                      <div className="whitespace-pre-wrap text-slate-700 font-mono text-xs">
+                        {jobDetail.final_content.replace(/(!\[.*\]\(.*?\))/g, "[📷 이미지 삽입점]")}
+                      </div>
+                    ) : (
+                      <p className="text-slate-500 italic">내용이 생성되지 않았습니다.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <footer className="border-t border-slate-200 p-4 text-right">
+              <button
+                type="button"
+                onClick={() => setSelectedJobId(null)}
+                className="rounded-full bg-slate-200 px-4 py-2 text-sm font-medium text-slate-800 transition hover:bg-slate-300"
+              >
+                닫기
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

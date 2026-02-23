@@ -326,7 +326,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     });
     const [imageEngine, setImageEngine] = useState("pexels");
     const [imageEnabled, setImageEnabled] = useState(true);
-    const [imagesPerPost, setImagesPerPost] = useState(1);
+    const [imagesPerPostMin, setImagesPerPostMin] = useState(0);
+    const [imagesPerPostMax, setImagesPerPostMax] = useState(2);
     const [apiStatuses, setApiStatuses] = useState<Record<string, { valid: boolean; message: string; checking: boolean }>>({});
 
     // Step 2: Persona Edit
@@ -423,7 +424,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 setTextApiMasks(routerState.settings.text_api_keys_masked || {});
                 setImageEngine(routerState.settings.image_engine || "pexels");
                 setImageEnabled(Boolean(routerState.settings.image_enabled));
-                setImagesPerPost(Math.max(0, Math.min(4, Number(routerState.settings.images_per_post || 1))));
+                setImagesPerPostMin(Math.max(0, Math.min(4, Number(routerState.settings.images_per_post_min || 0))));
+                setImagesPerPostMax(Math.max(0, Math.min(4, Number(routerState.settings.images_per_post_max || Math.max(0, Math.min(4, Number(routerState.settings.images_per_post || 1)))))));
                 setNaverStatus(naverConnectState);
 
             } catch (error) {
@@ -498,7 +500,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 image_api_keys: compactKeys(imageApiKeys),
                 image_engine: imageEngine,
                 image_enabled: imageEnabled,
-                images_per_post: imagesPerPost,
+                images_per_post: imagesPerPostMax,
+                images_per_post_min: imagesPerPostMin,
+                images_per_post_max: imagesPerPostMax,
             });
             setTextApiMasks(saved.settings.text_api_keys_masked || {});
             setStep(1);
@@ -613,13 +617,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         setCategoryAllocations(normalizeAllocations(currentCategories, adjustedTrendTarget, categoryAllocations));
     }
 
-    function handleIdeaVaultQuotaChange(nextQuota: number) {
-        const normalizedQuota = Math.max(0, Math.min(dailyPostsTarget, nextQuota));
-        setIdeaVaultDailyQuota(normalizedQuota);
-        const adjustedTrendTarget = Math.max(0, dailyPostsTarget - normalizedQuota);
-        const currentCategories = categoryAllocations.map((item) => item.category);
-        setCategoryAllocations(normalizeAllocations(currentCategories, adjustedTrendTarget, categoryAllocations));
-    }
+
 
     function handleAllocationChange(index: number, patch: Partial<ScheduleAllocationItem>) {
         setCategoryAllocations((previous) => {
@@ -837,6 +835,33 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         <div>
                             <label className="font-semibold text-slate-800">어떤 주제의 글을 발행할까요? (콤마로 구분)</label>
                             <p className="text-xs text-slate-500 mb-2 mt-1">예: IT 리뷰, 주식 공부, 강남역 맛집</p>
+
+                            <div className="mb-4">
+                                <p className="text-xs font-semibold text-slate-600 mb-2">💡 수익성(광고 단가)이 높은 추천 주제 (클릭하여 추가)</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {[
+                                        { label: "📈 IT/테크", value: "IT/테크" },
+                                        { label: "💰 재테크/금융", value: "재테크/금융" },
+                                        { label: "🩺 건강/의학", value: "건강/의학" },
+                                        { label: "🏠 부동산/인테리어", value: "부동산/인테리어" },
+                                    ].map((cat) => (
+                                        <button
+                                            key={cat.value}
+                                            type="button"
+                                            onClick={() => {
+                                                const current = categoriesText.split(",").map(s => s.trim()).filter(Boolean);
+                                                if (!current.includes(cat.value)) {
+                                                    setCategoriesText(current.length > 0 ? `${categoriesText}, ${cat.value}` : cat.value);
+                                                }
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-semibold hover:bg-indigo-100 transition-colors"
+                                        >
+                                            {cat.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
                             <input
                                 type="text"
                                 value={categoriesText}

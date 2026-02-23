@@ -200,3 +200,21 @@ def create_job(
         topic_mode=topic_mode,
         category=category,
     )
+
+
+@router.get(
+    "/jobs/{job_id}",
+    summary="작업 상세 조회",
+)
+def get_job_detail(
+    job_id: str,
+    job_store: JobStore = Depends(get_job_store),
+) -> Dict[str, Any]:
+    """특정 작업(Job)의 상세 정보를 조회한다."""
+    job = job_store.get_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"작업을 찾을 수 없습니다: {job_id}",
+        )
+    return _serialize_job(job)

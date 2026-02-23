@@ -20,7 +20,7 @@ export default function Home() {
         } else {
           setChecking(false);
         }
-      } catch (_error) {
+      } catch {
         if (!isMounted) return;
         setChecking(false);
       }

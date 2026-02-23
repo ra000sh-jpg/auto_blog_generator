@@ -180,6 +180,8 @@ DEFAULT_IMAGE_KEYS = {
 DEFAULT_STRATEGY_MODE = "cost"
 DEFAULT_IMAGE_ENGINE = "pexels"
 DEFAULT_IMAGES_PER_POST = 1
+DEFAULT_IMAGES_PER_POST_MIN = 0
+DEFAULT_IMAGES_PER_POST_MAX = 2
 
 
 def mask_secret(raw_value: str) -> str:
@@ -291,6 +293,8 @@ class LLMRouter:
         "router_image_engine",
         "router_image_enabled",
         "router_images_per_post",
+        "router_images_per_post_min",
+        "router_images_per_post_max",
     )
 
     def __init__(
@@ -330,6 +334,21 @@ class LLMRouter:
             min_value=0,
             max_value=4,
         )
+        images_per_post_min = _to_int(
+            raw_settings.get("router_images_per_post_min", str(DEFAULT_IMAGES_PER_POST_MIN)),
+            default=DEFAULT_IMAGES_PER_POST_MIN,
+            min_value=0,
+            max_value=4,
+        )
+        images_per_post_max = _to_int(
+            raw_settings.get("router_images_per_post_max", str(DEFAULT_IMAGES_PER_POST_MAX)),
+            default=DEFAULT_IMAGES_PER_POST_MAX,
+            min_value=0,
+            max_value=4,
+        )
+        # min > max 방어
+        if images_per_post_min > images_per_post_max:
+            images_per_post_min = images_per_post_max
 
         return {
             "strategy_mode": strategy_mode,
@@ -338,6 +357,8 @@ class LLMRouter:
             "image_engine": image_engine,
             "image_enabled": image_enabled,
             "images_per_post": images_per_post,
+            "images_per_post_min": images_per_post_min,
+            "images_per_post_max": images_per_post_max,
         }
 
     def save_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -367,12 +388,22 @@ class LLMRouter:
         if not _find_image_model(image_engine):
             image_engine = current["image_engine"]
         image_enabled = _to_bool(payload.get("image_enabled", current["image_enabled"]), default=True)
-        images_per_post = _to_int(
-            payload.get("images_per_post", current["images_per_post"]),
-            default=DEFAULT_IMAGES_PER_POST,
+        images_per_post_min = _to_int(
+            payload.get("images_per_post_min", current.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN)),
+            default=DEFAULT_IMAGES_PER_POST_MIN,
             min_value=0,
             max_value=4,
         )
+        images_per_post_max = _to_int(
+            payload.get("images_per_post_max", current.get("images_per_post_max", DEFAULT_IMAGES_PER_POST_MAX)),
+            default=DEFAULT_IMAGES_PER_POST_MAX,
+            min_value=0,
+            max_value=4,
+        )
+        if images_per_post_min > images_per_post_max:
+            images_per_post_min = images_per_post_max
+        # 후방 호환: images_per_post는 max로 유지
+        images_per_post = images_per_post_max
 
         normalized = {
             "strategy_mode": strategy_mode,
@@ -381,6 +412,8 @@ class LLMRouter:
             "image_engine": image_engine,
             "image_enabled": image_enabled,
             "images_per_post": images_per_post,
+            "images_per_post_min": images_per_post_min,
+            "images_per_post_max": images_per_post_max,
         }
         if self.job_store:
             self.job_store.set_system_setting("router_strategy_mode", strategy_mode)
@@ -389,6 +422,8 @@ class LLMRouter:
             self.job_store.set_system_setting("router_image_engine", image_engine)
             self.job_store.set_system_setting("router_image_enabled", "true" if image_enabled else "false")
             self.job_store.set_system_setting("router_images_per_post", str(images_per_post))
+            self.job_store.set_system_setting("router_images_per_post_min", str(images_per_post_min))
+            self.job_store.set_system_setting("router_images_per_post_max", str(images_per_post_max))
 
         return normalized
 
@@ -404,6 +439,12 @@ class LLMRouter:
         image_enabled = bool(base["image_enabled"])
         image_engine = str(base["image_engine"]).lower().strip()
         images_per_post = _to_int(base["images_per_post"], DEFAULT_IMAGES_PER_POST, 0, 4)
+        images_per_post_min = _to_int(
+            base.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN),
+            default=DEFAULT_IMAGES_PER_POST_MIN,
+            min_value=0,
+            max_value=4,
+        )
 
         available_text_models = [
             spec for spec in TEXT_MODEL_MATRIX if str(text_api_keys.get(spec.key_id, "")).strip()
@@ -458,6 +499,7 @@ class LLMRouter:
             voice_spec=voice_spec,
             image_spec=image_spec if image_usable else None,
             images_per_post=images_per_post,
+            images_per_post_min=images_per_post_min,
         )
 
         return {
@@ -565,6 +607,8 @@ class LLMRouter:
                 "image_engine": saved["image_engine"],
                 "image_enabled": saved["image_enabled"],
                 "images_per_post": saved["images_per_post"],
+                "images_per_post_min": saved.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN),
+                "images_per_post_max": saved.get("images_per_post_max", DEFAULT_IMAGES_PER_POST_MAX),
             },
             "quote": plan["estimate"],
             "roles": plan["roles"],
@@ -580,18 +624,29 @@ class LLMRouter:
         overrides: Dict[str, Any],
     ) -> Dict[str, Any]:
         """미리보기 요청을 현재 설정과 병합한다."""
+        images_per_post_min = _to_int(
+            overrides.get("images_per_post_min", current.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN)),
+            default=DEFAULT_IMAGES_PER_POST_MIN,
+            min_value=0,
+            max_value=4,
+        )
+        images_per_post_max = _to_int(
+            overrides.get("images_per_post_max", current.get("images_per_post_max", DEFAULT_IMAGES_PER_POST_MAX)),
+            default=DEFAULT_IMAGES_PER_POST_MAX,
+            min_value=0,
+            max_value=4,
+        )
+        if images_per_post_min > images_per_post_max:
+            images_per_post_min = images_per_post_max
         merged = {
             "strategy_mode": normalize_strategy_mode(overrides.get("strategy_mode", current["strategy_mode"])),
             "text_api_keys": dict(current["text_api_keys"]),
             "image_api_keys": dict(current["image_api_keys"]),
             "image_engine": str(overrides.get("image_engine", current["image_engine"])).strip().lower(),
             "image_enabled": _to_bool(overrides.get("image_enabled", current["image_enabled"]), default=True),
-            "images_per_post": _to_int(
-                overrides.get("images_per_post", current["images_per_post"]),
-                default=DEFAULT_IMAGES_PER_POST,
-                min_value=0,
-                max_value=4,
-            ),
+            "images_per_post": images_per_post_max,
+            "images_per_post_min": images_per_post_min,
+            "images_per_post_max": images_per_post_max,
         }
         for key, value in dict(overrides.get("text_api_keys", {})).items():
             normalized_key = str(key).strip().lower()
@@ -689,6 +744,7 @@ class LLMRouter:
         voice_spec: Optional[TextModelSpec],
         image_spec: Optional[ImageModelSpec],
         images_per_post: int,
+        images_per_post_min: int = 0,
     ) -> Dict[str, Any]:
         """역할 배정 기반 비용/품질 추정치를 계산한다."""
 
@@ -715,11 +771,21 @@ class LLMRouter:
             (parser_quality * 0.1) + (quality_quality * 0.55) + (voice_quality * 0.30) + (image_quality * 0.05)
         )
 
+        # Range 비용: 최소(images_per_post_min장), 최대(images_per_post장)
+        safe_min = max(0, min(images_per_post_min, images_per_post))
+        image_cost_per_unit = float(image_spec.cost_per_image_krw if image_spec else 0)
+        image_cost_max = image_cost_per_unit * max(0, images_per_post)
+        image_cost_min = image_cost_per_unit * safe_min
+        cost_min = text_cost + image_cost_min
+        cost_max = text_cost + image_cost_max
+
         return {
             "currency": "KRW",
             "text_cost_krw": int(round(text_cost)),
             "image_cost_krw": int(round(image_cost)),
             "total_cost_krw": int(round(total_cost)),
+            "cost_min_krw": int(round(cost_min)),
+            "cost_max_krw": int(round(cost_max)),
             "quality_score": max(0, min(100, quality_score)),
         }
 

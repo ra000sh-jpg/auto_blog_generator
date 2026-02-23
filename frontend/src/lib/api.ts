@@ -317,6 +317,8 @@ export type RouterSettingsPayload = {
   image_engine: string;
   image_enabled: boolean;
   images_per_post: number;
+  images_per_post_min?: number;
+  images_per_post_max?: number;
 };
 
 export type RouterQuoteResponse = {
@@ -327,6 +329,8 @@ export type RouterQuoteResponse = {
     text_cost_krw: number;
     image_cost_krw: number;
     total_cost_krw: number;
+    cost_min_krw: number;
+    cost_max_krw: number;
     quality_score: number;
   };
   image: Record<string, unknown>;
@@ -341,6 +345,8 @@ export type RouterSettingsResponse = {
     image_engine: string;
     image_enabled: boolean;
     images_per_post: number;
+    images_per_post_min: number;
+    images_per_post_max: number;
   };
   quote: RouterQuoteResponse["estimate"];
   roles: Record<string, Record<string, unknown>>;
@@ -348,6 +354,22 @@ export type RouterSettingsResponse = {
     text_models: Array<Record<string, unknown>>;
     image_models: Array<Record<string, unknown>>;
   };
+};
+
+export type JobDetailResponse = {
+  job_id: string;
+  status: string;
+  title: string;
+  seed_keywords: string[];
+  platform: string;
+  persona_id: string;
+  topic_mode: string;
+  category: string;
+  scheduled_at: string;
+  created_at: string;
+  updated_at: string;
+  final_content?: string;
+  error_message?: string;
 };
 
 export type NaverConnectStatusResponse = {
@@ -438,6 +460,10 @@ export async function fetchJobs(page = 1, size = 20): Promise<JobsResponse> {
     size: String(size),
   });
   return requestJSON<JobsResponse>(`/jobs?${query.toString()}`);
+}
+
+export async function fetchJobDetail(jobId: string): Promise<JobDetailResponse> {
+  return requestJSON<JobDetailResponse>(`/jobs/${jobId}`);
 }
 
 export async function createJob(payload: CreateJobPayload): Promise<CreateJobResponse> {
@@ -649,4 +675,81 @@ export async function triggerSchedulerDraft(): Promise<TriggerResponse> {
 
 export async function triggerSchedulerPublish(): Promise<TriggerResponse> {
   return requestJSON<TriggerResponse>("/scheduler/trigger/publish", { method: "POST" });
+}
+
+export async function startScheduler(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/start", { method: "POST" });
+}
+
+export async function stopScheduler(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/stop", { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// 통합 대시보드 API
+// ---------------------------------------------------------------------------
+
+export type DashboardMetrics = {
+  today_published: number;
+  total_published: number;
+  idea_vault_pending: number;
+  idea_vault_total: number;
+  llm_cost_usd: number;
+  llm_cost_krw: number;
+  llm_total_calls: number;
+};
+
+export type DashboardScheduler = {
+  scheduler_running: boolean;
+  today_date: string;
+  daily_target: number;
+  today_completed: number;
+  today_failed: number;
+  ready_to_publish: number;
+  queued: number;
+  next_publish_slot_kst: string | null;
+  active_hours: string;
+  last_seed_date: string;
+  last_seed_count: number;
+};
+
+export type DashboardTelegram = {
+  configured: boolean;
+  live_ok: boolean;
+  bot_username: string | null;
+  error: string | null;
+};
+
+export type DashboardHealth = {
+  status: string;
+  ok: number;
+  fail: number;
+  total: number;
+};
+
+export type DashboardResponse = {
+  timestamp: string;
+  metrics: DashboardMetrics;
+  scheduler: DashboardScheduler;
+  telegram: DashboardTelegram;
+  health: DashboardHealth;
+};
+
+export async function fetchDashboard(): Promise<DashboardResponse> {
+  return requestJSON<DashboardResponse>("/stats/dashboard");
+}
+
+// ---------------------------------------------------------------------------
+// 텔레그램 상태 단독 API
+// ---------------------------------------------------------------------------
+
+export type TelegramStatusResponse = {
+  configured: boolean;
+  live_ok: boolean;
+  bot_username: string | null;
+  error: string | null;
+};
+
+export async function fetchTelegramStatus(): Promise<TelegramStatusResponse> {
+  return requestJSON<TelegramStatusResponse>("/telegram/status");
 }

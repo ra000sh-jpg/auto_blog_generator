@@ -142,10 +142,18 @@ async def get_scheduler_status(
     today_failed_fn = getattr(job_store, "get_today_failed_count", None)
     today_failed = int(today_failed_fn()) if callable(today_failed_fn) else 0
 
-    # 큐 통계
+    # 큐 통계 (get_queue_stats 키: completed/failed/queued/retry_wait)
     queue_stats = job_store.get_queue_stats()
-    ready_to_publish = int(queue_stats.get("ready_to_publish", 0))
     queued = int(queue_stats.get("queued", 0))
+    # prepared_payload 가 있는 queued 잡 = 발행 즉시 가능
+    try:
+        with job_store.connection() as _conn:
+            _row = _conn.execute(
+                "SELECT COUNT(*) AS cnt FROM jobs WHERE status='queued' AND prepared_payload IS NOT NULL"
+            ).fetchone()
+            ready_to_publish = int(_row["cnt"]) if _row else 0
+    except Exception:
+        ready_to_publish = 0
 
     # 다음 슬롯
     next_slot = None
@@ -165,6 +173,52 @@ async def get_scheduler_status(
         last_seed_date=last_seed_date,
         last_seed_count=last_seed_count,
     )
+
+
+@router.post(
+    "/scheduler/start",
+    response_model=TriggerResponse,
+    summary="스케줄러 시작",
+)
+async def start_scheduler() -> TriggerResponse:
+    """스케줄러 서비스를 실시간으로 시작한다."""
+    scheduler = get_scheduler_instance()
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="스케줄러 인스턴스가 없습니다. 서버를 재시작하세요.")
+
+    if getattr(scheduler, "_scheduler", None) is not None:
+        return TriggerResponse(ok=True, message="스케줄러가 이미 실행 중입니다.")
+
+    try:
+        await scheduler.start()
+        return TriggerResponse(ok=True, message="스케줄러가 시작되었습니다.")
+    except Exception as exc:
+        logger.error("Scheduler start failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/scheduler/stop",
+    response_model=TriggerResponse,
+    summary="스케줄러 중지",
+)
+async def stop_scheduler() -> TriggerResponse:
+    """스케줄러 서비스를 실시간으로 중지한다."""
+    scheduler = get_scheduler_instance()
+    if scheduler is None:
+        return TriggerResponse(ok=True, message="스케줄러가 이미 중지 상태입니다.")
+
+    if getattr(scheduler, "_scheduler", None) is None:
+        return TriggerResponse(ok=True, message="스케줄러가 이미 중지 상태입니다.")
+
+    try:
+        await scheduler.stop()
+        # _scheduler를 None으로 초기화하여 상태 조회에도 반영
+        scheduler._scheduler = None
+        return TriggerResponse(ok=True, message="스케줄러가 중지되었습니다.")
+    except Exception as exc:
+        logger.error("Scheduler stop failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post(

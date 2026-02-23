@@ -146,7 +146,8 @@ export default function SettingsPage() {
   const [imageApiMasks, setImageApiMasks] = useState<Record<string, string>>({});
   const [imageEngine, setImageEngine] = useState("pexels");
   const [imageEnabled, setImageEnabled] = useState(true);
-  const [imagesPerPost, setImagesPerPost] = useState(1);
+  const [imagesPerPostMin, setImagesPerPostMin] = useState(0);
+  const [imagesPerPostMax, setImagesPerPostMax] = useState(2);
   const [routerQuote, setRouterQuote] = useState<RouterQuoteResponse | null>(null);
   const [textModelMatrix, setTextModelMatrix] = useState<Array<Record<string, unknown>>>([]);
   const [imageModelMatrix, setImageModelMatrix] = useState<Array<Record<string, unknown>>>([]);
@@ -206,7 +207,8 @@ export default function SettingsPage() {
         setImageApiMasks(routerSettings.settings.image_api_keys_masked || {});
         setImageEngine(routerSettings.settings.image_engine || "pexels");
         setImageEnabled(Boolean(routerSettings.settings.image_enabled));
-        setImagesPerPost(Math.max(0, Math.min(4, Number(routerSettings.settings.images_per_post || 1))));
+        setImagesPerPostMin(Math.max(0, Math.min(4, Number(routerSettings.settings.images_per_post_min || 0))));
+        setImagesPerPostMax(Math.max(0, Math.min(4, Number(routerSettings.settings.images_per_post_max || Math.max(0, Math.min(4, Number(routerSettings.settings.images_per_post || 1)))))));
         setTextModelMatrix(routerSettings.matrix.text_models || []);
         setImageModelMatrix(routerSettings.matrix.image_models || []);
         setRouterQuote({
@@ -217,6 +219,8 @@ export default function SettingsPage() {
             text_cost_krw: Number(routerSettings.quote.text_cost_krw || 0),
             image_cost_krw: Number(routerSettings.quote.image_cost_krw || 0),
             total_cost_krw: Number(routerSettings.quote.total_cost_krw || 0),
+            cost_min_krw: Number(routerSettings.quote.cost_min_krw ?? routerSettings.quote.total_cost_krw ?? 0),
+            cost_max_krw: Number(routerSettings.quote.cost_max_krw ?? routerSettings.quote.total_cost_krw ?? 0),
             quality_score: Number(routerSettings.quote.quality_score || 0),
           },
           image: {},
@@ -288,7 +292,9 @@ export default function SettingsPage() {
           image_api_keys: compactKeys(imageApiKeys),
           image_engine: imageEngine,
           image_enabled: imageEnabled,
-          images_per_post: imagesPerPost,
+          images_per_post: imagesPerPostMax,
+          images_per_post_min: imagesPerPostMin,
+          images_per_post_max: imagesPerPostMax,
         });
         setRouterQuote(quoted);
       } catch {
@@ -301,7 +307,7 @@ export default function SettingsPage() {
     return () => {
       clearTimeout(timer);
     };
-  }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageEnabled, imagesPerPost]);
+  }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageEnabled, imagesPerPostMin, imagesPerPostMax]);
 
   function handleTextKeyChange(keyId: string, value: string) {
     setTextApiKeys((previous) => ({
@@ -327,14 +333,17 @@ export default function SettingsPage() {
         image_api_keys: compactKeys(imageApiKeys),
         image_engine: imageEngine,
         image_enabled: imageEnabled,
-        images_per_post: imagesPerPost,
+        images_per_post: imagesPerPostMax,
+        images_per_post_min: imagesPerPostMin,
+        images_per_post_max: imagesPerPostMax,
       });
       setStrategyMode(saved.settings.strategy_mode === "quality" ? "quality" : "cost");
       setTextApiMasks(saved.settings.text_api_keys_masked || {});
       setImageApiMasks(saved.settings.image_api_keys_masked || {});
       setImageEngine(saved.settings.image_engine || "pexels");
       setImageEnabled(Boolean(saved.settings.image_enabled));
-      setImagesPerPost(Math.max(0, Math.min(4, Number(saved.settings.images_per_post || 1))));
+      setImagesPerPostMin(Math.max(0, Math.min(4, Number(saved.settings.images_per_post_min || 0))));
+      setImagesPerPostMax(Math.max(0, Math.min(4, Number(saved.settings.images_per_post_max || Math.max(0, Math.min(4, Number(saved.settings.images_per_post || 1)))))));
       setTextModelMatrix(saved.matrix.text_models || []);
       setImageModelMatrix(saved.matrix.image_models || []);
       setRouterQuote((previous) => ({
@@ -345,6 +354,8 @@ export default function SettingsPage() {
           text_cost_krw: Number(saved.quote.text_cost_krw || 0),
           image_cost_krw: Number(saved.quote.image_cost_krw || 0),
           total_cost_krw: Number(saved.quote.total_cost_krw || 0),
+          cost_min_krw: Number(saved.quote.cost_min_krw ?? saved.quote.total_cost_krw ?? 0),
+          cost_max_krw: Number(saved.quote.cost_max_krw ?? saved.quote.total_cost_krw ?? 0),
           quality_score: Number(saved.quote.quality_score || 0),
         },
         image: previous?.image || {},
@@ -505,116 +516,164 @@ export default function SettingsPage() {
               키 조합과 전략에 따라 모델을 자동 배정하고 예상 원가/품질을 실시간으로 계산합니다.
             </p>
 
-            <div className="mt-4 inline-flex rounded-full border border-slate-300 p-1">
-              <button
-                type="button"
-                onClick={() => setStrategyMode("cost")}
-                className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "cost"
-                  ? "bg-slate-900 text-white"
-                  : "text-slate-700 hover:bg-slate-100"
-                  }`}
-              >
-                ⚖️ 가성비 우선
-              </button>
-              <button
-                type="button"
-                onClick={() => setStrategyMode("quality")}
-                className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "quality"
-                  ? "bg-slate-900 text-white"
-                  : "text-slate-700 hover:bg-slate-100"
-                  }`}
-              >
-                💎 품질 우선
-              </button>
-            </div>
+            {/* 분리된 두 구역 (Flex wrap) */}
+            <div className="mt-4 flex flex-col gap-6 lg:flex-row lg:items-start">
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              {Array.from(
-                new Set(
-                  textModelMatrix
-                    .map((item) => (typeof item.key_id === "string" ? item.key_id : ""))
-                    .filter((value) => value.length > 0),
-                ),
-              ).map((keyId) => (
-                <label key={keyId} className="block">
-                  <span className="mb-1 block text-sm font-medium text-slate-700">
-                    {keyId.toUpperCase()} API Key
-                  </span>
+              {/* 글쓰기 AI 모델 구역 */}
+              <div className="flex-1 rounded-2xl border border-slate-200 bg-slate-50/50 p-5 backdrop-blur">
+                <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-800">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 text-blue-600">📝</span>
+                  글쓰기 AI 모델
+                </h3>
+
+                <div className="mb-4 inline-flex rounded-full border border-slate-300 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setStrategyMode("cost")}
+                    className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "cost"
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-700 hover:bg-slate-100"
+                      }`}
+                  >
+                    ⚖️ 가성비 우선
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStrategyMode("quality")}
+                    className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "quality"
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-700 hover:bg-slate-100"
+                      }`}
+                  >
+                    💎 품질 우선
+                  </button>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {Array.from(
+                    new Set(
+                      textModelMatrix
+                        .map((item) => (typeof item.key_id === "string" ? item.key_id : ""))
+                        .filter((value) => value.length > 0),
+                    ),
+                  ).map((keyId) => (
+                    <label key={keyId} className="block">
+                      <span className="mb-1 block text-sm font-medium text-slate-700">
+                        {keyId.toUpperCase()} API Key
+                      </span>
+                      <input
+                        type="password"
+                        value={textApiKeys[keyId] || ""}
+                        onChange={(event) => handleTextKeyChange(keyId, event.target.value)}
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                        placeholder={textApiMasks[keyId] ? `${textApiMasks[keyId]} (저장됨)` : "선택 입력"}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* 사진 AI 엔진 구역 */}
+              <div className="flex-1 rounded-2xl border border-slate-200 bg-slate-50/50 p-5 backdrop-blur">
+                <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-800">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600">🖼️</span>
+                  사진 AI 엔진
+                </h3>
+
+                <label className="mb-4 flex items-center gap-2">
                   <input
-                    type="password"
-                    value={textApiKeys[keyId] || ""}
-                    onChange={(event) => handleTextKeyChange(keyId, event.target.value)}
-                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                    placeholder={textApiMasks[keyId] ? `${textApiMasks[keyId]} (저장됨)` : "선택 입력"}
+                    type="checkbox"
+                    checked={imageEnabled}
+                    onChange={(event) => setImageEnabled(event.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-900"
                   />
+                  <span className="text-sm font-medium text-slate-700">이미지 엔진 활성화</span>
                 </label>
-              ))}
-            </div>
 
-            <div className="mt-4 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2">
-              <label className="block">
-                <span className="mb-1 block text-sm font-medium text-slate-700">이미지 엔진</span>
-                <select
-                  value={imageEngine}
-                  onChange={(event) => setImageEngine(event.target.value)}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                >
-                  {imageModelMatrix.map((item, index) => {
-                    const engineId =
-                      typeof item.engine_id === "string" ? item.engine_id : `engine-${index}`;
-                    const label = typeof item.label === "string" ? item.label : engineId;
-                    return (
-                      <option key={engineId} value={engineId}>
-                        {label}
-                      </option>
-                    );
-                  })}
-                </select>
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-sm font-medium text-slate-700">이미지/포스트 수</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={4}
-                  value={imagesPerPost}
-                  onChange={(event) =>
-                    setImagesPerPost(Math.max(0, Math.min(4, Number(event.target.value))))
-                  }
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                />
-              </label>
-              <label className="flex items-center gap-2 sm:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={imageEnabled}
-                  onChange={(event) => setImageEnabled(event.target.checked)}
-                />
-                <span className="text-sm text-slate-700">이미지 엔진 활성화</span>
-              </label>
-            </div>
+                {imageEnabled && (
+                  <div className="space-y-4">
+                    <label className="block">
+                      <span className="mb-1 block text-sm font-medium text-slate-700">이미지 엔진 선택</span>
+                      <select
+                        value={imageEngine}
+                        onChange={(event) => setImageEngine(event.target.value)}
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                      >
+                        {imageModelMatrix.map((item, index) => {
+                          const engineId =
+                            typeof item.engine_id === "string" ? item.engine_id : `engine-${index}`;
+                          const label = typeof item.label === "string" ? item.label : engineId;
+                          return (
+                            <option key={engineId} value={engineId}>
+                              {label}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </label>
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              {Array.from(
-                new Set(
-                  imageModelMatrix
-                    .map((item) => (typeof item.key_id === "string" ? item.key_id : ""))
-                    .filter((value) => value.length > 0),
-                ),
-              ).map((keyId) => (
-                <label key={keyId} className="block">
-                  <span className="mb-1 block text-sm font-medium text-slate-700">
-                    {keyId.toUpperCase()} Key
-                  </span>
-                  <input
-                    type="password"
-                    value={imageApiKeys[keyId] || ""}
-                    onChange={(event) => handleImageKeyChange(keyId, event.target.value)}
-                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                    placeholder={imageApiMasks[keyId] ? `${imageApiMasks[keyId]} (저장됨)` : "선택 입력"}
-                  />
-                </label>
-              ))}
+                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                      <span className="mb-2 flex items-center justify-between text-sm font-medium text-slate-700">
+                        AI 동적 이미지 수
+                        <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                          {imagesPerPostMin}장 ~ {imagesPerPostMax}장 범위
+                        </span>
+                      </span>
+                      <div className="flex items-center gap-3 text-sm">
+                        <label className="flex-1">
+                          <span className="mb-1 block text-xs text-slate-500">최소</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={imagesPerPostMax}
+                            value={imagesPerPostMin}
+                            onChange={(e) => setImagesPerPostMin(Math.max(0, Math.min(imagesPerPostMax, Number(e.target.value))))}
+                            className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm text-center"
+                          />
+                        </label>
+                        <span className="text-slate-400">~</span>
+                        <label className="flex-1">
+                          <span className="mb-1 block text-xs text-slate-500">최대</span>
+                          <input
+                            type="number"
+                            min={imagesPerPostMin}
+                            max={4}
+                            value={imagesPerPostMax}
+                            onChange={(e) => setImagesPerPostMax(Math.max(imagesPerPostMin, Math.min(4, Number(e.target.value))))}
+                            className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm text-center"
+                          />
+                        </label>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        블로그 주제와 내용 길이에 따라 AI가 범위 내에서 사진 수를 결정합니다. (최대 4장)
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {Array.from(
+                        new Set(
+                          imageModelMatrix
+                            .map((item) => (typeof item.key_id === "string" ? item.key_id : ""))
+                            .filter((value) => value.length > 0),
+                        ),
+                      ).map((keyId) => (
+                        <label key={keyId} className="block">
+                          <span className="mb-1 block text-sm font-medium text-slate-700">
+                            {keyId.toUpperCase()} Key
+                          </span>
+                          <input
+                            type="password"
+                            value={imageApiKeys[keyId] || ""}
+                            onChange={(event) => handleImageKeyChange(keyId, event.target.value)}
+                            className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                            placeholder={imageApiMasks[keyId] ? `${imageApiMasks[keyId]} (저장됨)` : "선택 입력"}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
@@ -624,15 +683,19 @@ export default function SettingsPage() {
               </div>
               <div className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
                 <p>
-                  예상 원가(1편):{" "}
-                  <strong>{formatKrw(routerQuote?.estimate.total_cost_krw || 0)}원</strong>
+                  예상 원가:{" "}
+                  <strong>
+                    {formatKrw(routerQuote?.estimate.cost_min_krw || 0)}원 ~{" "}
+                    {formatKrw(routerQuote?.estimate.cost_max_krw || 0)}원
+                  </strong>
+                  <span className="ml-2 block text-xs text-slate-500 sm:inline sm:ml-2">(글 길이·사진 수 변동)</span>
                 </p>
                 <p>
                   예상 품질: <strong>{routerQuote?.estimate.quality_score || 0}점</strong>
                 </p>
-                <p className="sm:col-span-2">
-                  모델 배정: Parser <strong>{parserModelLabel}</strong> / Step1{" "}
-                  <strong>{qualityModelLabel}</strong> / Step2 <strong>{voiceModelLabel}</strong>
+                <p className="sm:col-span-2 text-xs text-slate-600">
+                  배정: [문맥분석] <strong>{parserModelLabel}</strong> / [본문작성]{" "}
+                  <strong>{qualityModelLabel}</strong> / [교정] <strong>{voiceModelLabel}</strong>
                 </p>
               </div>
             </div>
@@ -786,72 +849,93 @@ export default function SettingsPage() {
                 <div className="col-span-3">할당량</div>
               </div>
               <div className="divide-y divide-slate-200">
-                {categoryAllocations.map((item, index) => (
-                  <div key={item.category} className="grid grid-cols-12 items-center gap-2 px-3 py-2">
-                    <div className="col-span-5 text-sm text-slate-800">{item.category}</div>
-                    <div className="col-span-4">
-                      <select
-                        value={item.topic_mode}
-                        onChange={(event) => handleAllocationChange(index, { topic_mode: event.target.value })}
-                        className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                      >
-                        {TOPIC_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="col-span-3">
-                      <input
-                        type="number"
-                        min={0}
-                        max={5}
-                        value={item.count}
-                        onChange={(event) =>
-                          handleAllocationChange(index, { count: Number(event.target.value) })
-                        }
-                        className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm"
-                      />
-                    </div>
-                  </div>
-                ))}
+                {categoryAllocations
+                  .filter((item) => item.category !== "다양한 생각들")
+                  .map((item) => {
+                    // 원본 배열에서의 실제 인덱스를 찾아야 함
+                    const originalIndex = categoryAllocations.findIndex((x) => x.category === item.category);
+                    const percentage = allocationTotal > 0 ? Math.round((item.count / allocationTotal) * 100) : 0;
+                    return (
+                      <div key={item.category} className="grid grid-cols-12 items-center gap-4 px-3 py-3">
+                        <div className="col-span-4 text-sm font-medium text-slate-800">
+                          {item.category}
+                        </div>
+                        <div className="col-span-3">
+                          <select
+                            value={item.topic_mode}
+                            onChange={(event) =>
+                              handleAllocationChange(originalIndex, { topic_mode: event.target.value })
+                            }
+                            className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                          >
+                            {TOPIC_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="col-span-5 flex items-center gap-3">
+                          <input
+                            type="range"
+                            min={0}
+                            max={5}
+                            value={item.count}
+                            onChange={(event) =>
+                              handleAllocationChange(originalIndex, { count: Number(event.target.value) })
+                            }
+                            className="flex-1 accent-indigo-600"
+                          />
+                          <div className="flex w-20 flex-col items-end whitespace-nowrap text-xs text-slate-600">
+                            <span className="font-semibold text-indigo-700">{item.count}편</span>
+                            <span className="text-[10px] text-slate-500">
+                              (약 {allocationTotal > 0 ? percentage : "-"}%)
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
               </div>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <p className="text-sm text-slate-600">
-                현재 트렌드 할당 합계: <strong>{allocationTotal}</strong> / 목표{" "}
-                <strong>{trendDailyTarget}</strong>
-              </p>
-              <button
-                type="button"
-                onClick={() =>
-                  setCategoryAllocations(
-                    normalizeAllocations(
-                      categoryAllocations.map((item) => item.category),
-                      trendDailyTarget,
-                      [],
-                    ),
-                  )
-                }
-                className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-500"
-              >
-                균등 분배 자동 맞춤
-              </button>
+            <div className="mt-4 flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 shadow-inner">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-medium text-slate-800">
+                  총 트렌드 발행: <strong className="text-indigo-600">{allocationTotal}</strong> / 남은 슬롯{" "}
+                  <strong>{trendDailyTarget}</strong>
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCategoryAllocations(
+                      normalizeAllocations(
+                        categoryAllocations.map((item) => item.category),
+                        trendDailyTarget,
+                        [],
+                      ),
+                    )
+                  }
+                  className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm transition hover:border-slate-500 hover:bg-slate-50"
+                >
+                  ✨ 균등 분배 자동 맞춤
+                </button>
+              </div>
+
+              {allocationTotal !== trendDailyTarget && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-800">
+                  <span className="text-amber-500">⚠️</span>
+                  <p>할당량 합계가 목표와 다릅니다. 이대로 저장하면 부족한 분량은 첫 번째 카테고리에 몰리고, 남는 분량은 뒤에서부터 삭제되어 자동 보정됩니다.</p>
+                </div>
+              )}
+
+              {trendDailyTarget <= 0 && (
+                <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                  <span className="text-slate-400">ℹ️</span>
+                  <p>하루 발행량이 모두 Idea Vault 예약으로 가득 차서, 트렌드 토픽 발굴은 오늘 진행되지 않습니다.</p>
+                </div>
+              )}
             </div>
-
-            {allocationTotal !== trendDailyTarget && (
-              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                할당량 합계가 목표와 다릅니다. 저장 시 자동 보정됩니다.
-              </p>
-            )}
-
-            {trendDailyTarget <= 0 && (
-              <p className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
-                오늘 발행량이 모두 Idea Vault로 배정되었습니다. 트렌드 카테고리 배분은 0으로 저장됩니다.
-              </p>
-            )}
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <button

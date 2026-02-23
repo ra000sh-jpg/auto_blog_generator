@@ -22,7 +22,7 @@ export default function OnboardingPage() {
                 } else {
                     setLoading(false);
                 }
-            } catch (_error) {
+            } catch {
                 if (!isMounted) return;
                 // API 에러 시 일단 마법사를 띄움
                 setLoading(false);
