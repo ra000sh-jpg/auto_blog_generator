@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Optional
@@ -84,6 +86,7 @@ class MetricsCollector:
                     j.updated_at as published_at,
                     j.seed_keywords,
                     j.seo_snapshot,
+                    j.quality_snapshot,
                     j.tags,
                     pm.snapshot_at
                 FROM jobs j
@@ -216,6 +219,8 @@ class MetricsCollector:
                 published_at=post["published_at"],
             )
 
+        self._record_traffic_feedback(post=post, metric=metric)
+
         return metric
 
     async def collect_all_pending(self) -> int:
@@ -251,3 +256,87 @@ class MetricsCollector:
 
         logger.info("Metrics collection complete: %d/%d", success_count, len(pending))
         return success_count
+
+    def _topic_feedback_weight(self, topic_mode: str) -> float:
+        """토픽별 누적 데이터 수에 따라 트래픽 보정 가중치를 계산한다."""
+        normalized_topic = str(topic_mode or "").strip().lower() or "cafe"
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM model_performance_log
+                WHERE topic_mode = ? AND feedback_source = 'naver_traffic'
+                """,
+                (normalized_topic,),
+            ).fetchone()
+        count = int(row["cnt"]) if row else 0
+        if count >= 100:
+            return 0.5
+        if count >= 10:
+            return 0.3
+        return 0.0
+
+    def _traffic_score_from_views(self, views: int) -> float:
+        """조회수를 0~100 범위 점수로 정규화한다."""
+        safe_views = max(0, int(views))
+        if safe_views <= 0:
+            return 35.0
+        score = 40.0 + (math.log10(safe_views + 1.0) * 20.0)
+        return max(35.0, min(100.0, score))
+
+    def _record_traffic_feedback(self, *, post: dict, metric: PostMetric) -> None:
+        """조회수 기반 보정 점수를 model_performance_log에 적재한다."""
+        seo = json.loads(post.get("seo_snapshot") or "{}")
+        quality = json.loads(post.get("quality_snapshot") or "{}")
+
+        provider = str(seo.get("provider_used", "")).strip().lower()
+        model_id = str(seo.get("provider_model", "")).strip()
+        topic_mode = str(seo.get("topic_mode", "")).strip().lower() or "cafe"
+        if not provider or not model_id:
+            return
+
+        ai_score = float(quality.get("score", 0.0) or 0.0)
+        traffic_score = self._traffic_score_from_views(metric.views)
+        traffic_weight = self._topic_feedback_weight(topic_mode)
+        blended_score = (ai_score * (1.0 - traffic_weight)) + (traffic_score * traffic_weight)
+        blended_score = max(0.0, min(100.0, blended_score))
+
+        is_free_model = 1 if provider in {"groq", "cerebras"} else 0
+        now = post.get("published_at") or metric.published_at
+        log_id = str(uuid.uuid4())
+
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_performance_log (
+                    id,
+                    model_id,
+                    provider,
+                    topic_mode,
+                    quality_score,
+                    cost_won,
+                    is_free_model,
+                    score_per_won,
+                    free_model_rank,
+                    post_id,
+                    slot_type,
+                    feedback_source,
+                    measured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_id,
+                    model_id,
+                    provider,
+                    topic_mode,
+                    blended_score,
+                    0.0,
+                    is_free_model,
+                    None,
+                    None,
+                    metric.post_id,
+                    "main",
+                    "naver_traffic",
+                    now,
+                ),
+            )

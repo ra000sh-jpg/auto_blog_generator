@@ -153,3 +153,40 @@ def test_llm_router_applies_champion_and_challenger_by_slot(tmp_path: Path):
     assert main_plan["competition"]["slot_type"] == "main"
     assert shadow_plan["quality_step"]["model"] == "qwen-plus"
     assert shadow_plan["competition"]["slot_type"] == "challenger"
+
+
+def test_llm_router_topic_specialist_overrides_champion(tmp_path: Path):
+    """topic_mode 이력 10건 이상이면 전문화 모델을 우선 선택해야 한다."""
+    store = _build_store(tmp_path, "router_specialist.db")
+    store.set_system_setting(
+        "router_text_api_keys",
+        json.dumps(
+            {
+                "qwen": "qwen-test-key",
+                "deepseek": "deepseek-test-key",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    store.set_system_setting("fallback_category", "다양한 생각들")
+    store.set_system_setting("router_competition_phase", "champion_ops")
+    store.set_system_setting("router_champion_model", "deepseek-chat")
+    store.set_system_setting("router_challenger_model", "qwen-plus")
+
+    for index in range(10):
+        store.record_model_performance(
+            model_id="qwen-plus",
+            provider="qwen",
+            topic_mode="it",
+            quality_score=90.0 + (index * 0.1),
+            cost_won=8.0,
+            is_free_model=False,
+            slot_type="main",
+            measured_at=f"2026-02-{10 + index:02d}T01:00:00Z",
+        )
+
+    router = LLMRouter(job_store=store)
+    main_plan = router.build_generation_plan_for_job(job=_build_job("it-specialist-job", "IT 자동화"))
+
+    assert main_plan["quality_step"]["model"] == "qwen-plus"
+    assert main_plan["competition"]["slot_type"] == "main_specialist"

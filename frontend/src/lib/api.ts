@@ -755,6 +755,11 @@ export type DashboardMetrics = {
   llm_cost_usd: number;
   llm_cost_krw: number;
   llm_total_calls: number;
+  score_per_won_trend: Array<{
+    week_start: string;
+    avg_score_per_won: number;
+    avg_quality_score: number;
+  }>;
 };
 
 export type DashboardScheduler = {

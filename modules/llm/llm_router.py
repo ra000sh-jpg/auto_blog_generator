@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -855,6 +856,11 @@ class LLMRouter:
             fallback_category=fallback_category,
             phase=phase,
         )
+        if slot_type == "main":
+            specialist = self._find_topic_specialist_model(job=job, available_specs=available_specs)
+            if specialist:
+                return specialist, "main_specialist"
+
         selected = base_spec
         if slot_type == "main":
             selected = self._find_text_model_by_model_id(
@@ -877,6 +883,51 @@ class LLMRouter:
         if fallback_champion:
             return fallback_champion, slot_type
         return selected, slot_type
+
+    def _resolve_topic_mode_from_job(self, job: "Job") -> str:
+        """작업 텍스트 문맥에서 topic_mode를 추정한다."""
+        category_text = str(getattr(job, "category", "")).strip().lower()
+        keywords_text = " ".join(str(item).strip().lower() for item in list(getattr(job, "seed_keywords", [])))
+        merged = f"{category_text} {keywords_text}".strip()
+        if any(token in merged for token in ("경제", "finance", "economy", "투자", "주식", "재테크", "금리", "환율")):
+            return "finance"
+        if any(token in merged for token in ("it", "개발", "코드", "ai", "자동화", "테크")):
+            return "it"
+        if any(token in merged for token in ("육아", "아이", "부모", "가정", "교육", "parenting")):
+            return "parenting"
+        return "cafe"
+
+    def _find_topic_specialist_model(
+        self,
+        *,
+        job: "Job",
+        available_specs: List[TextModelSpec],
+    ) -> Optional[TextModelSpec]:
+        """topic_mode 이력 10편 이상일 때 전문화 모델을 선택한다."""
+        if not self.job_store:
+            return None
+        topic_mode = self._resolve_topic_mode_from_job(job)
+        ninety_days_ago = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        summary = self.job_store.get_model_performance_summary(
+            since=ninety_days_ago,
+            slot_types=["main"],
+            topic_mode=topic_mode,
+        )
+        eligible = [item for item in summary if int(item.get("samples", 0) or 0) >= 10]
+        if not eligible:
+            return None
+        eligible.sort(
+            key=lambda x: (
+                -float(x.get("avg_quality_score", 0.0)),
+                -int(x.get("samples", 0)),
+                float(x.get("avg_cost_won", 0.0)),
+            )
+        )
+        best_model_id = str(eligible[0].get("model_id", "")).strip()
+        return self._find_text_model_by_model_id(
+            model_id=best_model_id,
+            available_specs=available_specs,
+        )
 
     def _pick_role_model(
         self,

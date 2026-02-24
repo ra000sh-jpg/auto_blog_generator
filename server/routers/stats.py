@@ -9,10 +9,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from modules.automation.time_utils import now_utc
 from server.dependencies import get_app_config, get_job_store, get_llm_router
@@ -96,6 +96,7 @@ class MetricsSummaryData(BaseModel):
     llm_cost_usd: float = 0.0
     llm_cost_krw: int = 0
     llm_total_calls: int = 0
+    score_per_won_trend: List[Dict[str, Union[float, str]]] = Field(default_factory=list)
 
 
 class SchedulerData(BaseModel):
@@ -244,6 +245,22 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
             """
         ).fetchall()
 
+        trend_rows = conn.execute(
+            """
+            SELECT
+                strftime('%Y-%W', measured_at) AS week_key,
+                MIN(substr(measured_at, 1, 10)) AS week_start,
+                AVG(score_per_won) AS avg_score_per_won,
+                AVG(quality_score) AS avg_quality_score
+            FROM model_performance_log
+            WHERE measured_at >= datetime('now', '-84 days')
+              AND score_per_won IS NOT NULL
+            GROUP BY week_key
+            ORDER BY week_key ASC
+            LIMIT 12
+            """
+        ).fetchall()
+
     total_cost_usd = 0.0
     total_llm_calls = 0
     for row in llm_rows:
@@ -258,6 +275,15 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
         total_cost_usd += cost
 
     total_cost_krw = int(total_cost_usd * _USD_TO_KRW)
+    trend_payload: List[Dict[str, Union[float, str]]] = []
+    for row in trend_rows:
+        trend_payload.append(
+            {
+                "week_start": str(row["week_start"] or ""),
+                "avg_score_per_won": round(float(row["avg_score_per_won"] or 0.0), 4),
+                "avg_quality_score": round(float(row["avg_quality_score"] or 0.0), 2),
+            }
+        )
 
     return MetricsSummaryData(
         today_published=today_published,
@@ -267,6 +293,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
         llm_cost_usd=round(total_cost_usd, 6),
         llm_cost_krw=total_cost_krw,
         llm_total_calls=total_llm_calls,
+        score_per_won_trend=trend_payload,
     )
 
 

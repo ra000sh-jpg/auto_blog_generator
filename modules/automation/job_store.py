@@ -1594,6 +1594,7 @@ class JobStore:
         since: str,
         until: Optional[str] = None,
         slot_types: Optional[List[str]] = None,
+        topic_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """기간 내 모델 성능 집계를 반환한다."""
         clauses = ["measured_at >= ?"]
@@ -1608,6 +1609,11 @@ class JobStore:
             placeholders = ",".join("?" for _ in normalized_slots)
             clauses.append(f"slot_type IN ({placeholders})")
             params.extend(normalized_slots)
+
+        normalized_topic_mode = str(topic_mode or "").strip().lower()
+        if normalized_topic_mode:
+            clauses.append("topic_mode = ?")
+            params.append(normalized_topic_mode)
 
         where_clause = " AND ".join(clauses)
         query = f"""
