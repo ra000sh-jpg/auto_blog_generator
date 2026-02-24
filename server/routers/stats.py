@@ -97,6 +97,7 @@ class MetricsSummaryData(BaseModel):
     llm_cost_krw: int = 0
     llm_total_calls: int = 0
     score_per_won_trend: List[Dict[str, Union[float, str]]] = Field(default_factory=list)
+    champion_history: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class SchedulerData(BaseModel):
@@ -285,6 +286,8 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
             }
         )
 
+    champion_history = job_store.list_champion_history(limit=4)
+
     return MetricsSummaryData(
         today_published=today_published,
         total_published=total_published,
@@ -294,6 +297,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
         llm_cost_krw=total_cost_krw,
         llm_total_calls=total_llm_calls,
         score_per_won_trend=trend_payload,
+        champion_history=champion_history,
     )
 
 

@@ -17,6 +17,7 @@ import { DashboardSystemStatus } from "./dashboard/dashboard-system-status";
 import { DashboardWorkspace } from "./dashboard/dashboard-workspace";
 import { DashboardLlmUsage } from "./dashboard/dashboard-llm-usage";
 import { DashboardSeedStatus } from "./dashboard/dashboard-seed-status";
+import { DashboardChampionHistory } from "./dashboard/dashboard-champion-history";
 
 export function DashboardRenewal() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
@@ -163,9 +164,10 @@ export function DashboardRenewal() {
       />
 
       {/* ── Row 4: LLM + 시드 현황 ── */}
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-3 lg:grid-cols-3">
         <DashboardLlmUsage dashboard={dashboard} dashLoading={dashLoading} />
         <DashboardSeedStatus dashboard={dashboard} dashLoading={dashLoading} />
+        <DashboardChampionHistory dashboard={dashboard} dashLoading={dashLoading} />
       </div>
     </div>
   );

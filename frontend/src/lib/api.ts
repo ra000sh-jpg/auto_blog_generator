@@ -766,6 +766,16 @@ export type DashboardMetrics = {
     avg_score_per_won: number;
     avg_quality_score: number;
   }>;
+  champion_history: Array<{
+    week_start: string;
+    champion_model: string;
+    challenger_model: string;
+    avg_champion_score: number;
+    topic_mode_scores: Record<string, number>;
+    cost_won: number;
+    early_terminated: boolean;
+    shadow_only: boolean;
+  }>;
 };
 
 export type DashboardScheduler = {

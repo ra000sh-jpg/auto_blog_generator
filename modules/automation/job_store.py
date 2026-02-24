@@ -1901,3 +1901,46 @@ class JobStore:
                     1 if shadow_only else 0,
                 ),
             )
+
+    def list_champion_history(self, *, limit: int = 4) -> List[Dict[str, Any]]:
+        """최근 챔피언 이력을 반환한다."""
+        safe_limit = max(1, min(52, int(limit or 4)))
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    week_start,
+                    champion_model,
+                    challenger_model,
+                    avg_champion_score,
+                    topic_mode_scores,
+                    cost_won,
+                    early_terminated,
+                    shadow_only
+                FROM champion_history
+                ORDER BY week_start DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+
+        payload: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                topic_scores_raw = json.loads(str(row["topic_mode_scores"] or "{}"))
+                topic_scores = topic_scores_raw if isinstance(topic_scores_raw, dict) else {}
+            except Exception:
+                topic_scores = {}
+            payload.append(
+                {
+                    "week_start": str(row["week_start"] or ""),
+                    "champion_model": str(row["champion_model"] or ""),
+                    "challenger_model": str(row["challenger_model"] or ""),
+                    "avg_champion_score": float(row["avg_champion_score"] or 0.0),
+                    "topic_mode_scores": topic_scores,
+                    "cost_won": float(row["cost_won"] or 0.0),
+                    "early_terminated": bool(int(row["early_terminated"] or 0)),
+                    "shadow_only": bool(int(row["shadow_only"] or 0)),
+                }
+            )
+        return payload

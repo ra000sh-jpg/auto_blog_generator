@@ -79,3 +79,25 @@ def test_stats_dashboard_includes_score_per_won_trend(tmp_path: Path):
     metrics = _build_metrics(store)
     assert isinstance(metrics.score_per_won_trend, list)
     assert len(metrics.score_per_won_trend) >= 1
+
+
+def test_stats_dashboard_includes_champion_history(tmp_path: Path):
+    """대시보드 메트릭이 챔피언 이력 데이터를 반환해야 한다."""
+    store = _build_store(tmp_path, "champion_history_stats.db")
+    store.record_champion_history(
+        week_start="2026-02-24",
+        champion_model="deepseek-chat",
+        challenger_model="qwen-plus",
+        avg_champion_score=91.2,
+        topic_mode_scores={"it": 92.0, "finance": 89.5},
+        cost_won=13.4,
+        early_terminated=False,
+        shadow_only=True,
+    )
+
+    metrics = _build_metrics(store)
+    assert isinstance(metrics.champion_history, list)
+    assert len(metrics.champion_history) == 1
+    first = metrics.champion_history[0]
+    assert first["champion_model"] == "deepseek-chat"
+    assert first["challenger_model"] == "qwen-plus"
