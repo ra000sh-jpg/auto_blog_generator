@@ -239,3 +239,151 @@ def test_image_generator_fallback_returns_placeholder_when_no_next_provider():
     assert source_kind == "placeholder"
     assert "pollinations" in provider
     assert result.local_path == "data/images/placeholder_only.jpg"
+
+
+def test_runtime_image_factory_applies_topic_quota_override(tmp_path):
+    """topic_mode override가 있으면 기본 quota 대신 override를 사용해야 한다."""
+    import asyncio
+
+    from modules.automation.job_store import JobStore
+    from modules.config import load_config
+    from modules.images.runtime_factory import build_runtime_image_generator
+
+    config = load_config()
+    config.images.enabled = True
+    config.images.output_dir = str(tmp_path / "images")
+
+    store = JobStore(str(tmp_path / "router_quota_override.db"))
+    store.set_system_setting("router_text_api_keys", '{"qwen":"test"}')
+    store.set_system_setting("router_image_api_keys", '{"together":"test", "pexels":"test"}')
+    store.set_system_setting("router_image_ai_engine", "together_flux")
+    store.set_system_setting("router_image_ai_quota", "0")
+    store.set_system_setting("router_image_topic_quota_overrides", '{"finance":"1"}')
+    store.set_system_setting("router_image_enabled", "true")
+    store.set_system_setting("router_images_per_post", "4")
+    store.set_system_setting("router_images_per_post_min", "0")
+    store.set_system_setting("router_images_per_post_max", "4")
+
+    generator = build_runtime_image_generator(
+        app_config=config,
+        job_store=store,
+        topic_mode="finance",
+    )
+    assert generator is not None
+    assert generator.ai_image_quota == "0"
+    assert generator._resolve_ai_quota_for_topic("finance") == "1"
+    asyncio.run(generator.close())
+
+
+def test_image_generator_quota_assigns_single_ai_slot():
+    """quota=1이면 점수가 가장 높은 슬롯 1개만 AI로 배정되어야 한다."""
+    import asyncio
+
+    from modules.images.dashscope_image_client import ImageResult
+    from modules.images.image_generator import ImageGenerator
+
+    class AIClient:
+        async def generate(self, prompt: str, style_suffix: str = "", size: str = "1024*768", n: int = 1):  # noqa: ARG002
+            return ImageResult(success=True, image_url="ai://generated", local_path=f"/tmp/ai_{abs(hash(prompt))}.png")
+
+    class StockClient:
+        async def generate(self, prompt: str, size: str = "1024*768"):  # noqa: ARG002
+            return ImageResult(success=True, image_url="stock://photo", local_path=f"/tmp/stock_{abs(hash(prompt))}.jpg")
+
+    generator = ImageGenerator(
+        client=AIClient(),  # type: ignore[arg-type]
+        fallback_clients=[],
+        stock_client=StockClient(),  # type: ignore[arg-type]
+        ai_image_quota="1",
+        parallel=False,
+    )
+
+    result = asyncio.run(
+        generator.generate_for_post(
+            title="테스트",
+            keywords=["테스트", "이미지"],
+            image_slots=[
+                {
+                    "slot_id": "thumb_0",
+                    "slot_role": "thumbnail",
+                    "prompt": "thumbnail",
+                    "preferred_type": "real",
+                    "recommended": False,
+                    "ai_generation_score": 10,
+                },
+                {
+                    "slot_id": "content_1",
+                    "slot_role": "content",
+                    "prompt": "ai first",
+                    "preferred_type": "ai_generated",
+                    "recommended": True,
+                    "ai_generation_score": 95,
+                },
+                {
+                    "slot_id": "content_2",
+                    "slot_role": "content",
+                    "prompt": "stock second",
+                    "preferred_type": "real",
+                    "recommended": False,
+                    "ai_generation_score": 20,
+                },
+            ],
+        )
+    )
+
+    assert result.thumbnail_path is not None
+    assert len(result.content_paths) == 2
+    ai_logs = [row for row in result.generation_logs if row.get("source_kind") == "ai"]
+    assert len(ai_logs) == 1
+    assert ai_logs[0]["slot_id"] == "content_1"
+
+
+def test_image_generator_detects_free_tier_exhaustion_and_fallbacks_to_stock():
+    """무료 티어 소진(429) 시 AI 슬롯도 스톡으로 폴백되어야 한다."""
+    import asyncio
+
+    from modules.images.dashscope_image_client import ImageResult
+    from modules.images.image_generator import ImageGenerator
+
+    class TogetherFailClient:
+        async def generate(self, prompt: str, style_suffix: str = "", size: str = "1024*768", n: int = 1):  # noqa: ARG002
+            return ImageResult(success=False, error_message="HTTP 429 rate limit exceeded")
+
+    class PollinationsSuccessClient:
+        async def generate(self, prompt: str, style_suffix: str = "", size: str = "1024*768", n: int = 1):  # noqa: ARG002
+            return ImageResult(success=True, image_url="ai://pollinations", local_path="/tmp/pollinations.png")
+
+    class StockClient:
+        async def generate(self, prompt: str, size: str = "1024*768"):  # noqa: ARG002
+            return ImageResult(success=True, image_url="stock://fallback", local_path="/tmp/stock_fallback.jpg")
+
+    generator = ImageGenerator(
+        client=TogetherFailClient(),  # type: ignore[arg-type]
+        fallback_clients=[PollinationsSuccessClient()],  # type: ignore[list-item]
+        stock_client=StockClient(),  # type: ignore[arg-type]
+        ai_image_quota="1",
+        parallel=False,
+    )
+
+    result = asyncio.run(
+        generator.generate_for_post(
+            title="무료 티어 소진",
+            keywords=["테스트"],
+            image_slots=[
+                {
+                    "slot_id": "content_1",
+                    "slot_role": "content",
+                    "prompt": "flow chart",
+                    "preferred_type": "ai_generated",
+                    "recommended": True,
+                    "ai_generation_score": 90,
+                }
+            ],
+        )
+    )
+
+    assert result.free_tier_exhausted is True
+    assert result.content_paths
+    assert result.source_kind_by_path[result.content_paths[0]] == "stock"
+    fallback_logs = [row for row in result.generation_logs if row.get("fallback_reason") == "free_tier_exhausted"]
+    assert fallback_logs

@@ -37,8 +37,8 @@ def test_health_degraded_when_api_key_missing(
     """API 키 누락 실패는 500이 아닌 degraded로 반환해야 한다."""
     import server.routers.health as health_router
 
-    async def fake_check_all_providers(skip_expensive=True, llm_config=None):
-        del skip_expensive, llm_config
+    async def fake_check_all_providers(skip_expensive=True, llm_config=None, api_keys=None):
+        del skip_expensive, llm_config, api_keys
         return [
             {
                 "provider": "qwen",
@@ -299,6 +299,229 @@ def test_onboarding_persona_question_bank_endpoint(client: TestClient):
     assert len(first_question["options"]) >= 3
 
 
+def test_telegram_verify_token_and_webhook_auth_flow(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """토큰 검증 + 웹훅 인증코드로 chat_id 자동 저장이 동작해야 한다."""
+    import server.routers.telegram_webhook as telegram_router
+
+    telegram_router._PENDING_AUTH_CODES.clear()
+
+    class _MockResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def json(self) -> dict:
+            return self._payload
+
+    class _MockAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        async def get(self, url: str, params: dict | None = None):
+            del params
+            if "getMe" in url:
+                return _MockResponse({"ok": True, "result": {"username": "autoblog_test_bot"}})
+            return _MockResponse({"ok": True, "result": []})
+
+        async def post(self, url: str, json: dict | None = None):
+            del url, json
+            return _MockResponse({"ok": True})
+
+    async def _fake_send_reply(bot_token: str, chat_id: int | str, text: str) -> None:
+        del bot_token, chat_id, text
+        return None
+
+    monkeypatch.setattr(telegram_router.httpx, "AsyncClient", lambda *args, **kwargs: _MockAsyncClient())
+    monkeypatch.setattr(telegram_router, "_send_telegram_reply", _fake_send_reply)
+
+    token_response = client.post(
+        "/api/telegram/verify-token",
+        json={"bot_token": "123456789:ABCdef_token"},
+    )
+    assert token_response.status_code == 200
+    token_payload = token_response.json()
+    assert token_payload["success"] is True
+    assert token_payload["bot_username"] == "autoblog_test_bot"
+    auth_code = token_payload["auth_code"]
+    assert auth_code
+
+    webhook_response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": 777001, "type": "private"},
+                "text": f"/start autoblog_{auth_code}",
+            }
+        },
+    )
+    assert webhook_response.status_code == 200
+    assert webhook_response.json()["auth_verified"] is True
+
+    verify_response = client.post(
+        "/api/telegram/verify",
+        json={"auth_code": auth_code},
+    )
+    assert verify_response.status_code == 200
+    verify_payload = verify_response.json()
+    assert verify_payload["success"] is True
+    assert verify_payload["chat_id"] == "777001"
+    assert verify_payload["used_fallback"] is False
+
+    onboarding_response = client.get("/api/onboarding")
+    assert onboarding_response.status_code == 200
+    onboarding_payload = onboarding_response.json()
+    assert onboarding_payload["telegram_configured"] is True
+    assert onboarding_payload["telegram_chat_id"] == "777001"
+
+
+def test_telegram_verify_uses_getupdates_fallback(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """웹훅 수신이 없을 때 getUpdates 폴백으로 인증을 완료해야 한다."""
+    import server.routers.telegram_webhook as telegram_router
+
+    telegram_router._PENDING_AUTH_CODES.clear()
+
+    update_cache: list[dict] = []
+
+    class _MockResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def json(self) -> dict:
+            return self._payload
+
+    class _MockAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        async def get(self, url: str, params: dict | None = None):
+            del params
+            if "getMe" in url:
+                return _MockResponse({"ok": True, "result": {"username": "autoblog_fallback_bot"}})
+            if "getUpdates" in url:
+                return _MockResponse({"ok": True, "result": update_cache})
+            return _MockResponse({"ok": True, "result": []})
+
+        async def post(self, url: str, json: dict | None = None):
+            del url, json
+            return _MockResponse({"ok": True})
+
+    async def _fake_send_reply(bot_token: str, chat_id: int | str, text: str) -> None:
+        del bot_token, chat_id, text
+        return None
+
+    monkeypatch.setattr(telegram_router.httpx, "AsyncClient", lambda *args, **kwargs: _MockAsyncClient())
+    monkeypatch.setattr(telegram_router, "_send_telegram_reply", _fake_send_reply)
+
+    token_response = client.post(
+        "/api/telegram/verify-token",
+        json={"bot_token": "123456789:ABCdef_token"},
+    )
+    assert token_response.status_code == 200
+    auth_code = token_response.json()["auth_code"]
+    assert auth_code
+
+    update_cache.append(
+        {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 991122, "type": "private"},
+                "text": f"/start autoblog_{auth_code}",
+            },
+        }
+    )
+
+    verify_response = client.post(
+        "/api/telegram/verify",
+        json={"auth_code": auth_code},
+    )
+    assert verify_response.status_code == 200
+    verify_payload = verify_response.json()
+    assert verify_payload["success"] is True
+    assert verify_payload["chat_id"] == "991122"
+    assert verify_payload["used_fallback"] is True
+
+
+def test_telegram_verify_requires_private_chat(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """인증코드 메시지는 private 채팅에서만 승인되어야 한다."""
+    import server.routers.telegram_webhook as telegram_router
+
+    telegram_router._PENDING_AUTH_CODES.clear()
+
+    class _MockResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def json(self) -> dict:
+            return self._payload
+
+    class _MockAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        async def get(self, url: str, params: dict | None = None):
+            del params
+            if "getMe" in url:
+                return _MockResponse({"ok": True, "result": {"username": "autoblog_group_bot"}})
+            return _MockResponse({"ok": True, "result": []})
+
+        async def post(self, url: str, json: dict | None = None):
+            del url, json
+            return _MockResponse({"ok": True})
+
+    async def _fake_send_reply(bot_token: str, chat_id: int | str, text: str) -> None:
+        del bot_token, chat_id, text
+        return None
+
+    monkeypatch.setattr(telegram_router.httpx, "AsyncClient", lambda *args, **kwargs: _MockAsyncClient())
+    monkeypatch.setattr(telegram_router, "_send_telegram_reply", _fake_send_reply)
+
+    token_response = client.post(
+        "/api/telegram/verify-token",
+        json={"bot_token": "123456789:ABCdef_token"},
+    )
+    assert token_response.status_code == 200
+    auth_code = token_response.json()["auth_code"]
+    assert auth_code
+
+    webhook_response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": -1002211, "type": "group"},
+                "text": f"/start autoblog_{auth_code}",
+            }
+        },
+    )
+    assert webhook_response.status_code == 200
+    assert webhook_response.json()["reason"] == "auth_requires_private_chat"
+
+    verify_response = client.post(
+        "/api/telegram/verify",
+        json={"auth_code": auth_code},
+    )
+    assert verify_response.status_code == 409
+
+
 def test_onboarding_persona_questionnaire_answers_apply_scores(client: TestClient):
     """질문지 응답이 있으면 슬라이더 대신 질문지 점수를 우선 반영해야 한다."""
     response = client.post(
@@ -550,6 +773,7 @@ def test_router_settings_quote_and_save(client: TestClient):
     assert initial.status_code == 200
     initial_payload = initial.json()
     assert "matrix" in initial_payload
+    assert "competition" in initial_payload
     assert len(initial_payload["matrix"]["text_models"]) >= 1
 
     quote = client.post(
@@ -584,6 +808,71 @@ def test_router_settings_quote_and_save(client: TestClient):
     saved_payload = saved.json()
     assert saved_payload["settings"]["strategy_mode"] == "quality"
     assert saved_payload["settings"]["image_engine"] == "fal_flux"
+    assert "phase" in saved_payload["competition"]
+
+
+def test_router_settings_exposes_default_topic_quota_overrides(client: TestClient):
+    """초기 상태에서도 토픽별 기본 quota override가 노출되어야 한다."""
+    response = client.get("/api/router-settings")
+    assert response.status_code == 200
+    payload = response.json()
+    overrides = payload["settings"]["image_topic_quota_overrides"]
+    assert overrides["cafe"] == "0"
+    assert overrides["it"] == "1"
+    assert overrides["finance"] == "1"
+    assert overrides["parenting"] == "0"
+
+
+def test_router_settings_save_supports_image_ai_fields(client: TestClient):
+    """router_image_ai_quota/engine/topic_overrides 저장이 가능해야 한다."""
+    response = client.post(
+        "/api/router-settings/save",
+        json={
+            "strategy_mode": "cost",
+            "text_api_keys": {"qwen": "qwen-test-key"},
+            "image_api_keys": {"together": "together-test-key"},
+            "image_engine": "together_flux",
+            "image_ai_engine": "together_flux",
+            "image_ai_quota": "1",
+            "image_topic_quota_overrides": {"it": "1", "cafe": "0"},
+            "image_enabled": True,
+            "images_per_post": 4,
+            "images_per_post_min": 0,
+            "images_per_post_max": 4,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    settings = payload["settings"]
+    assert settings["image_ai_engine"] == "together_flux"
+    assert settings["image_ai_quota"] == "1"
+    assert settings["image_topic_quota_overrides"]["it"] == "1"
+    assert settings["image_topic_quota_overrides"]["cafe"] == "0"
+
+
+def test_router_quote_includes_ai_stock_image_count_split(client: TestClient):
+    """견적 응답은 AI/스톡 이미지 수 분리 값을 포함해야 한다."""
+    response = client.post(
+        "/api/router-settings/quote",
+        json={
+            "strategy_mode": "cost",
+            "text_api_keys": {"qwen": "qwen-test-key"},
+            "image_api_keys": {"fal": "fal-test-key", "pexels": "pex-test-key"},
+            "image_engine": "pexels",
+            "image_ai_engine": "fal_flux",
+            "image_ai_quota": "1",
+            "image_enabled": True,
+            "images_per_post": 4,
+            "images_per_post_min": 0,
+            "images_per_post_max": 4,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    estimate = payload["estimate"]
+    assert estimate["ai_image_count"] == 1
+    assert estimate["stock_image_count"] == 3
+    assert estimate["ai_image_count_min"] == 0
 
 
 def test_naver_connect_status_endpoint(client: TestClient):

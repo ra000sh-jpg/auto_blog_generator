@@ -10,6 +10,7 @@ from modules.automation.job_store import JobConfig, JobStore
 from modules.automation.pipeline_service import PipelineService
 from modules.automation.time_utils import now_utc
 from modules.automation.worker import Worker, WorkerConfig
+from modules.seo.quality_gate import QualityGateResult
 from modules.uploaders.playwright_publisher import PlaywrightPublisher, PublishResult
 
 
@@ -294,3 +295,137 @@ def test_worker_graceful_shutdown(tmp_path: Path):
     updated = store.get_job("graceful-job")
     assert updated is not None
     assert updated.status == store.STATUS_COMPLETED
+
+
+def test_pipeline_records_image_generation_log_and_free_tier_alert(tmp_path: Path):
+    """이미지 생성 로그 저장과 무료티어 소진 알림 1회 정책을 검증한다."""
+    from modules.images.image_generator import GeneratedImages
+
+    store = build_store(tmp_path, "pipeline_image_log.db")
+    job = schedule_and_claim(store, "image-log-job")
+
+    async def simple_generate(_job) -> Dict[str, Any]:
+        long_body = ("이미지 로그 테스트 본문입니다. " * 80).strip()
+        return {
+            "final_content": f"# 제목\n\n{long_body}",
+            "quality_gate": "pass",
+            "quality_snapshot": {},
+            "seo_snapshot": {"topic_mode": "it"},
+            "image_prompts": ["차트 이미지"],
+            "llm_calls_used": 1,
+        }
+
+    class DummyImageGenerator:
+        async def generate_for_post(self, title: str, keywords: list[str], image_prompts=None, image_slots=None):  # noqa: ANN001, ARG002
+            generated = GeneratedImages(
+                thumbnail_path="/tmp/thumb.jpg",
+                content_paths=["/tmp/content.jpg"],
+                source_kind_by_path={"/tmp/thumb.jpg": "stock", "/tmp/content.jpg": "stock"},
+                provider_by_path={"/tmp/thumb.jpg": "pexels", "/tmp/content.jpg": "pexels"},
+            )
+            generated.generation_logs = [
+                {
+                    "slot_id": "thumb_0",
+                    "slot_role": "thumbnail",
+                    "provider": "pexels",
+                    "status": "success",
+                    "source_kind": "stock",
+                    "latency_ms": 15.4,
+                    "fallback_reason": "",
+                    "cost_usd": 0.0,
+                    "source_url": "https://pexels.test/thumb",
+                }
+            ]
+            generated.free_tier_exhausted = True
+            generated.free_tier_exhausted_events = [
+                {"provider": "together_flux", "slot_id": "content_1", "reason": "HTTP 429"}
+            ]
+            return generated
+
+    class DummyNotifier:
+        def __init__(self):
+            self.messages: list[str] = []
+
+        def send_message_background(self, text: str, disable_notification: bool = False):  # noqa: ARG002
+            self.messages.append(text)
+
+        def notify_critical_background(self, *, error_code: str, message: str, job_id: str = ""):  # noqa: ARG002
+            return None
+
+    notifier = DummyNotifier()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=DummyPublisher(),
+        generate_fn=simple_generate,
+        image_generator=DummyImageGenerator(),
+        notifier=notifier,
+    )
+
+    asyncio.run(pipeline.run_job(job))
+
+    logs = store.list_image_generation_logs(post_id=job.job_id)
+    assert logs
+    assert logs[0]["slot_id"] == "thumb_0"
+    assert logs[0]["provider"] == "pexels"
+    assert len(notifier.messages) == 1
+
+    # 같은 날짜/같은 provider 재호출은 알림이 중복 전송되면 안 된다.
+    pipeline._notify_image_free_tier_exhausted(
+        job_id=job.job_id,
+        events=[{"provider": "together_flux", "slot_id": "content_1", "reason": "HTTP 429"}],
+    )
+    assert len(notifier.messages) == 1
+
+
+def test_pipeline_passes_topic_mode_to_image_generator(tmp_path: Path):
+    """파이프라인은 seo_snapshot.topic_mode를 이미지 생성기에 전달해야 한다."""
+    from modules.images.image_generator import GeneratedImages
+
+    store = build_store(tmp_path, "pipeline_topic_mode.db")
+    job = schedule_and_claim(store, "topic-mode-job")
+    captured_topic_modes: list[str] = []
+
+    async def simple_generate(_job) -> Dict[str, Any]:
+        long_body = ("토픽 모드 전달 테스트 본문입니다. " * 80).strip()
+        return {
+            "final_content": f"# 제목\n\n{long_body}",
+            "quality_gate": "pass",
+            "quality_snapshot": {},
+            "seo_snapshot": {"topic_mode": "finance"},
+            "image_prompts": ["financial chart"],
+            "llm_calls_used": 1,
+        }
+
+    class CaptureImageGenerator:
+        async def generate_for_post(self, title: str, keywords: list[str], image_prompts=None, image_slots=None, topic_mode=None):  # noqa: ANN001, ARG002
+            captured_topic_modes.append(str(topic_mode))
+            return GeneratedImages(
+                thumbnail_path="/tmp/thumb_topic.jpg",
+                content_paths=[],
+                source_kind_by_path={"/tmp/thumb_topic.jpg": "stock"},
+                provider_by_path={"/tmp/thumb_topic.jpg": "pexels"},
+            )
+
+    class PassQualityGate:
+        def evaluate(self, **kwargs):  # noqa: ANN003, ANN002
+            return QualityGateResult(
+                passed=True,
+                gate="pass",
+                score=95,
+                error_code="",
+                summary="ok",
+            )
+
+        def repair_content(self, **kwargs):  # noqa: ANN003, ANN002
+            return str(kwargs.get("content", ""))
+
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=DummyPublisher(),
+        generate_fn=simple_generate,
+        image_generator=CaptureImageGenerator(),
+        quality_gate=PassQualityGate(),
+    )
+
+    asyncio.run(pipeline.run_job(job))
+    assert captured_topic_modes == ["finance"]

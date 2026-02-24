@@ -291,6 +291,26 @@ class JobStore:
                 CREATE INDEX IF NOT EXISTS idx_job_metrics_type_time
                 ON job_metrics(metric_type, created_at);
 
+                CREATE TABLE IF NOT EXISTS image_generation_log (
+                    id TEXT PRIMARY KEY,
+                    post_id TEXT,
+                    slot_id TEXT NOT NULL,
+                    slot_role TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    latency_ms REAL DEFAULT 0.0,
+                    fallback_reason TEXT DEFAULT '',
+                    cost_usd REAL DEFAULT 0.0,
+                    source_url TEXT DEFAULT '',
+                    measured_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_image_generation_log_post
+                ON image_generation_log(post_id, measured_at);
+
+                CREATE INDEX IF NOT EXISTS idx_image_generation_log_slot
+                ON image_generation_log(slot_id, measured_at);
+
                 CREATE TABLE IF NOT EXISTS persona_profiles (
                     persona_id TEXT PRIMARY KEY,
                     persona_json TEXT NOT NULL,
@@ -386,6 +406,12 @@ class JobStore:
                 conn.execute("ALTER TABLE job_metrics ADD COLUMN output_tokens INTEGER DEFAULT 0")
             if "provider" not in existing_metric_columns:
                 conn.execute("ALTER TABLE job_metrics ADD COLUMN provider TEXT DEFAULT ''")
+
+            existing_image_log_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(image_generation_log)").fetchall()
+            }
+            if existing_image_log_columns and "source_url" not in existing_image_log_columns:
+                conn.execute("ALTER TABLE image_generation_log ADD COLUMN source_url TEXT DEFAULT ''")
 
             existing_idea_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(idea_vault)").fetchall()
@@ -1155,6 +1181,106 @@ class JobStore:
                     now_utc(),
                 ),
             )
+
+    def record_image_generation_log(
+        self,
+        *,
+        post_id: str,
+        slot_id: str,
+        slot_role: str,
+        provider: str,
+        status: str,
+        latency_ms: float = 0.0,
+        fallback_reason: str = "",
+        cost_usd: float = 0.0,
+        source_url: str = "",
+    ) -> None:
+        """이미지 생성 단계의 슬롯별 실행 로그를 저장한다."""
+        normalized_slot_id = str(slot_id or "").strip()
+        normalized_slot_role = str(slot_role or "").strip().lower() or "content"
+        normalized_provider = str(provider or "").strip().lower() or "unknown"
+        normalized_status = str(status or "").strip().lower() or "failed"
+        if not normalized_slot_id:
+            return
+
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO image_generation_log (
+                    id,
+                    post_id,
+                    slot_id,
+                    slot_role,
+                    provider,
+                    status,
+                    latency_ms,
+                    fallback_reason,
+                    cost_usd,
+                    source_url,
+                    measured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    str(post_id or "").strip(),
+                    normalized_slot_id,
+                    normalized_slot_role,
+                    normalized_provider,
+                    normalized_status,
+                    float(latency_ms or 0.0),
+                    str(fallback_reason or "").strip(),
+                    float(cost_usd or 0.0),
+                    str(source_url or "").strip(),
+                    now_utc(),
+                ),
+            )
+
+    def list_image_generation_logs(
+        self,
+        *,
+        post_id: str = "",
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """이미지 생성 로그를 최신순으로 조회한다."""
+        safe_limit = max(1, min(int(limit or 200), 1000))
+        with self.connection() as conn:
+            if post_id:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM image_generation_log
+                    WHERE post_id = ?
+                    ORDER BY measured_at DESC
+                    LIMIT ?
+                    """,
+                    (str(post_id), safe_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM image_generation_log
+                    ORDER BY measured_at DESC
+                    LIMIT ?
+                    """,
+                    (safe_limit,),
+                ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "post_id": str(row["post_id"] or ""),
+                "slot_id": str(row["slot_id"]),
+                "slot_role": str(row["slot_role"]),
+                "provider": str(row["provider"]),
+                "status": str(row["status"]),
+                "latency_ms": float(row["latency_ms"] or 0.0),
+                "fallback_reason": str(row["fallback_reason"] or ""),
+                "cost_usd": float(row["cost_usd"] or 0.0),
+                "source_url": str(row["source_url"] or ""),
+                "measured_at": str(row["measured_at"]),
+            }
+            for row in rows
+        ]
 
     def upsert_persona_profile(
         self,

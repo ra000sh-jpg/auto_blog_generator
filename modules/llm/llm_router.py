@@ -186,7 +186,17 @@ DEFAULT_STRATEGY_MODE = "cost"
 DEFAULT_IMAGE_ENGINE = "pexels"
 DEFAULT_IMAGES_PER_POST = 1
 DEFAULT_IMAGES_PER_POST_MIN = 0
-DEFAULT_IMAGES_PER_POST_MAX = 2
+DEFAULT_IMAGES_PER_POST_MAX = 4
+DEFAULT_IMAGE_AI_QUOTA = "0"
+IMAGE_AI_QUOTA_VALUES = {"0", "1", "all"}
+DEFAULT_IMAGE_AI_ENGINE = "together_flux"
+DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES = {
+    "cafe": "0",
+    "it": "1",
+    "finance": "1",
+    "economy": "1",
+    "parenting": "0",
+}
 DEFAULT_COMPETITION_PHASE = "idle"
 COMPETITION_PHASES = {"idle", "testing", "champion_ops", "completed"}
 
@@ -210,6 +220,14 @@ def normalize_strategy_mode(raw_value: str) -> str:
     if value in {"quality", "best_quality", "hq"}:
         return "quality"
     return "cost"
+
+
+def normalize_image_ai_quota(raw_value: Any, default: str = DEFAULT_IMAGE_AI_QUOTA) -> str:
+    """AI 이미지 쿼터 값을 정규화한다."""
+    value = str(raw_value or "").strip().lower()
+    if value in IMAGE_AI_QUOTA_VALUES:
+        return value
+    return str(default).strip().lower() if str(default).strip().lower() in IMAGE_AI_QUOTA_VALUES else DEFAULT_IMAGE_AI_QUOTA
 
 
 def _to_bool(raw_value: Any, default: bool = False) -> bool:
@@ -298,6 +316,9 @@ class LLMRouter:
         "router_text_api_keys",
         "router_image_api_keys",
         "router_image_engine",
+        "router_image_ai_engine",
+        "router_image_ai_quota",
+        "router_image_topic_quota_overrides",
         "router_image_enabled",
         "router_images_per_post",
         "router_images_per_post_min",
@@ -341,6 +362,25 @@ class LLMRouter:
         image_engine = str(raw_settings.get("router_image_engine", DEFAULT_IMAGE_ENGINE)).strip().lower()
         if not _find_image_model(image_engine):
             image_engine = DEFAULT_IMAGE_ENGINE
+        image_ai_engine = str(
+            raw_settings.get("router_image_ai_engine", image_engine or DEFAULT_IMAGE_AI_ENGINE)
+        ).strip().lower()
+        if not _find_image_model(image_ai_engine):
+            image_ai_engine = image_engine if _find_image_model(image_engine) else DEFAULT_IMAGE_AI_ENGINE
+        image_ai_quota = normalize_image_ai_quota(
+            raw_settings.get("router_image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
+            default=DEFAULT_IMAGE_AI_QUOTA,
+        )
+        parsed_topic_overrides = _parse_json_map(
+            raw_settings.get("router_image_topic_quota_overrides", "")
+        )
+        image_topic_quota_overrides = {
+            key: normalize_image_ai_quota(value)
+            for key, value in parsed_topic_overrides.items()
+            if str(key).strip()
+        }
+        if not image_topic_quota_overrides:
+            image_topic_quota_overrides = dict(DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES)
         image_enabled = _to_bool(raw_settings.get("router_image_enabled", "true"), default=True)
         images_per_post = _to_int(
             raw_settings.get("router_images_per_post", str(DEFAULT_IMAGES_PER_POST)),
@@ -378,6 +418,9 @@ class LLMRouter:
             "text_api_keys": text_api_keys,
             "image_api_keys": image_api_keys,
             "image_engine": image_engine,
+            "image_ai_engine": image_ai_engine,
+            "image_ai_quota": image_ai_quota,
+            "image_topic_quota_overrides": image_topic_quota_overrides,
             "image_enabled": image_enabled,
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
@@ -417,6 +460,30 @@ class LLMRouter:
         image_engine = str(payload.get("image_engine", current["image_engine"])).strip().lower()
         if not _find_image_model(image_engine):
             image_engine = current["image_engine"]
+        has_explicit_ai_engine = "image_ai_engine" in payload
+        image_ai_engine = str(
+            payload.get(
+                "image_ai_engine",
+                image_engine if not has_explicit_ai_engine else current.get("image_ai_engine", image_engine),
+            )
+        ).strip().lower()
+        if not _find_image_model(image_ai_engine):
+            image_ai_engine = image_engine if not has_explicit_ai_engine else current.get("image_ai_engine", image_engine)
+        image_ai_quota = normalize_image_ai_quota(
+            payload.get("image_ai_quota", current.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA)),
+            default=current.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
+        )
+        raw_topic_quota_overrides = payload.get(
+            "image_topic_quota_overrides",
+            current.get("image_topic_quota_overrides", {}),
+        )
+        topic_quota_overrides: Dict[str, str] = {}
+        if isinstance(raw_topic_quota_overrides, dict):
+            for key, value in raw_topic_quota_overrides.items():
+                normalized_key = str(key).strip().lower()
+                if not normalized_key:
+                    continue
+                topic_quota_overrides[normalized_key] = normalize_image_ai_quota(value)
         image_enabled = _to_bool(payload.get("image_enabled", current["image_enabled"]), default=True)
         images_per_post_min = _to_int(
             payload.get("images_per_post_min", current.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN)),
@@ -440,6 +507,9 @@ class LLMRouter:
             "text_api_keys": text_keys,
             "image_api_keys": image_keys,
             "image_engine": image_engine,
+            "image_ai_engine": image_ai_engine,
+            "image_ai_quota": image_ai_quota,
+            "image_topic_quota_overrides": topic_quota_overrides,
             "image_enabled": image_enabled,
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
@@ -450,6 +520,12 @@ class LLMRouter:
             self.job_store.set_system_setting("router_text_api_keys", _json_text(text_keys))
             self.job_store.set_system_setting("router_image_api_keys", _json_text(image_keys))
             self.job_store.set_system_setting("router_image_engine", image_engine)
+            self.job_store.set_system_setting("router_image_ai_engine", image_ai_engine)
+            self.job_store.set_system_setting("router_image_ai_quota", image_ai_quota)
+            self.job_store.set_system_setting(
+                "router_image_topic_quota_overrides",
+                _json_text(topic_quota_overrides),
+            )
             self.job_store.set_system_setting("router_image_enabled", "true" if image_enabled else "false")
             self.job_store.set_system_setting("router_images_per_post", str(images_per_post))
             self.job_store.set_system_setting("router_images_per_post_min", str(images_per_post_min))
@@ -468,6 +544,8 @@ class LLMRouter:
         image_api_keys = dict(base["image_api_keys"])
         image_enabled = bool(base["image_enabled"])
         image_engine = str(base["image_engine"]).lower().strip()
+        image_ai_engine = str(base.get("image_ai_engine", image_engine)).lower().strip()
+        image_ai_quota = normalize_image_ai_quota(base.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA))
         images_per_post = _to_int(base["images_per_post"], DEFAULT_IMAGES_PER_POST, 0, 4)
         images_per_post_min = _to_int(
             base.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN),
@@ -517,17 +595,28 @@ class LLMRouter:
         ]
 
         image_spec = _find_image_model(image_engine) or _find_image_model(DEFAULT_IMAGE_ENGINE)
+        image_ai_spec = _find_image_model(image_ai_engine) or _find_image_model(DEFAULT_IMAGE_AI_ENGINE)
         image_key_ok = bool(image_spec and str(image_api_keys.get(image_spec.key_id, "")).strip())
         if image_spec and image_spec.key_id == "openai_image":
             # DALL-E는 OpenAI 텍스트 키를 공유하므로 text key도 허용한다.
             image_key_ok = image_key_ok or bool(str(text_api_keys.get("openai", "")).strip())
-        image_usable = bool(image_enabled and image_spec and image_key_ok)
+        image_ai_key_ok = bool(image_ai_spec and str(image_api_keys.get(image_ai_spec.key_id, "")).strip())
+        if image_ai_spec and image_ai_spec.key_id == "openai_image":
+            image_ai_key_ok = image_ai_key_ok or bool(str(text_api_keys.get("openai", "")).strip())
+        image_usable = bool(
+            image_enabled
+            and (
+                (image_spec and image_key_ok)
+                or (image_ai_spec and image_ai_key_ok)
+            )
+        )
 
         estimate = self._estimate(
             parser_spec=parser_spec,
             quality_spec=quality_spec,
             voice_spec=voice_spec,
-            image_spec=image_spec if image_usable else None,
+            image_ai_spec=image_ai_spec if (image_usable and image_ai_key_ok) else None,
+            image_ai_quota=image_ai_quota,
             images_per_post=images_per_post,
             images_per_post_min=images_per_post_min,
         )
@@ -540,6 +629,9 @@ class LLMRouter:
                 "enabled": image_enabled,
                 "engine": image_spec.engine_id if image_spec else DEFAULT_IMAGE_ENGINE,
                 "engine_label": image_spec.label if image_spec else "",
+                "ai_engine": image_ai_spec.engine_id if image_ai_spec else DEFAULT_IMAGE_AI_ENGINE,
+                "ai_engine_label": image_ai_spec.label if image_ai_spec else "",
+                "ai_quota": image_ai_quota,
                 "images_per_post": images_per_post,
                 "available": image_usable,
             },
@@ -705,6 +797,9 @@ class LLMRouter:
                     for key, value in saved["image_api_keys"].items()
                 },
                 "image_engine": saved["image_engine"],
+                "image_ai_engine": saved.get("image_ai_engine", DEFAULT_IMAGE_AI_ENGINE),
+                "image_ai_quota": saved.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
+                "image_topic_quota_overrides": saved.get("image_topic_quota_overrides", {}),
                 "image_enabled": saved["image_enabled"],
                 "images_per_post": saved["images_per_post"],
                 "images_per_post_min": saved.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN),
@@ -758,11 +853,24 @@ class LLMRouter:
             "text_api_keys": dict(current["text_api_keys"]),
             "image_api_keys": dict(current["image_api_keys"]),
             "image_engine": str(overrides.get("image_engine", current["image_engine"])).strip().lower(),
+            "image_ai_engine": "",
+            "image_ai_quota": normalize_image_ai_quota(
+                overrides.get("image_ai_quota", current.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA)),
+                default=current.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
+            ),
+            "image_topic_quota_overrides": dict(current.get("image_topic_quota_overrides", {})),
             "image_enabled": _to_bool(overrides.get("image_enabled", current["image_enabled"]), default=True),
             "images_per_post": images_per_post_max,
             "images_per_post_min": images_per_post_min,
             "images_per_post_max": images_per_post_max,
         }
+        has_explicit_ai_engine = "image_ai_engine" in overrides
+        merged["image_ai_engine"] = str(
+            overrides.get(
+                "image_ai_engine",
+                merged["image_engine"] if not has_explicit_ai_engine else current.get("image_ai_engine", DEFAULT_IMAGE_AI_ENGINE),
+            )
+        ).strip().lower()
         for key, value in dict(overrides.get("text_api_keys", {})).items():
             normalized_key = str(key).strip().lower()
             if normalized_key in DEFAULT_TEXT_KEYS:
@@ -775,6 +883,19 @@ class LLMRouter:
 
         if not _find_image_model(merged["image_engine"]):
             merged["image_engine"] = current["image_engine"]
+        if not _find_image_model(merged["image_ai_engine"]):
+            merged["image_ai_engine"] = (
+                merged["image_engine"] if not has_explicit_ai_engine else current.get("image_ai_engine", DEFAULT_IMAGE_AI_ENGINE)
+            )
+        raw_topic_overrides = overrides.get("image_topic_quota_overrides")
+        if isinstance(raw_topic_overrides, dict):
+            normalized_topic_overrides: Dict[str, str] = {}
+            for key, value in raw_topic_overrides.items():
+                normalized_key = str(key).strip().lower()
+                if not normalized_key:
+                    continue
+                normalized_topic_overrides[normalized_key] = normalize_image_ai_quota(value)
+            merged["image_topic_quota_overrides"] = normalized_topic_overrides
         return merged
 
     def _available_text_specs(self, text_api_keys: Dict[str, str]) -> List[TextModelSpec]:
@@ -1009,7 +1130,8 @@ class LLMRouter:
         parser_spec: Optional[TextModelSpec],
         quality_spec: Optional[TextModelSpec],
         voice_spec: Optional[TextModelSpec],
-        image_spec: Optional[ImageModelSpec],
+        image_ai_spec: Optional[ImageModelSpec],
+        image_ai_quota: str,
         images_per_post: int,
         images_per_post_min: int = 0,
     ) -> Dict[str, Any]:
@@ -1027,22 +1149,36 @@ class LLMRouter:
         quality_cost = role_cost_krw(quality_spec, "quality_step")
         voice_cost = role_cost_krw(voice_spec, "voice_step")
         text_cost = parser_cost + quality_cost + voice_cost
-        image_cost = float((image_spec.cost_per_image_krw if image_spec else 0) * max(0, images_per_post))
+
+        def resolve_ai_count(total_images: int) -> int:
+            safe_total = max(0, int(total_images))
+            normalized_quota = normalize_image_ai_quota(image_ai_quota)
+            if normalized_quota == "1":
+                return min(1, safe_total)
+            if normalized_quota == "all":
+                return min(4, safe_total)
+            return 0
+
+        ai_count_max = resolve_ai_count(images_per_post)
+        ai_count_min = resolve_ai_count(images_per_post_min)
+        stock_count_max = max(0, int(images_per_post) - ai_count_max)
+        stock_count_min = max(0, int(images_per_post_min) - ai_count_min)
+
+        ai_cost_per_unit = float(image_ai_spec.cost_per_image_krw if image_ai_spec else 0)
+        image_cost_max = ai_cost_per_unit * ai_count_max
+        image_cost_min = ai_cost_per_unit * ai_count_min
+        image_cost = image_cost_max
         total_cost = text_cost + image_cost
 
         parser_quality = parser_spec.quality_score if parser_spec else 50
         quality_quality = quality_spec.quality_score if quality_spec else 55
         voice_quality = voice_spec.quality_score if voice_spec else 55
-        image_quality = image_spec.quality_score if image_spec else 60
+        image_quality = image_ai_spec.quality_score if image_ai_spec else 60
         quality_score = round(
             (parser_quality * 0.1) + (quality_quality * 0.55) + (voice_quality * 0.30) + (image_quality * 0.05)
         )
 
         # Range 비용: 최소(images_per_post_min장), 최대(images_per_post장)
-        safe_min = max(0, min(images_per_post_min, images_per_post))
-        image_cost_per_unit = float(image_spec.cost_per_image_krw if image_spec else 0)
-        image_cost_max = image_cost_per_unit * max(0, images_per_post)
-        image_cost_min = image_cost_per_unit * safe_min
         cost_min = text_cost + image_cost_min
         cost_max = text_cost + image_cost_max
 
@@ -1051,8 +1187,16 @@ class LLMRouter:
             "text_cost_krw": int(round(text_cost)),
             "image_cost_krw": int(round(image_cost)),
             "total_cost_krw": int(round(total_cost)),
+            "image_cost_min_krw": int(round(image_cost_min)),
+            "image_cost_max_krw": int(round(image_cost_max)),
             "cost_min_krw": int(round(cost_min)),
             "cost_max_krw": int(round(cost_max)),
+            "ai_image_count": ai_count_max,
+            "stock_image_count": stock_count_max,
+            "ai_image_count_min": ai_count_min,
+            "ai_image_count_max": ai_count_max,
+            "stock_image_count_min": stock_count_min,
+            "stock_image_count_max": stock_count_max,
             "quality_score": max(0, min(100, quality_score)),
         }
 

@@ -124,6 +124,11 @@ async def main_async(args: argparse.Namespace):
     logger = logging.getLogger("run_worker")
     logger.info(f"Worker starting (dry_run={dry_run}, blog_id={blog_id or 'N/A'})")
 
+    # 컴포넌트 초기화
+    store = JobStore(db_path=args.db)
+    metrics_store = MetricsStore(db_path=args.db)
+    publisher = PlaywrightPublisher(blog_id=blog_id or "dry-run")
+
     generate_fn = stub_generate_fn
     if args.use_llm:
         try:
@@ -140,21 +145,14 @@ async def main_async(args: argparse.Namespace):
     image_generator = None
     if app_config.images.enabled:
         try:
-            from modules.images import DashScopeImageClient, ImageGenerator
+            from modules.images.runtime_factory import build_runtime_image_generator
 
-            image_client = DashScopeImageClient(
-                model=app_config.images.model,
-                timeout_sec=app_config.llm.timeout_sec,
-                output_dir=app_config.images.output_dir,
+            image_generator = build_runtime_image_generator(
+                app_config=app_config,
+                job_store=store,
             )
-            image_generator = ImageGenerator(
-                client=image_client,
-                thumbnail_style=app_config.images.thumbnail_style,
-                content_style=app_config.images.content_style,
-                thumbnail_size=app_config.images.thumbnail_size,
-                content_size=app_config.images.content_size,
-                max_content_images=app_config.images.max_content_images,
-            )
+            if image_generator:
+                logger.info("Image generator initialized via runtime factory")
         except Exception as exc:
             logger.warning("Image generator initialization skipped: %s", exc)
 
@@ -174,10 +172,6 @@ async def main_async(args: argparse.Namespace):
         except Exception as exc:
             logger.warning("QualityEvaluator initialization skipped: %s", exc)
 
-    # 컴포넌트 초기화
-    store = JobStore(db_path=args.db)
-    metrics_store = MetricsStore(db_path=args.db)
-    publisher = PlaywrightPublisher(blog_id=blog_id or "dry-run")
     pipeline = PipelineService(
         job_store=store,
         publisher=publisher,

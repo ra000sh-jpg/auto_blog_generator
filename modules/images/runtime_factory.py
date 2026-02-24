@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from ..automation.job_store import JobStore
 from ..config import AppConfig
-from ..llm.llm_router import LLMRouter
+from ..llm.llm_router import LLMRouter, normalize_image_ai_quota
 from ..llm.provider_factory import create_client as create_llm_client
 from .fal_image_client import FalFluxImageClient
 from .image_generator import ImageGenerator
@@ -18,6 +18,17 @@ from .pollinations_client import PollinationsImageClient
 from .together_client import TogetherImageClient
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_image_engine_id(engine_id: str) -> str:
+    """레거시 엔진 식별자를 현재 엔진 ID로 정규화한다."""
+    normalized = str(engine_id or "").strip().lower()
+    alias_map = {
+        "mixed": "together_flux",
+        "ai_only": "together_flux",
+        "dalle3": "openai_dalle3",
+    }
+    return alias_map.get(normalized, normalized or "pexels")
 
 
 def _build_primary_image_client(
@@ -62,6 +73,40 @@ def _build_primary_image_client(
     return None
 
 
+def _resolve_ai_quota_for_topic(
+    *,
+    saved: dict[str, Any],
+    image_plan: dict[str, Any],
+    topic_mode: str,
+) -> str:
+    """topic_mode override를 반영한 AI 이미지 quota를 계산한다."""
+    base_quota = normalize_image_ai_quota(
+        image_plan.get("ai_quota", saved.get("image_ai_quota", "0")),
+        default="0",
+    )
+    raw_overrides = saved.get("image_topic_quota_overrides", {})
+    if not isinstance(raw_overrides, dict):
+        return base_quota
+    topic_key = str(topic_mode or "").strip().lower()
+    if not topic_key:
+        return base_quota
+    if topic_key not in raw_overrides:
+        return base_quota
+    return normalize_image_ai_quota(raw_overrides.get(topic_key), default=base_quota)
+
+
+def _resolve_base_ai_quota(
+    *,
+    saved: dict[str, Any],
+    image_plan: dict[str, Any],
+) -> str:
+    """저장 설정 기준 기본 AI quota를 반환한다."""
+    return normalize_image_ai_quota(
+        image_plan.get("ai_quota", saved.get("image_ai_quota", "0")),
+        default="0",
+    )
+
+
 def build_runtime_image_generator(
     *,
     app_config: AppConfig,
@@ -80,6 +125,20 @@ def build_runtime_image_generator(
 
     image_enabled = bool(image_plan.get("enabled", True))
     images_per_post = int(image_plan.get("images_per_post", app_config.images.max_content_images) or 0)
+    ai_quota = _resolve_base_ai_quota(saved=saved, image_plan=image_plan)
+    effective_quota_for_init_topic = _resolve_ai_quota_for_topic(
+        saved=saved,
+        image_plan=image_plan,
+        topic_mode=topic_mode,
+    )
+    logger.info(
+        "Runtime image quota resolved",
+        extra={
+            "topic_mode": topic_mode,
+            "base_ai_quota": ai_quota,
+            "effective_ai_quota": effective_quota_for_init_topic,
+        },
+    )
     if (not image_enabled) or images_per_post <= 0:
         logger.info(
             "Image pipeline disabled by router settings (enabled=%s, images_per_post=%s)",
@@ -88,9 +147,24 @@ def build_runtime_image_generator(
         )
         return None
 
-    image_engine = str(image_plan.get("engine", saved.get("image_engine", "pexels"))).strip().lower()
+    image_engine = _normalize_image_engine_id(
+        str(
+            image_plan.get(
+                "ai_engine",
+                saved.get(
+                    "image_ai_engine",
+                    image_plan.get("engine", saved.get("image_engine", "pexels")),
+                ),
+            )
+        )
+    )
     strategy_override = str(os.getenv("IMAGE_CONTENT_STRATEGY_OVERRIDE", "")).strip().lower() or None
     disable_stock = str(os.getenv("IMAGE_DISABLE_STOCK", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    raw_daily_limit = str(os.getenv("IMAGE_FREE_TIER_DAILY_LIMIT", "0")).strip()
+    try:
+        free_tier_daily_limit = int(raw_daily_limit or 0)
+    except ValueError:
+        free_tier_daily_limit = 0
     text_api_keys = dict(saved.get("text_api_keys", {}))
     image_api_keys = dict(saved.get("image_api_keys", {}))
 
@@ -167,4 +241,9 @@ def build_runtime_image_generator(
         parallel=True,
         topic_mode=topic_mode,
         content_strategy_override=strategy_override,
+        ai_image_quota=ai_quota,
+        ai_topic_quota_overrides=dict(saved.get("image_topic_quota_overrides", {})),
+        ai_engine_id=image_engine,
+        free_tier_daily_limit=free_tier_daily_limit,
+        job_store=job_store,
     )

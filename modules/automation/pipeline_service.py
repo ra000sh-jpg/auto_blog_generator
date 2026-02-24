@@ -19,6 +19,7 @@ import random
 import re
 import uuid
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Callable, Dict, Optional, Protocol, Tuple
 
@@ -274,14 +275,27 @@ class PipelineService:
         thumbnail_path: Optional[str] = None
         content_image_paths: list[str] = []
         image_sources: dict[str, dict[str, str]] = {}
+        seo_data = content_result.get("seo_snapshot", {})
+        topic_mode = str(seo_data.get("topic_mode", "")).strip().lower()
         if self.image_generator:
             image_start = perf_counter()
             try:
-                images = await self.image_generator.generate_for_post(
-                    title=job.title,
-                    keywords=job.seed_keywords,
-                    image_prompts=content_result.get("image_prompts"),
-                )
+                image_slots = content_result.get("image_slots")
+                try:
+                    images = await self.image_generator.generate_for_post(
+                        title=job.title,
+                        keywords=job.seed_keywords,
+                        image_prompts=content_result.get("image_prompts"),
+                        image_slots=image_slots,
+                        topic_mode=topic_mode,
+                    )
+                except TypeError:
+                    # 하위 호환: image_slots를 지원하지 않는 구현체는 기존 시그니처로 호출한다.
+                    images = await self.image_generator.generate_for_post(
+                        title=job.title,
+                        keywords=job.seed_keywords,
+                        image_prompts=content_result.get("image_prompts"),
+                    )
                 thumbnail_path = images.thumbnail_path
                 content_image_paths = list(images.content_paths)
                 source_kind_by_path = getattr(images, "source_kind_by_path", {}) or {}
@@ -294,6 +308,19 @@ class PipelineService:
                         "kind": str(source_kind or "unknown").strip().lower() or "unknown",
                         "provider": str(provider_by_path.get(path, "unknown")).strip().lower() or "unknown",
                     }
+                for path in [thumbnail_path, *content_image_paths]:
+                    normalized_path = str(path or "").strip()
+                    if not normalized_path:
+                        continue
+                    if normalized_path not in image_sources:
+                        image_sources[normalized_path] = {"kind": "stock", "provider": "unknown"}
+
+                image_generation_logs = list(getattr(images, "generation_logs", []) or [])
+                if image_generation_logs:
+                    self._record_image_generation_logs(job_id=job_id, logs=image_generation_logs)
+                if bool(getattr(images, "free_tier_exhausted", False)):
+                    exhausted_events = list(getattr(images, "free_tier_exhausted_events", []) or [])
+                    self._notify_image_free_tier_exhausted(job_id=job_id, events=exhausted_events)
             except Exception:
                 logger.warning("Image generation failed, continue", extra={"job_id": job_id})
             logger.info(
@@ -324,8 +351,7 @@ class PipelineService:
 
         tags: list[str] = list(job.tags)
         category: str = job.category
-        seo_data = content_result.get("seo_snapshot", {})
-        topic_mode = seo_data.get("topic_mode", "")
+        topic_mode = str(seo_data.get("topic_mode", "")).strip()
 
         if not category and topic_mode:
             category = get_category_for_topic(topic_mode, job.platform)
@@ -713,6 +739,86 @@ class PipelineService:
                 provider=provider,
                 detail=detail or {},
             )
+
+    def _record_image_generation_logs(
+        self,
+        *,
+        job_id: str,
+        logs: list[Dict[str, Any]],
+    ) -> None:
+        """이미지 슬롯 실행 로그를 DB에 저장한다."""
+        record_fn = getattr(self.job_store, "record_image_generation_log", None)
+        if not callable(record_fn):
+            return
+
+        for row in logs:
+            if not isinstance(row, dict):
+                continue
+            slot_id = str(row.get("slot_id", "")).strip()
+            if not slot_id:
+                continue
+            try:
+                record_fn(
+                    post_id=job_id,
+                    slot_id=slot_id,
+                    slot_role=str(row.get("slot_role", "content")).strip().lower() or "content",
+                    provider=str(row.get("provider", "unknown")).strip().lower() or "unknown",
+                    status=str(row.get("status", "failed")).strip().lower() or "failed",
+                    latency_ms=float(row.get("latency_ms", 0.0) or 0.0),
+                    fallback_reason=str(row.get("fallback_reason", "")).strip(),
+                    cost_usd=float(row.get("cost_usd", 0.0) or 0.0),
+                    source_url=str(row.get("source_url", "")).strip(),
+                )
+            except Exception as exc:
+                logger.warning("record_image_generation_log failed: %s", exc)
+
+    def _notify_image_free_tier_exhausted(
+        self,
+        *,
+        job_id: str,
+        events: list[Dict[str, Any]],
+    ) -> None:
+        """무료 이미지 티어 소진 알림을 일일 1회로 제한해 전송한다."""
+        if not self.notifier:
+            return
+        send_background = getattr(self.notifier, "send_message_background", None)
+        if not callable(send_background):
+            return
+
+        normalized_providers: list[str] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            provider = str(event.get("provider", "")).strip().lower()
+            if provider and provider not in normalized_providers:
+                normalized_providers.append(provider)
+        if not normalized_providers:
+            normalized_providers = ["together_flux"]
+
+        kst_date = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d")
+        should_send = False
+        for provider in normalized_providers:
+            dedupe_key = f"image_free_tier_alert_{provider}_{kst_date}"
+            already_sent = str(self.job_store.get_system_setting(dedupe_key, "0")).strip() == "1"
+            if already_sent:
+                continue
+            self.job_store.set_system_setting(dedupe_key, "1")
+            should_send = True
+
+        if not should_send:
+            return
+
+        provider_text = ", ".join(normalized_providers)
+        text = (
+            "🚨 [이미지 무료 티어 소진 감지]\n"
+            f"- job_id: {job_id}\n"
+            f"- provider: {provider_text}\n"
+            "- 조치: 유료 자동 승격 없이 Pexels 실사진으로 폴백 처리"
+        )
+        try:
+            send_background(text, disable_notification=False)
+        except Exception as exc:
+            logger.warning("Image free-tier alert send failed: %s", exc)
 
     def _record_llm_usage_metrics(
         self,
