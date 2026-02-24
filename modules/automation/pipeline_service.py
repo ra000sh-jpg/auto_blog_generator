@@ -81,6 +81,18 @@ class PipelineService:
 
     MAX_API_CALLS_PER_JOB = 15  # LLM 호출 상한
     RETRY_LIMITED_ERRORS = frozenset({"QUALITY_FAILED", "NETWORK_TIMEOUT"})
+    FREE_MODEL_PROVIDERS = frozenset({"groq", "cerebras"})
+    PROVIDER_PRICE_PER_1K_USD = {
+        "qwen": (0.0004, 0.0012),
+        "deepseek": (0.00027, 0.0011),
+        "groq": (0.0, 0.0),
+        "cerebras": (0.0, 0.0),
+        "gemini": (0.00035, 0.00105),
+        "openai": (0.005, 0.015),
+        "claude": (0.003, 0.015),
+        "default": (0.001, 0.002),
+    }
+    USD_TO_KRW = 1400.0
 
     def __init__(
         self,
@@ -389,6 +401,7 @@ class PipelineService:
             "category": category,
             "quality_snapshot": content_result.get("quality_snapshot", {}),
             "seo_snapshot": content_result.get("seo_snapshot", {}),
+            "llm_token_usage": content_result.get("llm_token_usage", {}),
         }
 
     async def _publish_payload(self, job: Job, payload: Dict[str, Any]) -> None:
@@ -433,6 +446,51 @@ class PipelineService:
         raw_tags = payload.get("tags", [])
         tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
 
+        raw_category = str(payload.get("category", "")).strip() or None
+        mapped_category = raw_category
+        if raw_category:
+            try:
+                import json
+                raw_mapping = self.job_store.get_system_setting("category_mapping", "{}")
+                mapping_dict = json.loads(raw_mapping)
+                if isinstance(mapping_dict, dict) and raw_category in mapping_dict:
+                    resolved_name = mapping_dict[raw_category].strip()
+                    if resolved_name:
+                        mapped_category = resolved_name
+            except Exception:
+                pass
+
+        shadow_mode_enabled = self._should_shadow_publish(job=job, payload=payload)
+        if shadow_mode_enabled:
+            shadow_url = f"shadow://{job_id}/{attempt_id}"
+            self._record_job_metric(
+                job_id=job_id,
+                metric_type="publish",
+                status="shadow",
+                detail={"message": "shadow mode: publish skipped"},
+            )
+            self.job_store.complete_job(
+                job_id=job_id,
+                result_url=shadow_url,
+                thumbnail_url=str(payload.get("thumbnail", "")),
+                quality_snapshot=payload.get("quality_snapshot", {}),
+                seo_snapshot=payload.get("seo_snapshot", {}),
+            )
+            self._record_model_performance(job=job, payload=payload, post_id=shadow_url)
+            mark_consumed = getattr(self.job_store, "mark_idea_vault_consumed_by_job", None)
+            if mark_consumed and callable(mark_consumed):
+                try:
+                    mark_consumed(job_id)
+                except Exception:
+                    logger.debug("idea_vault consumed mark skipped", extra={"job_id": job_id})
+            if self.metrics_store:
+                self.metrics_store.record_jobs_total("completed")
+            logger.info(
+                "Shadow publish completed",
+                extra={"job_id": job_id, "url": shadow_url},
+            )
+            return
+
         result, publish_duration_sec = await self._publish_with_retry(
             job_id=job_id,
             title=str(payload.get("title", job.title)),
@@ -442,7 +500,7 @@ class PipelineService:
             image_sources=image_sources,
             image_points=image_points,
             tags=[tag for tag in tags if tag] or None,
-            category=str(payload.get("category", "")) or None,
+            category=mapped_category,
         )
         if self.metrics_store:
             self.metrics_store.record_publish_duration_seconds(publish_duration_sec)
@@ -461,6 +519,7 @@ class PipelineService:
                 quality_snapshot=payload.get("quality_snapshot", {}),
                 seo_snapshot=payload.get("seo_snapshot", {}),
             )
+            self._record_model_performance(job=job, payload=payload, post_id=result.url)
             mark_consumed = getattr(self.job_store, "mark_idea_vault_consumed_by_job", None)
             if mark_consumed and callable(mark_consumed):
                 try:
@@ -724,8 +783,90 @@ class PipelineService:
             duration_ms=(perf_counter() - start) * 1000.0,
             error_code=gate_result.error_code,
             detail=gate_result.to_dict(),
-        )
+            )
         return gate_result
+
+    def _normalize_category_name(self, value: str) -> str:
+        """카테고리 문자열 비교용 정규화."""
+        return re.sub(r"\s+", "", str(value or "").lower())
+
+    def _resolve_slot_type(self, job: Job) -> str:
+        """작업의 성능 슬롯 유형(main/shadow/challenger)을 판단한다."""
+        fallback_category = str(
+            self.job_store.get_system_setting("fallback_category", "다양한 생각들")
+        ).strip() or "다양한 생각들"
+        normalized_job_category = self._normalize_category_name(job.category)
+        normalized_fallback = self._normalize_category_name(fallback_category)
+        if normalized_job_category and normalized_job_category == normalized_fallback:
+            phase = str(self.job_store.get_system_setting("router_competition_phase", "idle")).strip().lower()
+            if phase == "champion_ops":
+                return "challenger"
+            return "shadow"
+        return "main"
+
+    def _should_shadow_publish(self, *, job: Job, payload: Dict[str, Any]) -> bool:
+        """Shadow 테스트 모드에서 실제 발행을 건너뛸지 판단한다."""
+        del payload
+        shadow_mode = str(self.job_store.get_system_setting("router_shadow_mode", "false")).strip().lower()
+        phase = str(self.job_store.get_system_setting("router_competition_phase", "idle")).strip().lower()
+        slot_type = self._resolve_slot_type(job)
+        return shadow_mode in {"1", "true", "yes", "on"} and phase == "testing" and slot_type == "shadow"
+
+    def _estimate_text_cost_won(self, provider: str, token_usage: Dict[str, Any]) -> float:
+        """토큰 사용량 기반 텍스트 비용을 KRW로 추정한다."""
+        provider_key = str(provider).strip().lower()
+        input_price, output_price = self.PROVIDER_PRICE_PER_1K_USD.get(
+            provider_key,
+            self.PROVIDER_PRICE_PER_1K_USD["default"],
+        )
+        total_input_tokens = 0
+        total_output_tokens = 0
+        for stage in ("parser", "quality_step", "voice_step"):
+            stage_data = token_usage.get(stage, {})
+            if not isinstance(stage_data, dict):
+                continue
+            total_input_tokens += int(stage_data.get("input_tokens", 0) or 0)
+            total_output_tokens += int(stage_data.get("output_tokens", 0) or 0)
+        cost_usd = ((total_input_tokens / 1000.0) * input_price) + ((total_output_tokens / 1000.0) * output_price)
+        return round(cost_usd * self.USD_TO_KRW, 4)
+
+    def _record_model_performance(self, *, job: Job, payload: Dict[str, Any], post_id: str) -> None:
+        """모델 성능 로그를 저장한다."""
+        recorder = getattr(self.job_store, "record_model_performance", None)
+        if not recorder or not callable(recorder):
+            return
+
+        seo_snapshot = payload.get("seo_snapshot", {}) if isinstance(payload.get("seo_snapshot"), dict) else {}
+        quality_snapshot = payload.get("quality_snapshot", {}) if isinstance(payload.get("quality_snapshot"), dict) else {}
+        token_usage = payload.get("llm_token_usage", {}) if isinstance(payload.get("llm_token_usage"), dict) else {}
+
+        provider = str(seo_snapshot.get("provider_used", "")).strip().lower()
+        model_id = str(seo_snapshot.get("provider_model", "")).strip()
+        if not provider:
+            provider = "unknown"
+        if not model_id:
+            model_id = provider
+
+        topic_mode = str(seo_snapshot.get("topic_mode", "cafe")).strip().lower() or "cafe"
+        quality_score = float(quality_snapshot.get("score", 0.0) or 0.0)
+        cost_won = self._estimate_text_cost_won(provider, token_usage)
+        slot_type = self._resolve_slot_type(job)
+        is_free_model = provider in self.FREE_MODEL_PROVIDERS
+
+        try:
+            recorder(
+                model_id=model_id,
+                provider=provider,
+                topic_mode=topic_mode,
+                quality_score=quality_score,
+                cost_won=cost_won,
+                is_free_model=is_free_model,
+                slot_type=slot_type,
+                post_id=post_id,
+                feedback_source="ai_evaluator",
+            )
+        except Exception:
+            logger.debug("model_performance_log skipped", extra={"job_id": job.job_id}, exc_info=True)
 
     def _fail_with_retry_policy(
         self,

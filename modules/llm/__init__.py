@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 _generator: Optional[ContentGenerator] = None
 _tag_generator: Optional[TagGenerator] = None
+_runtime_config: Optional[LLMConfig] = None
+_runtime_job_store: Optional[JobStore] = None
+_runtime_notifier: Optional[Any] = None
 
 
 def _build_generator(
@@ -25,10 +28,14 @@ def _build_generator(
     *,
     job_store: Optional[JobStore] = None,
     notifier: Optional[Any] = None,
+    job: Optional[Job] = None,
 ) -> ContentGenerator:
     """설정 기반 ContentGenerator 인스턴스를 생성한다."""
     router = LLMRouter(job_store=job_store, llm_config=config)
-    generation_plan = router.build_generation_plan()
+    if job is None:
+        generation_plan = router.build_generation_plan()
+    else:
+        generation_plan = router.build_generation_plan_for_job(job=job)
 
     def _build_client_from_spec(spec: Dict[str, Any]) -> Optional[Any]:
         provider = str(spec.get("provider", "")).strip().lower()
@@ -138,25 +145,44 @@ def get_generator(
     *,
     job_store: Optional[JobStore] = None,
     notifier: Optional[Any] = None,
+    job: Optional[Job] = None,
 ) -> ContentGenerator:
     """싱글톤 ContentGenerator를 반환한다."""
-    global _generator
+    global _generator, _runtime_config, _runtime_job_store, _runtime_notifier
+
+    resolved_config = config if config is not None else _runtime_config or LLMConfig()
+    if job_store is not None:
+        _runtime_job_store = job_store
+    if notifier is not None:
+        _runtime_notifier = notifier
+    _runtime_config = resolved_config
+
+    if job is not None:
+        # 작업별 모델 라우팅(챔피언/도전자)을 반영하기 위해 매 호출 시 동적 생성
+        return _build_generator(
+            resolved_config,
+            job_store=job_store or _runtime_job_store,
+            notifier=notifier or _runtime_notifier,
+            job=job,
+        )
 
     if _generator is None:
-        resolved_config = config if config is not None else LLMConfig()
         _generator = _build_generator(
             resolved_config,
-            job_store=job_store,
-            notifier=notifier,
+            job_store=job_store or _runtime_job_store,
+            notifier=notifier or _runtime_notifier,
         )
     return _generator
 
 
 def reset_generator() -> None:
     """테스트를 위해 싱글톤을 초기화한다."""
-    global _generator, _tag_generator
+    global _generator, _tag_generator, _runtime_config, _runtime_job_store, _runtime_notifier
     _generator = None
     _tag_generator = None
+    _runtime_config = None
+    _runtime_job_store = None
+    _runtime_notifier = None
 
 
 def get_tag_generator(config: Optional[SEOConfig] = None) -> TagGenerator:
@@ -195,7 +221,11 @@ def get_tag_generator(config: Optional[SEOConfig] = None) -> TagGenerator:
 
 async def llm_generate_fn(job: Job) -> Dict[str, Any]:
     """PipelineService.generate_fn과 호환되는 LLM 생성 함수."""
-    generator = get_generator()
+    try:
+        generator = get_generator(job=job)
+    except TypeError:
+        # 테스트에서 get_generator를 단순 람다로 대체한 기존 패턴과 호환
+        generator = get_generator()
     result: ContentResult = await generator.generate(job)
     return {
         "final_content": result.final_content,

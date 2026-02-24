@@ -137,6 +137,7 @@ export type OnboardingStatusResponse = {
     topic_mode: string;
     count: number;
   }>;
+  category_mapping: Record<string, string>;
   telegram_configured: boolean;
   telegram_bot_token: string;
   telegram_chat_id: string;
@@ -212,18 +213,21 @@ export type ScheduleAllocationItem = {
   category: string;
   topic_mode: string;
   count: number;
+  percentage?: number;
 };
 
 export type ScheduleSetupPayload = {
   daily_posts_target: number;
   idea_vault_daily_quota: number;
   allocations: ScheduleAllocationItem[];
+  category_mapping: Record<string, string>;
 };
 
 export type ScheduleSetupResponse = {
   daily_posts_target: number;
   idea_vault_daily_quota: number;
   allocations: ScheduleAllocationItem[];
+  category_mapping: Record<string, string>;
 };
 
 export type TelegramTestPayload = {
@@ -236,6 +240,32 @@ export type TelegramTestPayload = {
 export type TelegramTestResponse = {
   success: boolean;
   message: string;
+};
+
+export type TelegramVerifyTokenPayload = {
+  bot_token: string;
+};
+
+export type TelegramVerifyTokenResponse = {
+  success: boolean;
+  message: string;
+  bot_username: string | null;
+  auth_code: string | null;
+  auth_command: string | null;
+  deep_link: string | null;
+  expires_in_sec: number;
+};
+
+export type TelegramVerifyPayload = {
+  auth_code: string;
+};
+
+export type TelegramVerifyResponse = {
+  success: boolean;
+  message: string;
+  bot_username: string | null;
+  chat_id: string | null;
+  used_fallback: boolean;
 };
 
 export type CompleteOnboardingResponse = {
@@ -350,6 +380,16 @@ export type RouterSettingsResponse = {
   };
   quote: RouterQuoteResponse["estimate"];
   roles: Record<string, Record<string, unknown>>;
+  competition: {
+    phase: string;
+    week_start: string;
+    apply_at: string;
+    shadow_mode: boolean;
+    champion_model: string;
+    challenger_model: string;
+    fallback_category: string;
+    slot_type: string;
+  };
   matrix: {
     text_models: Array<Record<string, unknown>>;
     image_models: Array<Record<string, unknown>>;
@@ -539,6 +579,24 @@ export async function testTelegramSetup(
   payload: TelegramTestPayload,
 ): Promise<TelegramTestResponse> {
   return requestJSON<TelegramTestResponse>("/onboarding/telegram/test", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function verifyTelegramToken(
+  payload: TelegramVerifyTokenPayload,
+): Promise<TelegramVerifyTokenResponse> {
+  return requestJSON<TelegramVerifyTokenResponse>("/telegram/verify-token", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function verifyTelegramLink(
+  payload: TelegramVerifyPayload,
+): Promise<TelegramVerifyResponse> {
+  return requestJSON<TelegramVerifyResponse>("/telegram/verify", {
     method: "POST",
     body: payload,
   });

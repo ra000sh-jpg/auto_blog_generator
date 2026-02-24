@@ -18,6 +18,7 @@ import hashlib
 import socket
 import os
 import time
+import uuid
 from datetime import datetime
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1521,3 +1522,250 @@ class JobStore:
                 ),
             )
             return max(0, int(updated.rowcount))
+
+    def record_model_performance(
+        self,
+        *,
+        model_id: str,
+        provider: str,
+        topic_mode: str,
+        quality_score: float,
+        cost_won: float,
+        is_free_model: bool,
+        slot_type: str,
+        post_id: str = "",
+        feedback_source: str = "ai_evaluator",
+        measured_at: Optional[str] = None,
+    ) -> Optional[str]:
+        """모델 성능 로그를 저장한다."""
+        normalized_model_id = str(model_id).strip()
+        normalized_provider = str(provider).strip().lower()
+        normalized_topic_mode = str(topic_mode).strip().lower() or "cafe"
+        normalized_slot_type = str(slot_type).strip().lower() or "main"
+        if not normalized_model_id or not normalized_provider:
+            return None
+
+        safe_quality = float(max(0.0, min(100.0, quality_score)))
+        safe_cost = float(max(0.0, cost_won))
+        free_flag = 1 if is_free_model or safe_cost <= 0.0 else 0
+        score_per_won = None if free_flag else (safe_quality / safe_cost if safe_cost > 0 else None)
+        log_id = str(uuid.uuid4())
+
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_performance_log (
+                    id,
+                    model_id,
+                    provider,
+                    topic_mode,
+                    quality_score,
+                    cost_won,
+                    is_free_model,
+                    score_per_won,
+                    free_model_rank,
+                    post_id,
+                    slot_type,
+                    feedback_source,
+                    measured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_id,
+                    normalized_model_id,
+                    normalized_provider,
+                    normalized_topic_mode,
+                    safe_quality,
+                    safe_cost,
+                    free_flag,
+                    score_per_won,
+                    None,
+                    str(post_id).strip(),
+                    normalized_slot_type,
+                    str(feedback_source).strip() or "ai_evaluator",
+                    measured_at or now_utc(),
+                ),
+            )
+        return log_id
+
+    def get_model_performance_summary(
+        self,
+        *,
+        since: str,
+        until: Optional[str] = None,
+        slot_types: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """기간 내 모델 성능 집계를 반환한다."""
+        clauses = ["measured_at >= ?"]
+        params: List[Any] = [since]
+
+        if until:
+            clauses.append("measured_at < ?")
+            params.append(until)
+
+        normalized_slots = [str(slot).strip().lower() for slot in (slot_types or []) if str(slot).strip()]
+        if normalized_slots:
+            placeholders = ",".join("?" for _ in normalized_slots)
+            clauses.append(f"slot_type IN ({placeholders})")
+            params.extend(normalized_slots)
+
+        where_clause = " AND ".join(clauses)
+        query = f"""
+            SELECT
+                model_id,
+                provider,
+                COUNT(*) AS samples,
+                AVG(quality_score) AS avg_quality_score,
+                AVG(cost_won) AS avg_cost_won,
+                AVG(score_per_won) AS avg_score_per_won,
+                SUM(CASE WHEN is_free_model = 1 THEN 1 ELSE 0 END) AS free_samples
+            FROM model_performance_log
+            WHERE {where_clause}
+            GROUP BY model_id, provider
+            ORDER BY avg_quality_score DESC, samples DESC
+        """
+
+        with self.connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+
+        return [
+            {
+                "model_id": str(row["model_id"] or ""),
+                "provider": str(row["provider"] or ""),
+                "samples": int(row["samples"] or 0),
+                "avg_quality_score": float(row["avg_quality_score"] or 0.0),
+                "avg_cost_won": float(row["avg_cost_won"] or 0.0),
+                "avg_score_per_won": float(row["avg_score_per_won"] or 0.0) if row["avg_score_per_won"] is not None else None,
+                "free_samples": int(row["free_samples"] or 0),
+            }
+            for row in rows
+        ]
+
+    def get_weekly_competition_state(self, week_start: str) -> Optional[Dict[str, Any]]:
+        """주간 경쟁 상태를 조회한다."""
+        normalized_week_start = str(week_start).strip()
+        if not normalized_week_start:
+            return None
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    week_start,
+                    phase,
+                    candidates,
+                    champion_model,
+                    challenger_model,
+                    early_terminated,
+                    apply_at
+                FROM weekly_competition_state
+                WHERE week_start = ?
+                """,
+                (normalized_week_start,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            candidates = json.loads(str(row["candidates"] or "[]"))
+            if not isinstance(candidates, list):
+                candidates = []
+        except Exception:
+            candidates = []
+        return {
+            "week_start": str(row["week_start"] or ""),
+            "phase": str(row["phase"] or "testing"),
+            "candidates": candidates,
+            "champion_model": str(row["champion_model"] or ""),
+            "challenger_model": str(row["challenger_model"] or ""),
+            "early_terminated": bool(int(row["early_terminated"] or 0)),
+            "apply_at": str(row["apply_at"] or ""),
+        }
+
+    def upsert_weekly_competition_state(
+        self,
+        *,
+        week_start: str,
+        phase: str,
+        candidates: List[Dict[str, Any]],
+        apply_at: str,
+        champion_model: str = "",
+        challenger_model: str = "",
+        early_terminated: bool = False,
+    ) -> None:
+        """주간 경쟁 상태를 저장/갱신한다."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO weekly_competition_state (
+                    week_start,
+                    phase,
+                    candidates,
+                    champion_model,
+                    challenger_model,
+                    early_terminated,
+                    apply_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(week_start) DO UPDATE SET
+                    phase = excluded.phase,
+                    candidates = excluded.candidates,
+                    champion_model = excluded.champion_model,
+                    challenger_model = excluded.challenger_model,
+                    early_terminated = excluded.early_terminated,
+                    apply_at = excluded.apply_at
+                """,
+                (
+                    str(week_start).strip(),
+                    str(phase).strip() or "testing",
+                    json.dumps(candidates, ensure_ascii=False),
+                    str(champion_model).strip(),
+                    str(challenger_model).strip(),
+                    1 if early_terminated else 0,
+                    str(apply_at).strip(),
+                ),
+            )
+
+    def record_champion_history(
+        self,
+        *,
+        week_start: str,
+        champion_model: str,
+        challenger_model: str,
+        avg_champion_score: float,
+        topic_mode_scores: Dict[str, float],
+        cost_won: float,
+        early_terminated: bool = False,
+        shadow_only: bool = True,
+    ) -> None:
+        """주간 챔피언 이력을 저장/갱신한다."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO champion_history (
+                    week_start,
+                    champion_model,
+                    challenger_model,
+                    avg_champion_score,
+                    topic_mode_scores,
+                    cost_won,
+                    early_terminated,
+                    shadow_only
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(week_start) DO UPDATE SET
+                    champion_model = excluded.champion_model,
+                    challenger_model = excluded.challenger_model,
+                    avg_champion_score = excluded.avg_champion_score,
+                    topic_mode_scores = excluded.topic_mode_scores,
+                    cost_won = excluded.cost_won,
+                    early_terminated = excluded.early_terminated,
+                    shadow_only = excluded.shadow_only
+                """,
+                (
+                    str(week_start).strip(),
+                    str(champion_model).strip(),
+                    str(challenger_model).strip(),
+                    float(max(0.0, min(100.0, avg_champion_score))),
+                    json.dumps(topic_mode_scores or {}, ensure_ascii=False),
+                    float(max(0.0, cost_won)),
+                    1 if early_terminated else 0,
+                    1 if shadow_only else 0,
+                ),
+            )

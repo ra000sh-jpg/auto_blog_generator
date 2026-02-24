@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ..automation.job_store import JobStore
+from ..constants import DEFAULT_FALLBACK_CATEGORY
 from ..config import LLMConfig
+
+if TYPE_CHECKING:
+    from ..automation.job_store import Job
 
 USD_TO_KRW = 1350.0
 
@@ -182,6 +186,8 @@ DEFAULT_IMAGE_ENGINE = "pexels"
 DEFAULT_IMAGES_PER_POST = 1
 DEFAULT_IMAGES_PER_POST_MIN = 0
 DEFAULT_IMAGES_PER_POST_MAX = 2
+DEFAULT_COMPETITION_PHASE = "idle"
+COMPETITION_PHASES = {"idle", "testing", "champion_ops", "completed"}
 
 
 def mask_secret(raw_value: str) -> str:
@@ -295,6 +301,13 @@ class LLMRouter:
         "router_images_per_post",
         "router_images_per_post_min",
         "router_images_per_post_max",
+        "router_competition_phase",
+        "router_competition_week_start",
+        "router_competition_apply_at",
+        "router_shadow_mode",
+        "router_champion_model",
+        "router_challenger_model",
+        "fallback_category",
     )
 
     def __init__(
@@ -350,6 +363,15 @@ class LLMRouter:
         if images_per_post_min > images_per_post_max:
             images_per_post_min = images_per_post_max
 
+        phase_raw = str(raw_settings.get("router_competition_phase", DEFAULT_COMPETITION_PHASE)).strip().lower()
+        competition_phase = phase_raw if phase_raw in COMPETITION_PHASES else DEFAULT_COMPETITION_PHASE
+        shadow_mode = _to_bool(raw_settings.get("router_shadow_mode", "false"), default=False)
+        champion_model = str(raw_settings.get("router_champion_model", "")).strip()
+        challenger_model = str(raw_settings.get("router_challenger_model", "")).strip()
+        competition_week_start = str(raw_settings.get("router_competition_week_start", "")).strip()
+        competition_apply_at = str(raw_settings.get("router_competition_apply_at", "")).strip()
+        fallback_category = str(raw_settings.get("fallback_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
+
         return {
             "strategy_mode": strategy_mode,
             "text_api_keys": text_api_keys,
@@ -359,6 +381,13 @@ class LLMRouter:
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
             "images_per_post_max": images_per_post_max,
+            "competition_phase": competition_phase,
+            "competition_week_start": competition_week_start,
+            "competition_apply_at": competition_apply_at,
+            "shadow_mode": shadow_mode,
+            "champion_model": champion_model,
+            "challenger_model": challenger_model,
+            "fallback_category": fallback_category,
         }
 
     def save_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -561,6 +590,7 @@ class LLMRouter:
         text_keys = saved["text_api_keys"]
         quality = planned["roles"]["quality_step"]
         voice = planned["roles"]["voice_step"]
+        selected_slot_type = "default"
 
         def role_to_runtime(role_payload: Dict[str, Any]) -> Dict[str, Any]:
             provider = str(role_payload.get("provider", "")).strip().lower()
@@ -587,6 +617,75 @@ class LLMRouter:
             "quality_step": role_to_runtime(quality),
             "voice_step": role_to_runtime(voice),
             "estimate": planned["estimate"],
+            "competition": self.get_competition_state(slot_type=selected_slot_type),
+        }
+
+    def build_generation_plan_for_job(
+        self,
+        *,
+        job: "Job",
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """작업 컨텍스트를 반영한 품질/보이스 단계 실행 계획을 반환한다."""
+        planned = self.build_plan(overrides=overrides)
+        saved = self.get_saved_settings()
+        text_keys = saved["text_api_keys"]
+        available_specs = self._available_text_specs(text_keys)
+        strategy_mode = str(planned["strategy_mode"]).strip().lower()
+
+        quality_role = dict(planned["roles"]["quality_step"])
+        current_quality_spec = _find_text_model(
+            str(quality_role.get("provider", "")),
+            str(quality_role.get("model", "")),
+        )
+        selected_quality_spec, selected_slot_type = self._resolve_competition_quality_spec(
+            job=job,
+            base_spec=current_quality_spec,
+            available_specs=available_specs,
+            strategy_mode=strategy_mode,
+            fallback_category=saved.get("fallback_category", DEFAULT_FALLBACK_CATEGORY),
+            phase=saved.get("competition_phase", DEFAULT_COMPETITION_PHASE),
+            champion_model=saved.get("champion_model", ""),
+            challenger_model=saved.get("challenger_model", ""),
+        )
+        if selected_quality_spec:
+            quality_role = self._role_payload(selected_quality_spec, strategy_mode, "quality_step")
+            fallback_chain = self._build_fallback_candidates(
+                selected=selected_quality_spec,
+                pool=available_specs,
+                strategy_mode=strategy_mode,
+                max_size=3,
+            )
+            quality_role["fallback_chain"] = [self._model_payload(spec) for spec in fallback_chain]
+
+        voice_role = planned["roles"]["voice_step"]
+
+        def role_to_runtime(role_payload: Dict[str, Any]) -> Dict[str, Any]:
+            provider = str(role_payload.get("provider", "")).strip().lower()
+            model = str(role_payload.get("model", "")).strip()
+            return {
+                "provider": provider,
+                "model": model,
+                "temperature": float(role_payload.get("temperature", 0.6)),
+                "api_key": str(text_keys.get(self._provider_to_key_id(provider), "")).strip(),
+                "fallback_chain": [
+                    {
+                        "provider": str(item.get("provider", "")).strip().lower(),
+                        "model": str(item.get("model", "")).strip(),
+                        "api_key": str(
+                            text_keys.get(self._provider_to_key_id(str(item.get("provider", ""))), "")
+                        ).strip(),
+                    }
+                    for item in list(role_payload.get("fallback_chain", []))
+                ],
+            }
+
+        return {
+            "strategy_mode": planned["strategy_mode"],
+            "quality_step": role_to_runtime(quality_role),
+            "voice_step": role_to_runtime(voice_role),
+            "estimate": planned["estimate"],
+            "competition": self.get_competition_state(slot_type=selected_slot_type),
         }
 
     def export_for_ui(self) -> Dict[str, Any]:
@@ -612,10 +711,25 @@ class LLMRouter:
             },
             "quote": plan["estimate"],
             "roles": plan["roles"],
+            "competition": self.get_competition_state(),
             "matrix": {
                 "text_models": [self._model_payload(item) for item in TEXT_MODEL_MATRIX],
                 "image_models": [self._image_payload(item) for item in IMAGE_MODEL_MATRIX],
             },
+        }
+
+    def get_competition_state(self, *, slot_type: str = "default") -> Dict[str, Any]:
+        """주간 경쟁 상태를 UI/런타임 공통 포맷으로 반환한다."""
+        saved = self.get_saved_settings()
+        return {
+            "phase": str(saved.get("competition_phase", DEFAULT_COMPETITION_PHASE)),
+            "week_start": str(saved.get("competition_week_start", "")),
+            "apply_at": str(saved.get("competition_apply_at", "")),
+            "shadow_mode": bool(saved.get("shadow_mode", False)),
+            "champion_model": str(saved.get("champion_model", "")),
+            "challenger_model": str(saved.get("challenger_model", "")),
+            "fallback_category": str(saved.get("fallback_category", DEFAULT_FALLBACK_CATEGORY)),
+            "slot_type": slot_type,
         }
 
     def _merge_preview_settings(
@@ -661,6 +775,108 @@ class LLMRouter:
         if not _find_image_model(merged["image_engine"]):
             merged["image_engine"] = current["image_engine"]
         return merged
+
+    def _available_text_specs(self, text_api_keys: Dict[str, str]) -> List[TextModelSpec]:
+        """현재 사용 가능한 텍스트 모델 스펙을 반환한다."""
+        available_specs = [
+            spec for spec in TEXT_MODEL_MATRIX if str(text_api_keys.get(spec.key_id, "")).strip()
+        ]
+        if available_specs:
+            return available_specs
+
+        fallback_provider = str(self.llm_config.primary_provider).strip().lower()
+        fallback_model = str(self.llm_config.primary_model).strip()
+        fallback_spec = _find_text_model(fallback_provider, fallback_model)
+        return [fallback_spec] if fallback_spec else []
+
+    def _normalize_category_name(self, value: str) -> str:
+        """카테고리 비교를 위해 공백/대소문자를 정규화한다."""
+        return "".join(str(value or "").lower().split())
+
+    def _resolve_job_slot_type(
+        self,
+        *,
+        job: "Job",
+        fallback_category: str,
+        phase: str,
+    ) -> str:
+        """작업이 main/shadow/challenger 중 어떤 슬롯인지 판별한다."""
+        normalized_job_category = self._normalize_category_name(getattr(job, "category", ""))
+        normalized_fallback = self._normalize_category_name(fallback_category)
+        if normalized_job_category and normalized_job_category == normalized_fallback:
+            if str(phase).strip().lower() == "champion_ops":
+                return "challenger"
+            return "shadow"
+        return "main"
+
+    def _find_text_model_by_model_id(
+        self,
+        *,
+        model_id: str,
+        available_specs: List[TextModelSpec],
+    ) -> Optional[TextModelSpec]:
+        """model_id 문자열로 사용 가능한 모델 스펙을 찾는다."""
+        normalized = str(model_id or "").strip().lower()
+        if not normalized:
+            return None
+
+        if ":" in normalized:
+            provider_name, model_name = normalized.split(":", 1)
+            for spec in available_specs:
+                if spec.provider == provider_name and spec.model.lower() == model_name:
+                    return spec
+
+        for spec in available_specs:
+            if spec.model.lower() == normalized:
+                return spec
+
+        for spec in available_specs:
+            candidate = f"{spec.provider}:{spec.model}".lower()
+            if candidate == normalized:
+                return spec
+        return None
+
+    def _resolve_competition_quality_spec(
+        self,
+        *,
+        job: "Job",
+        base_spec: Optional[TextModelSpec],
+        available_specs: List[TextModelSpec],
+        strategy_mode: str,
+        fallback_category: str,
+        phase: str,
+        champion_model: str,
+        challenger_model: str,
+    ) -> Tuple[Optional[TextModelSpec], str]:
+        """경쟁 상태를 반영해 quality_step 모델을 결정한다."""
+        del strategy_mode
+        slot_type = self._resolve_job_slot_type(
+            job=job,
+            fallback_category=fallback_category,
+            phase=phase,
+        )
+        selected = base_spec
+        if slot_type == "main":
+            selected = self._find_text_model_by_model_id(
+                model_id=champion_model,
+                available_specs=available_specs,
+            ) or base_spec
+            return selected, slot_type
+
+        preferred_challenger = self._find_text_model_by_model_id(
+            model_id=challenger_model,
+            available_specs=available_specs,
+        )
+        if preferred_challenger:
+            return preferred_challenger, slot_type
+
+        fallback_champion = self._find_text_model_by_model_id(
+            model_id=champion_model,
+            available_specs=available_specs,
+        )
+        if fallback_champion:
+            return fallback_champion, slot_type
+        return selected, slot_type
 
     def _pick_role_model(
         self,

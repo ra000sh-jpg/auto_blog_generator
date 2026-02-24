@@ -40,6 +40,7 @@ class RouterSettingsResponse(BaseModel):
     settings: Dict[str, Any]
     quote: Dict[str, Any]
     roles: Dict[str, Any]
+    competition: Dict[str, Any]
     matrix: Dict[str, Any]
 
 
@@ -57,6 +58,7 @@ def get_router_settings(
         settings=payload["settings"],
         quote=payload["quote"],
         roles=payload["roles"],
+        competition=payload.get("competition", {}),
         matrix=payload["matrix"],
     )
 
@@ -115,6 +117,6 @@ def save_router_settings(
         settings=payload["settings"],
         quote=payload["quote"],
         roles=payload["roles"],
+        competition=payload.get("competition", {}),
         matrix=payload["matrix"],
     )
-

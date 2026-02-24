@@ -84,6 +84,7 @@ class SchedulerService:
     DEFAULT_PUBLISHER_POLL_SECONDS = 20
     DEFAULT_DAILY_TARGET = 3
     DEFAULT_IDEA_VAULT_DAILY_QUOTA = 2
+    WEEKLY_COMPETITION_TEST_END_WEEKDAY = 3  # 목요일(월=0)
 
     def __init__(
         self,
@@ -213,6 +214,14 @@ class SchedulerService:
                 replace_existing=True,
                 misfire_grace_time=self.MISFIRE_GRACE_TIME,
             )
+            self._scheduler.add_job(
+                self._run_weekly_model_competition,
+                cron_trigger(hour=0, minute=6),
+                id="weekly_model_competition",
+                name="주간 모델 경쟁 상태 갱신",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
 
         if self.idea_vault_collector:
             # Track A: 매일 06:00 / 15:00 두 번 RSS 자동 수집
@@ -310,6 +319,7 @@ class SchedulerService:
     async def _run_startup_catchup(self) -> None:
         """시작 시점에 놓친 작업을 보정 실행한다."""
         logger.info("Running startup catch-up")
+        await self._run_weekly_model_competition()
         await self._run_daily_quota_seed()
         await self._run_draft_prefetch()
         await self._run_daily_target_check()
@@ -718,44 +728,64 @@ class SchedulerService:
 
         idea_vault_quota = self._get_configured_idea_vault_quota(daily_target)
         non_vault_target = max(0, daily_target - idea_vault_quota)
-        non_vault_allocations = self._fit_allocations_to_target(allocations, non_vault_target)
+        
+        # 가중 확률 랜덤 추출 (random.choices)
+        selected_categories = []
+        if non_vault_target > 0 and allocations:
+            import random
+            population = []
+            weights = []
+            for alloc in allocations:
+                w = int(alloc.get("count", 0))
+                if w > 0:
+                    population.append(alloc)
+                    weights.append(w)
+            
+            if population:
+                selected_categories = random.choices(population, weights=weights, k=non_vault_target)
+            else:
+                # 가중치가 모두 0인 경우 fallback으로 채움
+                fallback_alloc = {
+                    "category": DEFAULT_FALLBACK_CATEGORY,
+                    "topic_mode": "cafe"
+                }
+                selected_categories = [fallback_alloc] * non_vault_target
 
         created = 0
         created_non_vault = 0
         created_idea_vault = 0
         seed_base_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         sequence = 0
-        for allocation in non_vault_allocations:
+        
+        for allocation in selected_categories:
             category_name = str(allocation.get("category", "")).strip()
             topic_mode = str(allocation.get("topic_mode", "cafe")).strip()
-            count = max(0, int(allocation.get("count", 0)))
-            if not category_name or count <= 0:
+            if not category_name:
                 continue
 
             persona_id = self._persona_id_for_topic(topic_mode)
-            for _ in range(count):
-                scheduled_at = (seed_base_utc + timedelta(minutes=sequence)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                sequence += 1
-                title = self._build_seed_title(
-                    category=category_name,
-                    topic_mode=topic_mode,
-                    local_date=today_local,
-                    sequence=sequence,
-                )
-                seed_keywords = self._build_seed_keywords(category_name, topic_mode)
-                success = self.job_store.schedule_job(
-                    job_id=str(uuid.uuid4()),
-                    title=title,
-                    seed_keywords=seed_keywords,
-                    platform="naver",
-                    persona_id=persona_id,
-                    scheduled_at=scheduled_at,
-                    max_retries=3,
-                    category=category_name,
-                )
-                if success:
-                    created += 1
-                    created_non_vault += 1
+            scheduled_at = (seed_base_utc + timedelta(minutes=sequence)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            sequence += 1
+            title = self._build_seed_title(
+                category=category_name,
+                topic_mode=topic_mode,
+                local_date=today_local,
+                sequence=sequence,
+            )
+            seed_keywords = self._build_seed_keywords(category_name, topic_mode)
+            success = self.job_store.schedule_job(
+                job_id=str(uuid.uuid4()),
+                title=title,
+                seed_keywords=seed_keywords,
+                platform="naver",
+                persona_id=persona_id,
+                scheduled_at=scheduled_at,
+                max_retries=3,
+                category=category_name,
+            )
+            if success:
+                created += 1
+                created_non_vault += 1
 
         if idea_vault_quota > 0:
             claim_fn = getattr(self.job_store, "claim_random_idea_vault_items", None)
@@ -822,10 +852,185 @@ class SchedulerService:
                 "date": today_local,
                 "target": daily_target,
                 "created_count": created,
-                "allocation_count": len(non_vault_allocations),
+                "allocation_count": len(selected_categories),
                 "idea_vault_quota": idea_vault_quota,
                 "created_non_vault": created_non_vault,
                 "created_idea_vault": created_idea_vault,
+            },
+        )
+
+    def _week_start_local(self, now_local: datetime) -> date:
+        """현재 시각 기준 주 시작일(월요일)을 반환한다."""
+        return now_local.date() - timedelta(days=now_local.weekday())
+
+    def _next_week_apply_at_local_iso(self, week_start: date) -> str:
+        """다음 주 월요일 00:05 로컬 시각 ISO를 반환한다."""
+        next_week = week_start + timedelta(days=7)
+        dt = datetime.combine(
+            next_week,
+            time_obj(hour=0, minute=5),
+            tzinfo=self._get_now_local().tzinfo,
+        )
+        return dt.isoformat(timespec="seconds")
+
+    def _build_competition_candidates(self) -> List[Dict[str, Any]]:
+        """라우터 설정 기준으로 주간 경쟁 후보 모델을 구성한다."""
+        from ..llm.llm_router import LLMRouter
+
+        router = LLMRouter(job_store=self.job_store)
+        plan = router.build_plan()
+        available = list(plan.get("available_text_models", []))
+        normalized: List[Dict[str, Any]] = []
+        for item in available:
+            model_id = str(item.get("model", "")).strip()
+            provider = str(item.get("provider", "")).strip().lower()
+            if not model_id or not provider:
+                continue
+            normalized.append(
+                {
+                    "model_id": model_id,
+                    "provider": provider,
+                    "base_quality": float(item.get("quality_score", 0) or 0),
+                    "scores": [],
+                    "eliminated": False,
+                }
+            )
+        normalized.sort(key=lambda x: (-float(x.get("base_quality", 0.0)), str(x.get("model_id", ""))))
+        return normalized[:3]
+
+    async def _run_weekly_model_competition(self) -> None:
+        """주간 모델 경쟁 상태를 갱신한다 (shadow -> champion_ops)."""
+        if not self.job_store:
+            return
+
+        now_local = self._get_now_local()
+        week_start = self._week_start_local(now_local).isoformat()
+        apply_at = self._next_week_apply_at_local_iso(self._week_start_local(now_local))
+        state = self.job_store.get_weekly_competition_state(week_start)
+
+        if state is None:
+            candidates = self._build_competition_candidates()
+            if not candidates:
+                logger.info("Weekly competition skipped: no candidates")
+                return
+            champion_model = str(candidates[0].get("model_id", "")).strip()
+            challenger_model = str(candidates[1].get("model_id", "")).strip() if len(candidates) > 1 else ""
+            self.job_store.upsert_weekly_competition_state(
+                week_start=week_start,
+                phase="testing",
+                candidates=candidates,
+                champion_model=champion_model,
+                challenger_model=challenger_model,
+                early_terminated=False,
+                apply_at=apply_at,
+            )
+            self.job_store.set_system_setting("router_competition_phase", "testing")
+            self.job_store.set_system_setting("router_competition_week_start", week_start)
+            self.job_store.set_system_setting("router_competition_apply_at", apply_at)
+            self.job_store.set_system_setting("router_shadow_mode", "true")
+            self.job_store.set_system_setting("router_champion_model", champion_model)
+            self.job_store.set_system_setting("router_challenger_model", challenger_model)
+            logger.info(
+                "Weekly competition initialized",
+                extra={
+                    "week_start": week_start,
+                    "phase": "testing",
+                    "champion_model": champion_model,
+                    "challenger_model": challenger_model,
+                },
+            )
+            return
+
+        current_phase = str(state.get("phase", "testing")).strip().lower()
+        if current_phase != "testing":
+            return
+        if now_local.weekday() < self.WEEKLY_COMPETITION_TEST_END_WEEKDAY:
+            return
+
+        summary = self.job_store.get_model_performance_summary(
+            since=f"{week_start}T00:00:00Z",
+            slot_types=["shadow", "challenger", "main"],
+        )
+        by_model = {str(item.get("model_id", "")): item for item in summary}
+        candidates = list(state.get("candidates", []))
+        ranked: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            model_id = str(candidate.get("model_id", "")).strip()
+            if not model_id:
+                continue
+            perf = by_model.get(model_id, {})
+            avg_quality = float(perf.get("avg_quality_score", candidate.get("base_quality", 0.0)) or 0.0)
+            samples = int(perf.get("samples", 0) or 0)
+            avg_cost = float(perf.get("avg_cost_won", 0.0) or 0.0)
+            ranked.append(
+                {
+                    "model_id": model_id,
+                    "provider": str(candidate.get("provider", "")).strip().lower(),
+                    "avg_quality_score": avg_quality,
+                    "samples": samples,
+                    "avg_cost_won": avg_cost,
+                }
+            )
+        if not ranked:
+            return
+
+        ranked.sort(
+            key=lambda x: (
+                -float(x.get("avg_quality_score", 0.0)),
+                -int(x.get("samples", 0)),
+                float(x.get("avg_cost_won", 0.0)),
+            )
+        )
+        champion = ranked[0]
+        challenger = ranked[1] if len(ranked) > 1 else None
+
+        champion_model = str(champion.get("model_id", "")).strip()
+        challenger_model = str(challenger.get("model_id", "")).strip() if challenger else ""
+
+        self.job_store.upsert_weekly_competition_state(
+            week_start=week_start,
+            phase="champion_ops",
+            candidates=candidates,
+            champion_model=champion_model,
+            challenger_model=challenger_model,
+            early_terminated=False,
+            apply_at=apply_at,
+        )
+        self.job_store.record_champion_history(
+            week_start=week_start,
+            champion_model=champion_model,
+            challenger_model=challenger_model,
+            avg_champion_score=float(champion.get("avg_quality_score", 0.0)),
+            topic_mode_scores={},
+            cost_won=float(champion.get("avg_cost_won", 0.0)),
+            early_terminated=False,
+            shadow_only=True,
+        )
+        self.job_store.set_system_setting("router_competition_phase", "champion_ops")
+        self.job_store.set_system_setting("router_competition_week_start", week_start)
+        self.job_store.set_system_setting("router_competition_apply_at", apply_at)
+        self.job_store.set_system_setting("router_shadow_mode", "false")
+        self.job_store.set_system_setting("router_champion_model", champion_model)
+        self.job_store.set_system_setting("router_challenger_model", challenger_model)
+
+        if self.notifier and getattr(self.notifier, "enabled", False):
+            message = (
+                "📢 챔피언 모델 갱신\n"
+                f"• week_start: {week_start}\n"
+                f"• champion: {champion_model} ({float(champion.get('avg_quality_score', 0.0)):.1f}점)\n"
+                f"• challenger: {challenger_model or '-'}\n"
+                f"• apply_at: {apply_at}"
+            )
+            send_background = getattr(self.notifier, "send_message_background", None)
+            if callable(send_background):
+                send_background(message, disable_notification=False)
+
+        logger.info(
+            "Weekly competition promoted to champion_ops",
+            extra={
+                "week_start": week_start,
+                "champion_model": champion_model,
+                "challenger_model": challenger_model,
             },
         )
 
@@ -888,55 +1093,6 @@ class SchedulerService:
 
         return daily_target, allocations
 
-    def _fit_allocations_to_target(
-        self,
-        allocations: List[Dict[str, Any]],
-        target: int,
-    ) -> List[Dict[str, Any]]:
-        """할당 리스트를 목표치에 맞게 축소/확장한다."""
-        safe_target = max(0, int(target))
-        if safe_target <= 0:
-            return []
-
-        normalized: List[Dict[str, Any]] = []
-        for item in allocations:
-            category_name = str(item.get("category", "")).strip()
-            if not category_name:
-                continue
-            normalized.append(
-                {
-                    "category": category_name,
-                    "topic_mode": self._normalize_topic_mode(str(item.get("topic_mode", "")).strip()),
-                    "count": max(0, int(item.get("count", 0))),
-                }
-            )
-        if not normalized:
-            normalized = self._build_default_quota_allocations(safe_target)
-
-        output = [
-            {
-                "category": item["category"],
-                "topic_mode": item["topic_mode"],
-                "count": 0,
-            }
-            for item in normalized
-        ]
-        remaining = [int(item["count"]) for item in normalized]
-
-        allocated = 0
-        index = 0
-        while allocated < safe_target and any(value > 0 for value in remaining):
-            if remaining[index] > 0:
-                output[index]["count"] = int(output[index]["count"]) + 1
-                remaining[index] -= 1
-                allocated += 1
-            index = (index + 1) % len(remaining)
-
-        while allocated < safe_target:
-            output[allocated % len(output)]["count"] = int(output[allocated % len(output)]["count"]) + 1
-            allocated += 1
-
-        return [item for item in output if int(item["count"]) > 0]
 
     def _get_configured_idea_vault_quota(self, daily_target: int) -> int:
         """일간 아이디어 창고 할당량을 반환한다."""
