@@ -82,6 +82,7 @@ class ContentResult:
     seo_snapshot: Dict[str, Any]
     image_prompts: List[str]
     image_placements: List[Dict[str, Any]] = field(default_factory=list)
+    image_slots: List[Dict[str, Any]] = field(default_factory=list)
     llm_calls_used: int = 0
     provider_used: str = ""
     provider_model: str = ""
@@ -304,7 +305,7 @@ class ContentGenerator:
             voice_rewrite_applied = content != raw_content
 
         # Step 6: 이미지 프롬프트 생성
-        image_prompts, image_placements = await self._generate_image_prompts(
+        image_prompts, image_placements, image_slots = await self._generate_image_prompts(
             content,
             job.title,
             job.seed_keywords,
@@ -352,6 +353,7 @@ class ContentGenerator:
             seo_snapshot=seo_snapshot,
             image_prompts=image_prompts,
             image_placements=image_placements,
+            image_slots=image_slots,
             llm_calls_used=llm_calls,
             provider_used=provider_used,
             provider_model=provider_model,
@@ -1261,7 +1263,7 @@ class ContentGenerator:
         keywords: List[str],
         client: BaseLLMClient,
         token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+    ) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """이미지 프롬프트 생성 (블로그 최적화)."""
         # 섹션 제목 추출
         headings = re.findall(r"^##\s+(.+)$", content, flags=re.MULTILINE)
@@ -1286,36 +1288,135 @@ class ContentGenerator:
 
             prompts = []
             placements = []
+            slots = []
+
+            raw_slots = parsed.get("image_slots", [])
+            if isinstance(raw_slots, list):
+                for index, raw_slot in enumerate(raw_slots[:4]):
+                    if not isinstance(raw_slot, dict):
+                        continue
+                    prompt = str(raw_slot.get("prompt", "")).strip()
+                    if not prompt:
+                        continue
+                    slot_role_raw = str(raw_slot.get("slot_role", "content")).strip().lower()
+                    slot_role = "thumbnail" if slot_role_raw == "thumbnail" else "content"
+                    preferred_raw = str(raw_slot.get("preferred_type", "real")).strip().lower()
+                    preferred_type = "ai_generated" if preferred_raw == "ai_generated" else "real"
+                    score_raw = raw_slot.get("ai_generation_score", 0)
+                    try:
+                        score_value = int(score_raw)
+                    except (TypeError, ValueError):
+                        score_value = 0
+                    score = max(0, min(100, score_value))
+                    recommended_raw = raw_slot.get("recommended", False)
+                    if isinstance(recommended_raw, bool):
+                        recommended = recommended_raw
+                    else:
+                        recommended = str(recommended_raw).strip().lower() in {"1", "true", "yes", "on"}
+                    concept = str(raw_slot.get("concept", "")).strip()
+                    after_section = str(raw_slot.get("after_section", "")).strip()
+                    image_type = str(raw_slot.get("type", "illustration")).strip() or "illustration"
+                    reason = str(raw_slot.get("reason", "")).strip()
+                    slot_id = str(raw_slot.get("slot_id", "")).strip() or f"{slot_role}_{index}"
+
+                    slot_payload = {
+                        "slot_id": slot_id,
+                        "slot_role": slot_role,
+                        "prompt": prompt,
+                        "concept": concept,
+                        "after_section": after_section,
+                        "type": image_type,
+                        "preferred_type": preferred_type,
+                        "recommended": recommended,
+                        "ai_generation_score": score,
+                        "reason": reason,
+                    }
+                    slots.append(slot_payload)
+                    prompts.append(prompt)
+                    placements.append(
+                        {
+                            "type": slot_role,
+                            "prompt": prompt,
+                            "concept": concept,
+                            "after_section": after_section,
+                            "image_type": image_type,
+                            "slot_id": slot_id,
+                            "slot_role": slot_role,
+                            "preferred_type": preferred_type,
+                            "recommended": recommended,
+                            "ai_generation_score": score,
+                            "reason": reason,
+                            "placement": "title_below" if slot_role == "thumbnail" else "",
+                        }
+                    )
+
+            # 최신 image_slots 형식이 유효하면 우선 사용한다.
+            if slots:
+                return prompts, placements, slots
 
             # 썸네일
             thumbnail = parsed.get("thumbnail", {})
             if thumbnail.get("prompt"):
-                prompts.append(thumbnail["prompt"])
-                placements.append({
+                thumbnail_prompt = str(thumbnail["prompt"]).strip()
+                prompts.append(thumbnail_prompt)
+                placements.append(
+                    {
                     "type": "thumbnail",
-                    "prompt": thumbnail["prompt"],
+                    "prompt": thumbnail_prompt,
                     "concept": thumbnail.get("concept", ""),
                     "placement": "title_below",
-                })
+                    }
+                )
+                slots.append(
+                    {
+                        "slot_id": "thumb_0",
+                        "slot_role": "thumbnail",
+                        "prompt": thumbnail_prompt,
+                        "concept": str(thumbnail.get("concept", "")).strip(),
+                        "after_section": "",
+                        "type": "illustration",
+                        "preferred_type": "real",
+                        "recommended": False,
+                        "ai_generation_score": 0,
+                        "reason": "legacy_thumbnail_format",
+                    }
+                )
 
             # 본문 이미지
-            for img in parsed.get("content_images", [])[:2]:
+            for idx, img in enumerate(parsed.get("content_images", [])[:4], start=1):
                 if img.get("prompt"):
-                    prompts.append(img["prompt"])
-                    placements.append({
+                    content_prompt = str(img["prompt"]).strip()
+                    prompts.append(content_prompt)
+                    placements.append(
+                        {
                         "type": "content",
-                        "prompt": img["prompt"],
+                        "prompt": content_prompt,
                         "concept": img.get("concept", ""),
                         "after_section": img.get("after_section", ""),
                         "image_type": img.get("type", "illustration"),
-                    })
+                        }
+                    )
+                    slots.append(
+                        {
+                            "slot_id": f"content_{idx}",
+                            "slot_role": "content",
+                            "prompt": content_prompt,
+                            "concept": str(img.get("concept", "")).strip(),
+                            "after_section": str(img.get("after_section", "")).strip(),
+                            "type": str(img.get("type", "illustration")).strip() or "illustration",
+                            "preferred_type": "real",
+                            "recommended": False,
+                            "ai_generation_score": 0,
+                            "reason": "legacy_content_images_format",
+                        }
+                    )
 
-            return prompts, placements
+            return prompts, placements, slots
 
         except Exception as exc:
             logger.warning("Image prompt generation failed: %s", exc)
             # 폴백: 기본 프롬프트
-            return self._extract_image_prompts_fallback(content, title), []
+            return self._extract_image_prompts_fallback(content, title), [], []
 
     def _extract_image_prompts_fallback(self, content: str, title: str) -> List[str]:
         """이미지 프롬프트 폴백 생성."""
@@ -1323,7 +1424,7 @@ class ContentGenerator:
         prompts = [
             f"Blog thumbnail about {title}, modern illustration, vibrant colors, professional"
         ]
-        for heading in headings[:2]:
+        for heading in headings[:4]:
             prompts.append(
                 f"Illustration explaining {heading}, infographic style, clean design"
             )

@@ -93,6 +93,7 @@ async def _check_single(
 async def check_all_providers(
     skip_expensive: bool = True,
     llm_config: Optional[LLMConfig] = None,
+    api_keys: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, str]]:
     """등록된 provider들의 API 상태를 순회 점검한다."""
     config = llm_config or load_config().llm
@@ -100,11 +101,13 @@ async def check_all_providers(
 
     for provider, model in _build_targets(config=config, skip_expensive=skip_expensive):
         try:
+            api_key = api_keys.get(provider.lower()) if api_keys else None
             client = create_client(
                 provider=provider,
                 model=model or None,
                 timeout_sec=PING_TIMEOUT_SEC,
                 max_tokens=1,
+                api_key=api_key,
             )
         except Exception as exc:
             rows.append(

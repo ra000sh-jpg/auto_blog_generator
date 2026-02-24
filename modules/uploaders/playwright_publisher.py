@@ -35,6 +35,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+from .publisher_constants import (
+    BLOG_WRITE_URL,
+    RETRYABLE_ERRORS,
+    AI_IMAGE_PREFIXES,
+    THUMBNAIL_PLACEMENT_MODES,
+    AI_TOGGLE_MODES,
+    TITLE_SELECTORS,
+    BODY_SELECTORS,
+    DRAFT_CANCEL_SELECTORS,
+    PUBLISH_BTN_1_SELECTORS,
+    PUBLISH_BTN_2_SELECTORS,
+)
+
 
 async def _apply_stealth(page) -> None:
     """playwright-stealth v1 / v2 모두 호환되는 stealth 적용 함수."""
@@ -83,26 +96,11 @@ class PlaywrightPublisher:
         DRY_RUN: "true" / "false"(기본)
     """
 
-    BLOG_WRITE_URL = "https://blog.naver.com/{blog_id}/postwrite"
-
-    # 재시도 가능 여부
-    RETRYABLE_ERRORS = frozenset({
-        "ELEMENT_NOT_FOUND",
-        "NETWORK_TIMEOUT",
-        "RATE_LIMITED",
-        "PUBLISH_FAILED",
-        "UNKNOWN",
-    })
-    AI_IMAGE_PREFIXES = (
-        "together_",
-        "fal_",
-        "openai_",
-        "dashscope_",
-        "pollinations_",
-        "huggingface_",
-    )
-    THUMBNAIL_PLACEMENT_MODES = frozenset({"cover", "body_top"})
-    AI_TOGGLE_MODES = frozenset({"off", "metadata", "force"})
+    BLOG_WRITE_URL = BLOG_WRITE_URL
+    RETRYABLE_ERRORS = RETRYABLE_ERRORS
+    AI_IMAGE_PREFIXES = AI_IMAGE_PREFIXES
+    THUMBNAIL_PLACEMENT_MODES = THUMBNAIL_PLACEMENT_MODES
+    AI_TOGGLE_MODES = AI_TOGGLE_MODES
 
     def __init__(self, blog_id: str, session_dir: str = "data/sessions/naver"):
         self.blog_id = blog_id
@@ -360,7 +358,7 @@ class PlaywrightPublisher:
     ) -> PublishResult:
         """실제 발행 흐름 (네이버 스마트 에디터 ONE 기준)"""
         del image_sources
-        write_url = self.BLOG_WRITE_URL.format(blog_id=self.blog_id)
+        write_url = BLOG_WRITE_URL.format(blog_id=self.blog_id)
 
         await page.goto(write_url, wait_until="networkidle", timeout=45_000)
         await self._human_delay(3000, 5000)
@@ -401,12 +399,7 @@ class PlaywrightPublisher:
         # ── 스마트 에디터 ONE: iframe 없이 직접 접근 ─────────────────
         # 제목 영역 클릭 및 입력
         # 셀렉터 우선순위: se-title-text > se-section-documentTitle 내 paragraph
-        title_selectors = [
-            ".se-section-documentTitle .se-text-paragraph",
-            ".se-title-text",
-            "[data-component='documentTitle'] [contenteditable]",
-            ".se-section-title .se-text-paragraph",
-        ]
+        title_selectors = TITLE_SELECTORS
         title_clicked = False
         for sel in title_selectors:
             try:
@@ -428,8 +421,11 @@ class PlaywrightPublisher:
                 context={"selectors": title_selectors, "current_url": page.url},
             )
 
+        from .editor_helper import NaverEditorHelper
+        editor = NaverEditorHelper(page)
+
         await self._human_delay(300, 600)
-        await self._type_naturally(page, title)
+        await editor.type_naturally(title)
         await self._human_delay(500, 1000)
 
         # ── 썸네일 업로드 (정책 기반) ─────────────────────────────────
@@ -443,12 +439,7 @@ class PlaywrightPublisher:
 
         # ── 본문 내용 클릭 및 포커스 ─────────────────────────────────
         # 제목 배경 썸네일 업로드 후 명시적으로 본문을 다시 클릭하여 포커스를 본문으로 가져온다
-        body_selectors = [
-            ".se-section-text .se-text-paragraph",
-            ".se-content .se-text-paragraph",
-            ".se-component-content .se-text-paragraph",
-            ".se-main-container [contenteditable='true']:not([data-se-doc-title])",
-        ]
+        body_selectors = BODY_SELECTORS
         body_clicked = False
         for sel in body_selectors:
             try:
@@ -467,54 +458,21 @@ class PlaywrightPublisher:
             await self._human_delay(300, 500)
 
         # ── 본문 내용 및 이미지 교차(Interleave) 입력 ──────────────────────────────
-        if image_points:
-            # 마커를 기준으로 텍스트와 이미지를 교차 삽입한다.
-            import re
+        async def do_upload(path: str):
+            await self._upload_image(page, path)
 
-            if self._thumbnail_placement_mode == "cover":
-                marker_points = {pt.marker: pt for pt in image_points if not pt.is_thumbnail}
-            else:
-                marker_points = {pt.marker: pt for pt in image_points}
+        async def do_sep(stage: str):
+            await self._insert_non_gallery_separator(page, stage=stage)
 
-            pattern = re.compile(r"(\[IMG_\d+\])")
-            parts = pattern.split(content)
-
-            for part in parts:
-                if not part:
-                    continue
-                if part in marker_points:
-                    point = marker_points[part]
-                    if Path(point.path).exists():
-                        await self._insert_non_gallery_separator(page, stage="before")
-                        await self._upload_image(page, point.path)
-                        await self._insert_non_gallery_separator(page, stage="after")
-                elif pattern.match(part):
-                    # 마커인데 파일 매핑이 없으면 무시한다.
-                    continue
-                else:
-                    part_clean = part.strip("\n")
-                    if part_clean:
-                        await page.keyboard.insert_text(part_clean + "\n")
-                        await self._human_delay(500, 1000)
-        else:
-            # 예전 로직 fallback (마커 기반 포인트가 없을 때 전체 텍스트 후 이미지 일괄 첨부)
-            import re
-            clean_content = re.sub(r"\[IMG_\d+\]\n?", "", content)
-            await page.keyboard.insert_text(clean_content)
-            await self._human_delay(1000, 2000)
-
-            images_to_upload = [p for p in (images or []) if Path(p).exists()]
-            if (
-                self._thumbnail_placement_mode != "cover"
-                and thumbnail
-                and Path(thumbnail).exists()
-            ):
-                images_to_upload = [thumbnail, *images_to_upload]
-            for img_path in images_to_upload:
-                await self._insert_non_gallery_separator(page, stage="before")
-                await self._upload_image(page, img_path)
-                await self._insert_non_gallery_separator(page, stage="after")
-                await self._human_delay(1200, 2400)
+        await editor.insert_content_with_markers(
+            content=content,
+            images=images,
+            thumbnail=thumbnail,
+            image_points=image_points,
+            thumbnail_placement_mode=self._thumbnail_placement_mode,
+            upload_image_callback=do_upload,
+            insert_separator_callback=do_sep,
+        )
 
         # ── AI 활용 설정 사전 점검 (필요 시 1회 자가복구) ──────────────
         await self._run_ai_toggle_prepublish_validation(page)
@@ -522,12 +480,7 @@ class PlaywrightPublisher:
         # ── 발행 버튼 클릭 (1단계: 설정 팝업 열기) ───────────────────
         # 상단 툴바 내에 있는 '발행' 텍스트 버튼 찾기
         await self._dismiss_blocking_layer_popup(page)
-        publish_btn_selector_1 = [
-            ".se-header button:has-text('발행')",
-            "button.publish_btn__m9KHH",
-            "button[class*='publish_btn']",
-            "button:has-text('발행')",
-        ]
+        publish_btn_selector_1 = PUBLISH_BTN_1_SELECTORS
         
         publish_btn_1 = None
         for sel in publish_btn_selector_1:
@@ -558,12 +511,7 @@ class PlaywrightPublisher:
         # ── 발행 버튼 클릭 (2단계: 최종 확인) ───────────────────────
         # 설정 팝업(.layer_result) 내의 '발행' 버튼 찾기
         await self._dismiss_blocking_layer_popup(page, preserve_reserved_publish=True)
-        publish_btn_selector_2 = [
-            ".layer_result button.confirm_btn__WEaBq",
-            ".layer_result button:has-text('발행')",
-            "button[class*='confirm_btn']",
-            "button.confirm_btn",
-        ]
+        publish_btn_selector_2 = PUBLISH_BTN_2_SELECTORS
 
         publish_btn_2 = None
         for sel in publish_btn_selector_2:
@@ -626,18 +574,7 @@ class PlaywrightPublisher:
                 continue
 
             clicked = False
-            cancel_selectors = [
-                "[role='dialog'] button:has-text('취소')",
-                "[class*='dialog'] button:has-text('취소')",
-                "[class*='modal'] button:has-text('취소')",
-                "[class*='popup'] button:has-text('취소')",
-                "[class*='layer'] button:has-text('취소')",
-                "[role='dialog'] [role='button']:has-text('취소')",
-                "[class*='dialog'] [role='button']:has-text('취소')",
-                "button:has-text('취소')",
-                "[role='button']:has-text('취소')",
-                "text=취소",
-            ]
+            cancel_selectors = DRAFT_CANCEL_SELECTORS
             for selector in cancel_selectors:
                 try:
                     buttons = page.locator(selector)

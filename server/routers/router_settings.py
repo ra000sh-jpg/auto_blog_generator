@@ -20,8 +20,13 @@ class RouterSettingsPayload(BaseModel):
     text_api_keys: Dict[str, str] = Field(default_factory=dict)
     image_api_keys: Dict[str, str] = Field(default_factory=dict)
     image_engine: str = "pexels"
+    image_ai_engine: str = "together_flux"
+    image_ai_quota: str = "0"
+    image_topic_quota_overrides: Dict[str, str] = Field(default_factory=dict)
     image_enabled: bool = True
     images_per_post: int = Field(default=1, ge=0, le=4)
+    images_per_post_min: int = Field(default=0, ge=0, le=4)
+    images_per_post_max: int = Field(default=4, ge=0, le=4)
 
 
 class RouterQuoteResponse(BaseModel):
@@ -79,8 +84,13 @@ def quote_router_settings(
             "text_api_keys": request.text_api_keys,
             "image_api_keys": request.image_api_keys,
             "image_engine": request.image_engine,
+            "image_ai_engine": request.image_ai_engine,
+            "image_ai_quota": request.image_ai_quota,
+            "image_topic_quota_overrides": request.image_topic_quota_overrides,
             "image_enabled": request.image_enabled,
             "images_per_post": request.images_per_post,
+            "images_per_post_min": request.images_per_post_min,
+            "images_per_post_max": request.images_per_post_max,
         }
     )
     return RouterQuoteResponse(
@@ -108,8 +118,13 @@ def save_router_settings(
             "text_api_keys": request.text_api_keys,
             "image_api_keys": request.image_api_keys,
             "image_engine": request.image_engine,
+            "image_ai_engine": request.image_ai_engine,
+            "image_ai_quota": request.image_ai_quota,
+            "image_topic_quota_overrides": request.image_topic_quota_overrides,
             "image_enabled": request.image_enabled,
             "images_per_post": request.images_per_post,
+            "images_per_post_min": request.images_per_post_min,
+            "images_per_post_max": request.images_per_post_max,
         }
     )
     payload = llm_router.export_for_ui()

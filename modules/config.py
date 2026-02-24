@@ -72,7 +72,7 @@ class ImageConfig:
     content_style: str = "monet_soft"
     thumbnail_size: str = "1024*1024"
     content_size: str = "1024*768"
-    max_content_images: int = 2
+    max_content_images: int = 4
     output_dir: str = "data/images"
 
 

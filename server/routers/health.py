@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from modules.automation.time_utils import now_utc
 from modules.config import AppConfig
 from modules.llm.api_health import check_all_providers
-from server.dependencies import get_app_config
+from modules.llm.llm_router import LLMRouter
+from server.dependencies import get_app_config, get_llm_router
 
 router = APIRouter()
 
@@ -55,12 +56,19 @@ def _is_key_missing_message(message: str) -> bool:
 @router.get("/health", response_model=HealthResponse, summary="API/LLM 상태 조회")
 async def get_health(
     app_config: AppConfig = Depends(get_app_config),
+    llm_router: LLMRouter = Depends(get_llm_router),
 ) -> HealthResponse:
     """API 서버 및 LLM 연동 상태를 조회한다."""
     warnings: List[str] = []
 
     try:
-        rows = await check_all_providers(skip_expensive=True, llm_config=app_config.llm)
+        router_settings = llm_router.get_saved_settings()
+        text_api_keys = router_settings.get("text_api_keys", {})
+        rows = await check_all_providers(
+            skip_expensive=True,
+            llm_config=app_config.llm,
+            api_keys=text_api_keys,
+        )
     except Exception as exc:
         rows = []
         warnings.append(f"헬스 체크 중 예외 발생: {exc}")

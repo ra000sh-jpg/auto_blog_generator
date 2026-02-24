@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchOnboardingStatus } from "@/lib/api";
+import { fetchOnboardingStatus, completeOnboarding, triggerSchedulerSeed } from "@/lib/api";
 import { OnboardingWizard } from "@/components/onboarding-wizard";
 
 export default function OnboardingPage() {
@@ -40,9 +40,21 @@ export default function OnboardingPage() {
         );
     }
 
+    const handleOnboardingComplete = async () => {
+        try {
+            await completeOnboarding();
+            // 온보딩 완료 시 오늘의 첫 큐를 즉시 생성하도록 트리거
+            await triggerSchedulerSeed().catch((err) => console.error("Auto-seeding failed:", err));
+            router.replace("/");
+        } catch (error) {
+            console.error("Redirect failed:", error);
+            router.replace("/");
+        }
+    };
+
     return (
         <div className="mx-auto w-full max-w-4xl py-10">
-            <OnboardingWizard onComplete={() => router.replace("/")} />
+            <OnboardingWizard onComplete={handleOnboardingComplete} />
         </div>
     );
 }

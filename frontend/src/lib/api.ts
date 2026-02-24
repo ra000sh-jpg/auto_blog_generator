@@ -345,6 +345,9 @@ export type RouterSettingsPayload = {
   text_api_keys: Record<string, string>;
   image_api_keys: Record<string, string>;
   image_engine: string;
+  image_ai_engine?: string;
+  image_ai_quota?: "0" | "1" | "all";
+  image_topic_quota_overrides?: Record<string, string>;
   image_enabled: boolean;
   images_per_post: number;
   images_per_post_min?: number;
@@ -373,6 +376,9 @@ export type RouterSettingsResponse = {
     text_api_keys_masked: Record<string, string>;
     image_api_keys_masked: Record<string, string>;
     image_engine: string;
+    image_ai_engine: string;
+    image_ai_quota: string;
+    image_topic_quota_overrides: Record<string, string>;
     image_enabled: boolean;
     images_per_post: number;
     images_per_post_min: number;

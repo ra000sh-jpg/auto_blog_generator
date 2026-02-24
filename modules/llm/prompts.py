@@ -761,33 +761,42 @@ IMAGE_PROMPT_GENERATION = """
 
 ## 이미지 유형별 요구사항
 
-### 1. 썸네일 (1장)
-- 글의 핵심 주제를 한눈에 전달
-- 클릭을 유도하는 시각적 임팩트
-- 텍스트 오버레이 공간 고려 (상단 또는 좌측 여백)
-- 밝고 선명한 색감
+### 슬롯 구성 규칙
+- 총 슬롯은 최대 4개 (썸네일 1 + 본문 최대 3)
+- slot_role은 반드시 thumbnail 또는 content 중 하나
+- ai_generation_score는 0~100 정수
+- preferred_type은 real 또는 ai_generated
 
-### 2. 본문 이미지 (2-3장)
-- 각 주요 섹션의 내용을 시각화
-- 정보 전달에 도움이 되는 인포그래픽 스타일
-- 개념 설명이나 단계를 보여주는 일러스트
-
-## 응답 형식 (JSON)
+## 응답 형식 (JSON) - 기본 형식 (권장)
 {{
-  "thumbnail": {{
-    "prompt": "영어 이미지 생성 프롬프트",
-    "concept": "한국어 설명",
-    "placement": "title_below"
-  }},
-  "content_images": [
+  "image_slots": [
     {{
+      "slot_id": "thumb_0",
+      "slot_role": "thumbnail",
       "prompt": "영어 이미지 생성 프롬프트",
       "concept": "한국어 설명",
-      "after_section": "섹션 제목",
-      "type": "infographic|illustration|diagram"
+      "preferred_type": "real|ai_generated",
+      "recommended": true,
+      "ai_generation_score": 0,
+      "reason": "선택 이유 1문장"
+    }},
+    {{
+      "slot_id": "content_1",
+      "slot_role": "content",
+      "prompt": "영어 이미지 생성 프롬프트",
+      "concept": "한국어 설명",
+      "after_section": "섹션 제목 (선택)",
+      "type": "infographic|illustration|diagram (선택)",
+      "preferred_type": "real|ai_generated",
+      "recommended": false,
+      "ai_generation_score": 0,
+      "reason": "선택 이유 1문장"
     }}
   ]
 }}
+
+## 하위호환 형식 (허용)
+- 기존 형식(thumbnail + content_images)으로 응답해도 됩니다.
 """.strip()
 
 

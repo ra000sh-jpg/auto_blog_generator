@@ -132,6 +132,36 @@ def test_content_generator_returns_valid_structure():
     assert result.llm_token_usage["quality_step"]["input_tokens"] > 0
 
 
+def test_content_generator_supports_image_slots_schema():
+    """image_slots 응답 스키마를 파싱하고 최대 4개까지 유지해야 한다."""
+    outputs = [
+        "# 자동화 블로그 작성 가이드\n\n## 시작하기\n\n초안 본문",
+        "# 자동화 블로그 작성 가이드\n\n## SEO 시작하기\n\n최적화 본문",
+        '{"score": 88, "issues": [], "summary": "양호"}',
+        "# 자동화 블로그 작성 가이드\n\n## SEO 시작하기\n\n리라이트 본문",
+        """
+        {
+          "image_slots": [
+            {"slot_id":"thumb_0","slot_role":"thumbnail","prompt":"thumb prompt","preferred_type":"real","recommended":false,"ai_generation_score":30,"reason":"thumb"},
+            {"slot_id":"content_1","slot_role":"content","prompt":"content prompt 1","preferred_type":"ai_generated","recommended":true,"ai_generation_score":90,"reason":"c1"},
+            {"slot_id":"content_2","slot_role":"content","prompt":"content prompt 2","preferred_type":"real","recommended":false,"ai_generation_score":40,"reason":"c2"},
+            {"slot_id":"content_3","slot_role":"content","prompt":"content prompt 3","preferred_type":"ai_generated","recommended":true,"ai_generation_score":88,"reason":"c3"},
+            {"slot_id":"content_4","slot_role":"content","prompt":"content prompt 4","preferred_type":"real","recommended":false,"ai_generation_score":10,"reason":"c4"}
+          ]
+        }
+        """.strip(),
+    ]
+    generator = ContentGenerator(client=FakeClaudeClient(outputs))
+    result = asyncio.run(generator.generate(build_job("slots-schema-job")))
+
+    assert len(result.image_slots) == 4
+    assert len(result.image_prompts) == 4
+    assert result.image_slots[0]["slot_role"] == "thumbnail"
+    assert result.image_slots[1]["slot_role"] == "content"
+    assert result.image_slots[1]["ai_generation_score"] == 90
+    assert result.image_slots[1]["preferred_type"] == "ai_generated"
+
+
 def test_voice_rewrite_falls_back_when_numeric_fact_changes():
     """Voice 리라이트가 숫자 사실을 바꾸면 원문으로 폴백해야 한다."""
     outputs = [

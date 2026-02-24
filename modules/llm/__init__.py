@@ -234,6 +234,7 @@ async def llm_generate_fn(job: Job) -> Dict[str, Any]:
         "seo_snapshot": result.seo_snapshot,
         "image_prompts": result.image_prompts,
         "image_placements": result.image_placements,
+        "image_slots": result.image_slots,
         "raw_content": result.raw_content,
         "voice_rewrite_applied": result.voice_rewrite_applied,
         "llm_calls_used": result.llm_calls_used,

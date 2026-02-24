@@ -45,8 +45,9 @@ def test_check_all_providers_returns_status_rows(monkeypatch):
         model: Optional[str] = None,
         timeout_sec: float = 3.0,
         max_tokens: int = 1,
+        api_key: Optional[str] = None,
     ):
-        del model, timeout_sec, max_tokens
+        del model, timeout_sec, max_tokens, api_key
         return clients[provider]
 
     monkeypatch.setattr(api_health, "create_client", fake_create_client)

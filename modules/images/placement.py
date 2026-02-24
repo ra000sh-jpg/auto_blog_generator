@@ -100,7 +100,7 @@ def optimize_image_placement(
         # 이미지 균등 배치
         if available_positions:
             step = max(1, len(available_positions) // (len(content_image_paths) + 1))
-            for img_idx, img_path in enumerate(content_image_paths[:2]):  # 최대 2개
+            for img_idx, img_path in enumerate(content_image_paths[:4]):  # 최대 4개
                 pos_idx = min((img_idx + 1) * step, len(available_positions) - 1)
                 _, insert_pos = available_positions[pos_idx]
 
@@ -381,7 +381,7 @@ def create_naver_editor_content(
 
         # 이미지 균등 분배
         if available:
-            num_images = min(len(content_image_paths), 2)  # 최대 2개
+            num_images = min(len(content_image_paths), 4)  # 최대 4개
             step = max(1, len(available) // (num_images + 1))
 
             for i, img_path in enumerate(content_image_paths[:num_images]):
