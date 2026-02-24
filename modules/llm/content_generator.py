@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..automation.job_store import Job
 from ..collectors import RssNewsCollector
+from ..constants import DEFAULT_FALLBACK_CATEGORY
 from ..exceptions import ContentGenerationError, RateLimitError
 from ..rag import CrossEncoderRagSearchEngine
 from ..seo.platform_strategy import get_platform_strategy
@@ -104,6 +105,10 @@ class ContentGenerator:
     - 톤/스타일 선택
     """
 
+    MAIN_SLOT_QUALITY_THRESHOLD = 80
+    TEST_SLOT_QUALITY_THRESHOLD = 70
+    QUALITY_RETRY_MASK_FLOOR = 60
+
     def __init__(
         self,
         primary_client: Optional[BaseLLMClient] = None,
@@ -176,6 +181,7 @@ class ContentGenerator:
         topic_mode = self._resolve_topic_mode(job=job, persona=persona)
         saved_voice_profile = self._load_saved_voice_profile(persona_id or job.persona_id or "P1")
         is_idea_vault_job = any(str(tag).lower() == "idea_vault" for tag in (job.tags or []))
+        required_quality_score, quality_slot_type = self._resolve_quality_threshold(job)
 
         news_context: List[Dict[str, str]] = []
         if self._is_economy_topic(topic_mode):
@@ -254,18 +260,19 @@ class ContentGenerator:
                     raw_content,
                     job,
                     self.secondary,
+                    pass_score_threshold=required_quality_score,
                     token_usage=token_usage,
                 )
                 llm_calls += 1
 
-                if quality_result.score >= self.min_quality_score:
+                if quality_result.score >= required_quality_score:
                     break
 
                 if attempt < self.max_rewrites:
                     logger.info(
                         "Quality score %d < %d, rewriting (attempt %d/%d)",
                         quality_result.score,
-                        self.min_quality_score,
+                        required_quality_score,
                         attempt + 1,
                         self.max_rewrites,
                     )
@@ -335,6 +342,8 @@ class ContentGenerator:
                 "summary": quality_result.summary,
                 "raw_content_length": len(raw_content),
                 "final_content_length": len(content),
+                "required_quality_score": required_quality_score,
+                "quality_slot_type": quality_slot_type,
                 "pipeline_layers": {
                     "quality_topic_mode": topic_mode,
                     "voice_rewrite_applied": voice_rewrite_applied,
@@ -471,6 +480,41 @@ class ContentGenerator:
         if any(token in lowered for token in ("카페", "맛집", "커피", "레시피", "요리", "브런치")):
             return "cafe"
         return None
+
+    def _normalize_category_name(self, value: str) -> str:
+        """카테고리 비교를 위해 공백/대소문자를 정규화한다."""
+        lowered = str(value or "").strip().lower()
+        return re.sub(r"\s+", "", lowered)
+
+    def _load_fallback_category(self) -> str:
+        """system_settings에서 fallback_category를 로드한다."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT setting_value
+                    FROM system_settings
+                    WHERE setting_key = 'fallback_category'
+                    """,
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return DEFAULT_FALLBACK_CATEGORY
+
+        saved_value = str(row[0]).strip() if row and row[0] is not None else ""
+        return saved_value or DEFAULT_FALLBACK_CATEGORY
+
+    def _resolve_quality_threshold(self, job: Job) -> Tuple[int, str]:
+        """카테고리 슬롯에 따라 품질 통과 점수를 결정한다."""
+        fallback_category = self._load_fallback_category()
+        job_category = self._normalize_category_name(job.category)
+        fallback_normalized = self._normalize_category_name(fallback_category)
+
+        if job_category and fallback_normalized and job_category == fallback_normalized:
+            return self.TEST_SLOT_QUALITY_THRESHOLD, "test"
+        return self.MAIN_SLOT_QUALITY_THRESHOLD, "main"
 
     def _collect_news_context(self, keywords: List[str], max_items: int = 3) -> List[Dict[str, str]]:
         """키워드 기반 RSS 뉴스 컨텍스트를 수집한다."""
@@ -1135,6 +1179,7 @@ class ContentGenerator:
         content: str,
         job: Job,
         client: BaseLLMClient,
+        pass_score_threshold: int,
         token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> QualityResult:
         """품질 검증."""
@@ -1163,9 +1208,9 @@ class ContentGenerator:
         score = int(parsed.get("score", 50))
 
         # 게이트 결정
-        if score >= 80:
+        if score >= pass_score_threshold:
             gate = "pass"
-        elif score >= 60:
+        elif score >= self.QUALITY_RETRY_MASK_FLOOR:
             gate = "retry_mask"
         else:
             gate = "retry_all"

@@ -149,6 +149,55 @@ def test_voice_rewrite_falls_back_when_numeric_fact_changes():
     assert result.voice_rewrite_applied is False
 
 
+def test_quality_threshold_main_slot_requires_80(tmp_path: Path):
+    """메인 슬롯은 80점 기준으로 품질 통과 여부를 판단해야 한다."""
+    outputs = [
+        "# 테스트\n\n## 본문\n\n메인 슬롯 초안",
+        "# 테스트\n\n## 본문\n\n메인 슬롯 초안",
+        '{"score": 75, "issues": ["depth"], "summary": "보완 필요"}',
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    generator = ContentGenerator(
+        client=FakeClaudeClient(outputs),
+        max_rewrites=0,
+        enable_voice_rewrite=False,
+        db_path=str(tmp_path / "main_threshold.db"),
+    )
+    result = asyncio.run(generator.generate(build_job("main-threshold-job")))
+
+    assert result.quality_gate == "retry_mask"
+    assert result.quality_snapshot["required_quality_score"] == 80
+    assert result.quality_snapshot["quality_slot_type"] == "main"
+
+
+def test_quality_threshold_test_slot_uses_fallback_category(tmp_path: Path):
+    """fallback_category 슬롯은 70점 기준으로 품질 통과해야 한다."""
+    db_path = tmp_path / "test_threshold.db"
+    store = JobStore(str(db_path), config=JobConfig())
+    store.set_system_setting("fallback_category", "다양한 생각")
+
+    outputs = [
+        "# 테스트\n\n## 본문\n\n테스트 슬롯 초안",
+        "# 테스트\n\n## 본문\n\n테스트 슬롯 초안",
+        '{"score": 75, "issues": [], "summary": "통과"}',
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    generator = ContentGenerator(
+        client=FakeClaudeClient(outputs),
+        max_rewrites=0,
+        enable_voice_rewrite=False,
+        db_path=str(db_path),
+    )
+    job = build_job("test-threshold-job")
+    job.category = "다양한 생각"
+
+    result = asyncio.run(generator.generate(job))
+
+    assert result.quality_gate == "pass"
+    assert result.quality_snapshot["required_quality_score"] == 70
+    assert result.quality_snapshot["quality_slot_type"] == "test"
+
+
 def test_llm_generate_fn_compatible_with_pipeline(monkeypatch: pytest.MonkeyPatch):
     """PipelineService가 기대하는 결과 스키마를 반환하는지 검증한다."""
     import modules.llm as llm_module

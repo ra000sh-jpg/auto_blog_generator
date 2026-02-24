@@ -322,6 +322,58 @@ class JobStore:
 
                 CREATE INDEX IF NOT EXISTS idx_idea_vault_queued_job
                 ON idea_vault(queued_job_id);
+
+                CREATE TABLE IF NOT EXISTS model_performance_log (
+                    id TEXT PRIMARY KEY,
+                    model_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    topic_mode TEXT NOT NULL,
+                    quality_score REAL NOT NULL,
+                    cost_won REAL NOT NULL,
+                    is_free_model INTEGER NOT NULL DEFAULT 0,
+                    score_per_won REAL,
+                    free_model_rank INTEGER,
+                    post_id TEXT,
+                    slot_type TEXT NOT NULL,
+                    feedback_source TEXT NOT NULL DEFAULT 'ai_evaluator',
+                    measured_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_model_performance_model_time
+                ON model_performance_log(model_id, measured_at);
+
+                CREATE INDEX IF NOT EXISTS idx_model_performance_topic_time
+                ON model_performance_log(topic_mode, measured_at);
+
+                CREATE INDEX IF NOT EXISTS idx_model_performance_slot_time
+                ON model_performance_log(slot_type, measured_at);
+
+                CREATE TABLE IF NOT EXISTS weekly_competition_state (
+                    week_start TEXT PRIMARY KEY,
+                    phase TEXT NOT NULL,
+                    candidates TEXT NOT NULL,
+                    champion_model TEXT,
+                    challenger_model TEXT,
+                    early_terminated INTEGER NOT NULL DEFAULT 0,
+                    apply_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_weekly_competition_apply_at
+                ON weekly_competition_state(apply_at);
+
+                CREATE TABLE IF NOT EXISTS champion_history (
+                    week_start TEXT PRIMARY KEY,
+                    champion_model TEXT NOT NULL,
+                    challenger_model TEXT,
+                    avg_champion_score REAL NOT NULL,
+                    topic_mode_scores TEXT NOT NULL,
+                    cost_won REAL NOT NULL,
+                    early_terminated INTEGER NOT NULL DEFAULT 0,
+                    shadow_only INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_champion_history_score
+                ON champion_history(avg_champion_score);
             """)
 
             existing_metric_columns = {
@@ -359,6 +411,21 @@ class JobStore:
                 WHERE source_url != ''
                 """
             )
+
+            # 상태값 정합성 마이그레이션: legacy 'published' -> 'completed'
+            migrated = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?
+                WHERE status = 'published'
+                """,
+                (self.STATUS_COMPLETED,),
+            ).rowcount
+            if migrated:
+                logger.info(
+                    "Migrated legacy job statuses",
+                    extra={"from_status": "published", "to_status": self.STATUS_COMPLETED, "count": migrated},
+                )
 
     def _generate_idempotency_key(self, title: str, scheduled_at: str, persona_id: str) -> str:
         """중복 방지용 idempotency key 생성"""

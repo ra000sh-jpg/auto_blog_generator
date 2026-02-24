@@ -15,12 +15,13 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from modules.automation.time_utils import now_utc
-from server.dependencies import get_app_config, get_job_store
+from server.dependencies import get_app_config, get_job_store, get_llm_router
 from server.routers.scheduler import get_scheduler_instance, _next_publish_slot_kst
 
 if TYPE_CHECKING:
     from modules.automation.job_store import JobStore
     from modules.config import AppConfig
+    from modules.llm.llm_router import LLMRouter
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
         today_row = conn.execute(
             """
             SELECT COUNT(*) AS cnt FROM jobs
-            WHERE status = 'published'
+            WHERE status = 'completed'
               AND date(updated_at) = ?
             """,
             (today,),
@@ -214,7 +215,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
 
         # 전체 누적 발행 건수
         total_row = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'published'"
+            "SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'completed'"
         ).fetchone()
         total_published = int(total_row["cnt"]) if total_row else 0
 
@@ -326,12 +327,19 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
     )
 
 
-async def _build_health_summary(app_config: "AppConfig") -> HealthSummaryData:
+async def _build_health_summary(app_config: "AppConfig", llm_router: "LLMRouter") -> HealthSummaryData:
     """LLM/API 헬스 요약을 조회한다 (헤비한 체크는 skip)."""
     try:
         from modules.llm.api_health import check_all_providers
 
-        rows = await check_all_providers(skip_expensive=True, llm_config=app_config.llm)
+        router_settings = llm_router.get_saved_settings()
+        text_api_keys = router_settings.get("text_api_keys", {})
+
+        rows = await check_all_providers(
+            skip_expensive=True,
+            llm_config=app_config.llm,
+            api_keys=text_api_keys,
+        )
         ok_count = sum(1 for r in rows if str(r.get("status", "")).upper() == "OK")
         fail_count = len(rows) - ok_count
         overall = "ok" if fail_count == 0 else "degraded"
@@ -359,6 +367,7 @@ async def _build_health_summary(app_config: "AppConfig") -> HealthSummaryData:
 async def get_dashboard_stats(
     job_store: "JobStore" = Depends(get_job_store),
     app_config: "AppConfig" = Depends(get_app_config),
+    llm_router: "LLMRouter" = Depends(get_llm_router),
 ) -> DashboardResponse:
     """대시보드에 필요한 모든 통계를 한 번의 요청으로 반환한다.
 
@@ -371,7 +380,7 @@ async def get_dashboard_stats(
     # 비동기 병렬 실행
     telegram_data, health_data = await asyncio.gather(
         _fetch_telegram_status(job_store),
-        _build_health_summary(app_config),
+        _build_health_summary(app_config, llm_router),
     )
 
     return DashboardResponse(

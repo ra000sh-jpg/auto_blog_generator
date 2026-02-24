@@ -269,3 +269,45 @@ def test_timestamp_utc_consistency(store: JobStore):
 
     for event in store.get_job_events("time-job", limit=20):
         assert_utc_iso(event["created_at"])
+
+
+def test_router_competition_tables_initialized(store: JobStore):
+    """스마트 라우터 P0 테이블이 초기화되는지 검증."""
+    with store.connection() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+    assert "model_performance_log" in tables
+    assert "weekly_competition_state" in tables
+    assert "champion_history" in tables
+
+
+def test_legacy_published_status_is_migrated(tmp_path):
+    """legacy published 상태가 completed로 자동 변환되는지 검증."""
+    db_path = tmp_path / "legacy_status.db"
+    store = JobStore(str(db_path), config=JobConfig())
+
+    scheduled_at = now_utc()
+    assert store.schedule_job(
+        job_id="legacy-status-job",
+        title="Legacy Status",
+        seed_keywords=["legacy"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=scheduled_at,
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'published' WHERE job_id = ?",
+            ("legacy-status-job",),
+        )
+
+    reloaded = JobStore(str(db_path), config=JobConfig())
+    migrated = reloaded.get_job("legacy-status-job")
+    assert migrated is not None
+    assert migrated.status == reloaded.STATUS_COMPLETED
