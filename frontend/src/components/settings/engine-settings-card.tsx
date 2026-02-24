@@ -39,6 +39,9 @@ export default function EngineSettingsCard({
     );
     const [imageEngine, setImageEngine] = useState(initialRouterSettings.settings.image_engine || "pexels");
     const [imageEnabled, setImageEnabled] = useState(Boolean(initialRouterSettings.settings.image_enabled));
+    const [trafficFeedbackStrongMode, setTrafficFeedbackStrongMode] = useState(
+        Boolean(initialRouterSettings.settings.traffic_feedback_strong_mode)
+    );
     const [imagesPerPostMin, setImagesPerPostMin] = useState(
         Math.max(0, Math.min(4, Number(initialRouterSettings.settings.images_per_post_min || 0)))
     );
@@ -116,6 +119,7 @@ export default function EngineSettingsCard({
                     text_api_keys: compactKeys(textApiKeys),
                     image_api_keys: compactKeys(imageApiKeys),
                     image_engine: imageEngine,
+                    traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                     image_enabled: imageEnabled,
                     images_per_post: imagesPerPostMax,
                     images_per_post_min: imagesPerPostMin,
@@ -129,7 +133,7 @@ export default function EngineSettingsCard({
             }
         }, 350);
         return () => clearTimeout(timer);
-    }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageEnabled, imagesPerPostMin, imagesPerPostMax]);
+    }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, trafficFeedbackStrongMode, imageEnabled, imagesPerPostMin, imagesPerPostMax]);
 
     function handleTextKeyChange(keyId: string, value: string) {
         setTextApiKeys((prev) => ({ ...prev, [keyId]: value }));
@@ -148,6 +152,7 @@ export default function EngineSettingsCard({
                 text_api_keys: compactKeys(textApiKeys),
                 image_api_keys: compactKeys(imageApiKeys),
                 image_engine: imageEngine,
+                traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                 image_enabled: imageEnabled,
                 images_per_post: imagesPerPostMax,
                 images_per_post_min: imagesPerPostMin,
@@ -158,6 +163,7 @@ export default function EngineSettingsCard({
             setImageApiMasks(saved.settings.image_api_keys_masked || {});
             setImageEngine(saved.settings.image_engine || "pexels");
             setImageEnabled(Boolean(saved.settings.image_enabled));
+            setTrafficFeedbackStrongMode(Boolean(saved.settings.traffic_feedback_strong_mode));
             setImagesPerPostMin(Math.max(0, Math.min(4, Number(saved.settings.images_per_post_min || 0))));
             setImagesPerPostMax(Math.max(0, Math.min(4, Number(
                 saved.settings.images_per_post_max ?? saved.settings.images_per_post ?? 1
@@ -421,6 +427,26 @@ export default function EngineSettingsCard({
                     <p className="sm:col-span-2">
                         다음 적용 시각: <strong>{competitionState.apply_at || "-"}</strong>
                     </p>
+                </div>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50/70 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <p className="text-sm font-semibold text-amber-900">트래픽 피드백 고급 설정</p>
+                        <p className="text-xs text-amber-800">
+                            토픽별 데이터가 100편 이상일 때 50:50(품질:트래픽) 보정을 수동으로 켭니다.
+                        </p>
+                    </div>
+                    <label className="inline-flex items-center gap-2 text-sm font-medium text-amber-900">
+                        <input
+                            type="checkbox"
+                            checked={trafficFeedbackStrongMode}
+                            onChange={(event) => setTrafficFeedbackStrongMode(event.target.checked)}
+                            className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500"
+                        />
+                        강한 보정 모드
+                    </label>
                 </div>
             </div>
 

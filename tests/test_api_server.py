@@ -817,6 +817,7 @@ def test_router_settings_exposes_default_topic_quota_overrides(client: TestClien
     assert response.status_code == 200
     payload = response.json()
     overrides = payload["settings"]["image_topic_quota_overrides"]
+    assert payload["settings"]["traffic_feedback_strong_mode"] is False
     assert overrides["cafe"] == "0"
     assert overrides["it"] == "1"
     assert overrides["finance"] == "1"
@@ -835,6 +836,7 @@ def test_router_settings_save_supports_image_ai_fields(client: TestClient):
             "image_ai_engine": "together_flux",
             "image_ai_quota": "1",
             "image_topic_quota_overrides": {"it": "1", "cafe": "0"},
+            "traffic_feedback_strong_mode": True,
             "image_enabled": True,
             "images_per_post": 4,
             "images_per_post_min": 0,
@@ -848,6 +850,7 @@ def test_router_settings_save_supports_image_ai_fields(client: TestClient):
     assert settings["image_ai_quota"] == "1"
     assert settings["image_topic_quota_overrides"]["it"] == "1"
     assert settings["image_topic_quota_overrides"]["cafe"] == "0"
+    assert settings["traffic_feedback_strong_mode"] is True
 
 
 def test_router_quote_includes_ai_stock_image_count_split(client: TestClient):

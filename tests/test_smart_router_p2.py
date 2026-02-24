@@ -101,3 +101,26 @@ def test_stats_dashboard_includes_champion_history(tmp_path: Path):
     first = metrics.champion_history[0]
     assert first["champion_model"] == "deepseek-chat"
     assert first["challenger_model"] == "qwen-plus"
+
+
+def test_traffic_feedback_100_samples_requires_manual_strong_mode(tmp_path: Path):
+    """트래픽 100편 이상이어도 strong 모드가 꺼져 있으면 30%로 유지되어야 한다."""
+    store = _build_store(tmp_path, "traffic_weight_mode.db")
+    for index in range(100):
+        store.record_model_performance(
+            model_id=f"model-{index}",
+            provider="deepseek",
+            topic_mode="it",
+            quality_score=85.0,
+            cost_won=10.0,
+            is_free_model=False,
+            slot_type="main",
+            feedback_source="naver_traffic",
+            measured_at="2026-02-24T00:00:00Z",
+        )
+
+    collector = MetricsCollector(db_path=store.db_path, min_age_hours=0, max_age_days=365)
+    assert collector._topic_feedback_weight("it") == 0.3
+
+    store.set_system_setting("router_traffic_feedback_strong_mode", "true")
+    assert collector._topic_feedback_weight("it") == 0.5

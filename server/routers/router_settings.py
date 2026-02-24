@@ -23,6 +23,7 @@ class RouterSettingsPayload(BaseModel):
     image_ai_engine: str = "together_flux"
     image_ai_quota: str = "0"
     image_topic_quota_overrides: Dict[str, str] = Field(default_factory=dict)
+    traffic_feedback_strong_mode: bool = False
     image_enabled: bool = True
     images_per_post: int = Field(default=1, ge=0, le=4)
     images_per_post_min: int = Field(default=0, ge=0, le=4)
@@ -87,6 +88,7 @@ def quote_router_settings(
             "image_ai_engine": request.image_ai_engine,
             "image_ai_quota": request.image_ai_quota,
             "image_topic_quota_overrides": request.image_topic_quota_overrides,
+            "traffic_feedback_strong_mode": request.traffic_feedback_strong_mode,
             "image_enabled": request.image_enabled,
             "images_per_post": request.images_per_post,
             "images_per_post_min": request.images_per_post_min,
@@ -121,6 +123,7 @@ def save_router_settings(
             "image_ai_engine": request.image_ai_engine,
             "image_ai_quota": request.image_ai_quota,
             "image_topic_quota_overrides": request.image_topic_quota_overrides,
+            "traffic_feedback_strong_mode": request.traffic_feedback_strong_mode,
             "image_enabled": request.image_enabled,
             "images_per_post": request.images_per_post,
             "images_per_post_min": request.images_per_post_min,

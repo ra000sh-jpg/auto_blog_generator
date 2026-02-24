@@ -197,6 +197,7 @@ DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES = {
     "economy": "1",
     "parenting": "0",
 }
+DEFAULT_TRAFFIC_FEEDBACK_STRONG_MODE = False
 DEFAULT_COMPETITION_PHASE = "idle"
 COMPETITION_PHASES = {"idle", "testing", "champion_ops", "completed"}
 
@@ -319,6 +320,7 @@ class LLMRouter:
         "router_image_ai_engine",
         "router_image_ai_quota",
         "router_image_topic_quota_overrides",
+        "router_traffic_feedback_strong_mode",
         "router_image_enabled",
         "router_images_per_post",
         "router_images_per_post_min",
@@ -382,6 +384,10 @@ class LLMRouter:
         if not image_topic_quota_overrides:
             image_topic_quota_overrides = dict(DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES)
         image_enabled = _to_bool(raw_settings.get("router_image_enabled", "true"), default=True)
+        traffic_feedback_strong_mode = _to_bool(
+            raw_settings.get("router_traffic_feedback_strong_mode", "false"),
+            default=DEFAULT_TRAFFIC_FEEDBACK_STRONG_MODE,
+        )
         images_per_post = _to_int(
             raw_settings.get("router_images_per_post", str(DEFAULT_IMAGES_PER_POST)),
             default=DEFAULT_IMAGES_PER_POST,
@@ -421,6 +427,7 @@ class LLMRouter:
             "image_ai_engine": image_ai_engine,
             "image_ai_quota": image_ai_quota,
             "image_topic_quota_overrides": image_topic_quota_overrides,
+            "traffic_feedback_strong_mode": traffic_feedback_strong_mode,
             "image_enabled": image_enabled,
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
@@ -485,6 +492,10 @@ class LLMRouter:
                     continue
                 topic_quota_overrides[normalized_key] = normalize_image_ai_quota(value)
         image_enabled = _to_bool(payload.get("image_enabled", current["image_enabled"]), default=True)
+        traffic_feedback_strong_mode = _to_bool(
+            payload.get("traffic_feedback_strong_mode", current.get("traffic_feedback_strong_mode", False)),
+            default=current.get("traffic_feedback_strong_mode", False),
+        )
         images_per_post_min = _to_int(
             payload.get("images_per_post_min", current.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN)),
             default=DEFAULT_IMAGES_PER_POST_MIN,
@@ -510,6 +521,7 @@ class LLMRouter:
             "image_ai_engine": image_ai_engine,
             "image_ai_quota": image_ai_quota,
             "image_topic_quota_overrides": topic_quota_overrides,
+            "traffic_feedback_strong_mode": traffic_feedback_strong_mode,
             "image_enabled": image_enabled,
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
@@ -525,6 +537,10 @@ class LLMRouter:
             self.job_store.set_system_setting(
                 "router_image_topic_quota_overrides",
                 _json_text(topic_quota_overrides),
+            )
+            self.job_store.set_system_setting(
+                "router_traffic_feedback_strong_mode",
+                "true" if traffic_feedback_strong_mode else "false",
             )
             self.job_store.set_system_setting("router_image_enabled", "true" if image_enabled else "false")
             self.job_store.set_system_setting("router_images_per_post", str(images_per_post))
@@ -800,6 +816,7 @@ class LLMRouter:
                 "image_ai_engine": saved.get("image_ai_engine", DEFAULT_IMAGE_AI_ENGINE),
                 "image_ai_quota": saved.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
                 "image_topic_quota_overrides": saved.get("image_topic_quota_overrides", {}),
+                "traffic_feedback_strong_mode": bool(saved.get("traffic_feedback_strong_mode", False)),
                 "image_enabled": saved["image_enabled"],
                 "images_per_post": saved["images_per_post"],
                 "images_per_post_min": saved.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN),
@@ -859,6 +876,13 @@ class LLMRouter:
                 default=current.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
             ),
             "image_topic_quota_overrides": dict(current.get("image_topic_quota_overrides", {})),
+            "traffic_feedback_strong_mode": _to_bool(
+                overrides.get(
+                    "traffic_feedback_strong_mode",
+                    current.get("traffic_feedback_strong_mode", DEFAULT_TRAFFIC_FEEDBACK_STRONG_MODE),
+                ),
+                default=bool(current.get("traffic_feedback_strong_mode", DEFAULT_TRAFFIC_FEEDBACK_STRONG_MODE)),
+            ),
             "image_enabled": _to_bool(overrides.get("image_enabled", current["image_enabled"]), default=True),
             "images_per_post": images_per_post_max,
             "images_per_post_min": images_per_post_min,

@@ -269,9 +269,21 @@ class MetricsCollector:
                 """,
                 (normalized_topic,),
             ).fetchone()
+            strong_mode_row = conn.execute(
+                """
+                SELECT setting_value
+                FROM system_settings
+                WHERE setting_key = 'router_traffic_feedback_strong_mode'
+                LIMIT 1
+                """
+            ).fetchone()
         count = int(row["cnt"]) if row else 0
+        strong_mode = False
+        if strong_mode_row:
+            raw_value = str(strong_mode_row["setting_value"] or "").strip().lower()
+            strong_mode = raw_value in {"1", "true", "yes", "on"}
         if count >= 100:
-            return 0.5
+            return 0.5 if strong_mode else 0.3
         if count >= 10:
             return 0.3
         return 0.0
