@@ -26,6 +26,19 @@ ensure_brew_shellenv() {
   fi
 }
 
+ensure_node_toolchain_path() {
+  local node18_prefix node_prefix
+  node18_prefix="$(brew --prefix node@18 2>/dev/null || true)"
+  if [[ -n "${node18_prefix}" && -d "${node18_prefix}/bin" ]]; then
+    export PATH="${node18_prefix}/bin:${PATH}"
+  fi
+
+  node_prefix="$(brew --prefix node 2>/dev/null || true)"
+  if [[ -n "${node_prefix}" && -d "${node_prefix}/bin" ]]; then
+    export PATH="${node_prefix}/bin:${PATH}"
+  fi
+}
+
 is_python_311_or_higher() {
   if ! command -v python3 >/dev/null 2>&1; then
     return 1
@@ -112,6 +125,17 @@ if is_node_18_or_higher; then
 else
   brew install node@18
 fi
+ensure_node_toolchain_path
+if ! command -v npm >/dev/null 2>&1; then
+  # node@18이 keg-only인 환경에서 PATH 노출을 시도한다.
+  brew link --overwrite --force node@18 >/dev/null 2>&1 || true
+  ensure_node_toolchain_path
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "❌ npm 명령을 찾을 수 없습니다. 터미널 재실행 후 다시 시도하거나, brew install node를 실행해 주세요."
+  exit 1
+fi
+echo "✓ npm 경로 확인 완료: $(command -v npm)"
 
 step "Playwright 브라우저 설치"
 python3 -m pip install playwright
