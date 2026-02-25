@@ -1,7 +1,28 @@
 import json
-from typing import Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
-from server.schemas.onboarding import PersonaLabRequest, ScheduleAllocationItem
+@dataclass
+class ScheduleAllocationItem:
+    category: str
+    topic_mode: str
+    count: int
+    percentage: Optional[int] = None
+
+class PersonaLabRequest(Protocol):
+    structure_score: int
+    evidence_score: int
+    distance_score: int
+    criticism_score: int
+    density_score: int
+    questionnaire_answers: List[Any]
+    questionnaire_version: str
+    mbti: str
+    mbti_enabled: bool
+    mbti_confidence: int
+    age_group: str
+    gender: str
+    style_strength: str
 from modules.constants import DEFAULT_FALLBACK_CATEGORY as _DEFAULT_FALLBACK_CATEGORY
 from modules.persona.questionnaire import (
     QUESTIONNAIRE_VERSION,

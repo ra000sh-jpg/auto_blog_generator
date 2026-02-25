@@ -155,29 +155,11 @@ async def get_scheduler_status(
     # 큐 통계 (get_queue_stats 키: completed/failed/queued/retry_wait 등)
     queue_stats = job_store.get_queue_stats()
     queued = int(queue_stats.get("queued", 0))
-    try:
-        with job_store.connection() as _conn:
-            _row = _conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='master' THEN 1 ELSE 0 END) AS ready_master,
-                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='sub' THEN 1 ELSE 0 END) AS ready_sub,
-                    SUM(CASE WHEN status='queued' AND job_kind='master' THEN 1 ELSE 0 END) AS queued_master,
-                    SUM(CASE WHEN status='queued' AND job_kind='sub' THEN 1 ELSE 0 END) AS queued_sub
-                FROM jobs
-                """
-            ).fetchone()
-            ready_master = int(_row["ready_master"] or 0) if _row else 0
-            ready_sub = int(_row["ready_sub"] or 0) if _row else 0
-            queued_master = int(_row["queued_master"] or 0) if _row else 0
-            queued_sub = int(_row["queued_sub"] or 0) if _row else 0
-            ready_to_publish = ready_master + ready_sub
-    except Exception:
-        ready_master = 0
-        ready_sub = 0
-        queued_master = 0
-        queued_sub = 0
-        ready_to_publish = 0
+    ready_master = int(queue_stats.get("ready_master", 0))
+    ready_sub = int(queue_stats.get("ready_sub", 0))
+    queued_master = int(queue_stats.get("queued_master", 0))
+    queued_sub = int(queue_stats.get("queued_sub", 0))
+    ready_to_publish = ready_master + ready_sub
 
     # 다음 슬롯
     next_slot = None

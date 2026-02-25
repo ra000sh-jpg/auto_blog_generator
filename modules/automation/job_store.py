@@ -1382,15 +1382,37 @@ class JobStore:
             return cursor.rowcount > 0
 
     def get_queue_stats(self) -> Dict[str, int]:
-        """큐 상태 통계"""
+        """큐 상태 및 마스터/서브 통계"""
         with self.connection() as conn:
             cursor = conn.execute("""
                 SELECT status, COUNT(*) as count
                 FROM jobs
                 GROUP BY status
             """)
-
-            return {row["status"]: row["count"] for row in cursor.fetchall()}
+            stats = {row["status"]: row["count"] for row in cursor.fetchall()}
+            
+            _row = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='master' THEN 1 ELSE 0 END) AS ready_master,
+                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='sub' THEN 1 ELSE 0 END) AS ready_sub,
+                    SUM(CASE WHEN status='queued' AND job_kind='master' THEN 1 ELSE 0 END) AS queued_master,
+                    SUM(CASE WHEN status='queued' AND job_kind='sub' THEN 1 ELSE 0 END) AS queued_sub
+                FROM jobs
+                """
+            ).fetchone()
+            if _row:
+                stats["ready_master"] = int(_row["ready_master"] or 0)
+                stats["ready_sub"] = int(_row["ready_sub"] or 0)
+                stats["queued_master"] = int(_row["queued_master"] or 0)
+                stats["queued_sub"] = int(_row["queued_sub"] or 0)
+            else:
+                stats["ready_master"] = 0
+                stats["ready_sub"] = 0
+                stats["queued_master"] = 0
+                stats["queued_sub"] = 0
+            
+            return stats
 
     def record_job_metric(
         self,
