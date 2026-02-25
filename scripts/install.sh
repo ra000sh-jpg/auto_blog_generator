@@ -64,7 +64,7 @@ if command -v brew >/dev/null 2>&1; then
   echo "✓ 이미 설치됨"
 else
   echo "Homebrew가 없어 자동 설치를 시작합니다."
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
 ensure_brew_shellenv
 brew update

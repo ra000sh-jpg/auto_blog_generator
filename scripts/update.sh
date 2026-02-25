@@ -14,7 +14,7 @@ shopt -u nullglob
 
 echo "🔧 최신 코드 가져오기..."
 cd "${PROJECT_DIR}"
-git pull origin main
+git pull --ff-only origin main
 
 echo "🔧 Python 의존성 업데이트..."
 python3 -m pip install -r requirements.txt
