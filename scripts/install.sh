@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 프로젝트 루트 경로를 계산한다.
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FRONTEND_DIR="${PROJECT_DIR}/frontend"
-LOG_DIR="${PROJECT_DIR}/logs"
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+PROJECT_DIR=""
+FRONTEND_DIR=""
+LOG_DIR=""
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
 SERVER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.server.plist"
 SCHEDULER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.scheduler.plist"
+REPO_URL="${AUTO_BLOG_REPO_URL:-https://github.com/ra000sh-jpg/auto_blog_generator.git}"
+INSTALL_DIR="${AUTO_BLOG_INSTALL_DIR:-${HOME}/auto_blog_generator}"
 
 step() {
   echo "🔧 $1..."
@@ -58,6 +61,33 @@ if [[ "${ARCH}" != "arm64" && "${ARCH}" != "x86_64" ]]; then
   exit 1
 fi
 echo "✓ macOS 확인 완료 (ARCH=${ARCH})"
+
+step "프로젝트 소스 준비"
+if [[ -f "${SCRIPT_DIR}/../requirements.txt" ]]; then
+  PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  echo "✓ 이미 설치됨"
+else
+  if ! command -v git >/dev/null 2>&1; then
+    echo "❌ git이 필요합니다. 먼저 Xcode Command Line Tools를 설치해 주세요."
+    echo "   실행: xcode-select --install"
+    exit 1
+  fi
+
+  if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    echo "기존 설치 디렉터리를 업데이트합니다: ${INSTALL_DIR}"
+    git -C "${INSTALL_DIR}" pull --ff-only origin main
+  elif [[ -d "${INSTALL_DIR}" && -n "$(ls -A "${INSTALL_DIR}" 2>/dev/null || true)" ]]; then
+    echo "❌ 설치 경로가 비어있지 않습니다: ${INSTALL_DIR}"
+    echo "   AUTO_BLOG_INSTALL_DIR 환경변수로 다른 경로를 지정하세요."
+    exit 1
+  else
+    git clone "${REPO_URL}" "${INSTALL_DIR}"
+  fi
+  PROJECT_DIR="${INSTALL_DIR}"
+fi
+
+FRONTEND_DIR="${PROJECT_DIR}/frontend"
+LOG_DIR="${PROJECT_DIR}/logs"
 
 step "Homebrew 설치 확인"
 if command -v brew >/dev/null 2>&1; then
