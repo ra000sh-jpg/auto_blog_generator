@@ -191,6 +191,10 @@ def test_scheduler_status_endpoint_schema(tmp_path: Path):
             "today_failed",
             "ready_to_publish",
             "queued",
+            "ready_master",
+            "ready_sub",
+            "queued_master",
+            "queued_sub",
             "active_hours",
             "last_seed_date",
             "last_seed_count",
@@ -201,6 +205,92 @@ def test_scheduler_status_endpoint_schema(tmp_path: Path):
         assert isinstance(data["daily_target"], int)
         assert data["active_hours"] == "08:00~22:00"
         assert data["today_date"] == _today_kst()
+    finally:
+        app.dependency_overrides.clear()
+        set_scheduler_instance(None)
+
+
+def test_scheduler_status_endpoint_reports_ready_to_publish(tmp_path: Path):
+    """status 엔드포인트가 ready_to_publish 상태 건수를 정확히 반환해야 한다."""
+    from fastapi.testclient import TestClient
+
+    store = build_store(tmp_path, "api_ready_count_test.db")
+    due_now = "2026-02-24T00:00:00Z"
+    future_time = "2099-12-31T00:00:00Z"
+
+    # queued 카운트 분리 검증용
+    assert store.schedule_job(
+        job_id="queued-master-status-job",
+        title="Queued Master",
+        seed_keywords=["queued", "master"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=future_time,
+        job_kind=store.JOB_KIND_MASTER,
+        status=store.STATUS_QUEUED,
+    )
+    assert store.schedule_job(
+        job_id="queued-sub-status-job",
+        title="Queued Sub",
+        seed_keywords=["queued", "sub"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=future_time,
+        job_kind=store.JOB_KIND_SUB,
+        master_job_id="queued-master-status-job",
+        channel_id="channel-sub-status",
+        status=store.STATUS_QUEUED,
+    )
+
+    # ready 카운트 분리 검증용
+    assert store.schedule_job(
+        job_id="ready-master-status-job",
+        title="Ready Master Status Job",
+        seed_keywords=["ready", "master"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_MASTER,
+    )
+    claimed_master = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_MASTER)
+    assert len(claimed_master) == 1
+    assert store.save_prepared_payload(
+        "ready-master-status-job",
+        {"title": "ready", "content": "본문", "images": [], "image_points": []},
+    )
+    assert store.schedule_job(
+        job_id="ready-sub-status-job",
+        title="Ready Sub Status Job",
+        seed_keywords=["ready", "sub"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_SUB,
+        master_job_id="ready-master-status-job",
+        channel_id="channel-sub-status",
+    )
+    claimed_sub = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_SUB)
+    assert len(claimed_sub) == 1
+    assert store.save_prepared_payload(
+        "ready-sub-status-job",
+        {"title": "ready-sub", "content": "본문", "images": [], "image_points": []},
+    )
+
+    scheduler = build_scheduler(store)
+    scheduler.setup_scheduler()
+    set_scheduler_instance(scheduler)
+
+    app.dependency_overrides[get_job_store] = lambda: store
+    try:
+        client = TestClient(app, raise_server_exceptions=True)
+        response = client.get("/api/scheduler/status")
+        assert response.status_code == 200
+        data = response.json()
+        assert int(data["ready_to_publish"]) >= 1
+        assert int(data["ready_master"]) == 1
+        assert int(data["ready_sub"]) == 1
+        assert int(data["queued_master"]) == 1
+        assert int(data["queued_sub"]) == 1
     finally:
         app.dependency_overrides.clear()
         set_scheduler_instance(None)

@@ -7,36 +7,10 @@ from functools import lru_cache
 from typing import Optional
 
 from modules.automation.job_store import JobStore
-from modules.automation.pipeline_service import PipelineService, stub_generate_fn
 from modules.config import AppConfig, load_config
 from modules.llm.idea_vault_parser import IdeaVaultBatchParser
 from modules.llm.llm_router import LLMRouter
 from modules.llm.magic_input_parser import MagicInputParser
-from modules.uploaders.playwright_publisher import PublishResult
-
-
-class _NoopPublisher:
-    """API 서버 전용 더미 발행기.
-
-    FastAPI는 워커를 직접 실행하지 않으므로 실제 발행을 수행하지 않는다.
-    """
-
-    async def publish(  # pragma: no cover - 향후 확장 포인트
-        self,
-        title: str,
-        content: str,
-        thumbnail: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        image_points: Optional[list] = None,
-        tags: Optional[list[str]] = None,
-        category: Optional[str] = None,
-    ) -> PublishResult:
-        del title, content, thumbnail, images, image_points, tags, category
-        return PublishResult(
-            success=False,
-            error_code="API_ONLY_MODE",
-            error_message="FastAPI 서버는 워커 실행 없이 상태 조회/등록만 처리합니다.",
-        )
 
 
 @lru_cache(maxsize=1)

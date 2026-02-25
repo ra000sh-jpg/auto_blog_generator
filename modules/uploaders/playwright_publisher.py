@@ -23,12 +23,12 @@ import logging
 import os
 import random
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..exceptions import PublishError, SessionExpiredError
+from .base_publisher import PublishResult
 
 if TYPE_CHECKING:
     from ..images.placement import ImageInsertionPoint
@@ -77,14 +77,6 @@ async def _apply_stealth(page) -> None:
             logger.warning("playwright-stealth 적용 실패: 버전 API를 인식할 수 없음. stealth 없이 진행.")
     except Exception as e:
         logger.warning(f"playwright-stealth 적용 실패 (무시하고 진행): {e}")
-
-
-@dataclass
-class PublishResult:
-    success: bool
-    url: str = ""
-    error_code: str = ""
-    error_message: str = ""
 
 
 class PlaywrightPublisher:

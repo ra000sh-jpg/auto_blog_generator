@@ -1,7 +1,16 @@
 export const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
 
-// 백엔드 modules/constants.py의 DEFAULT_FALLBACK_CATEGORY와 반드시 동기화할 것
+// A-1: API 인증 토큰 헤더 유틸
+// NEXT_PUBLIC_API_TOKEN 환경변수가 있으면 X-API-Token 헤더를 자동으로 포함한다.
+export function getApiHeaders(extra?: Record<string, string>): HeadersInit {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...extra };
+  const token = process.env.NEXT_PUBLIC_API_TOKEN ?? "";
+  if (token) headers["X-API-Token"] = token;
+  return headers;
+}
+
+
 export const DEFAULT_FALLBACK_CATEGORY = "다양한 생각들";
 
 export type ProviderHealth = {
@@ -353,6 +362,7 @@ export type RouterSettingsPayload = {
   images_per_post: number;
   images_per_post_min?: number;
   images_per_post_max?: number;
+  challenger_model?: string;
 };
 
 export type RouterQuoteResponse = {
@@ -462,8 +472,79 @@ export type AIToggleReportResponse = {
   postverify: AIToggleSummary;
 };
 
+export type ChannelItem = {
+  channel_id: string;
+  platform: string;
+  label: string;
+  blog_url: string;
+  persona_id: string;
+  persona_desc: string;
+  daily_target: number;
+  style_level: number;
+  style_model: string;
+  publish_delay_minutes: number;
+  is_master: boolean;
+  auth_json: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChannelListResponse = {
+  items: ChannelItem[];
+};
+
+export type CreateChannelPayload = {
+  platform: string;
+  label: string;
+  blog_url: string;
+  persona_id?: string;
+  persona_desc?: string;
+  daily_target?: number;
+  style_level?: number;
+  style_model?: string;
+  publish_delay_minutes?: number;
+  is_master?: boolean;
+  auth_json?: Record<string, unknown>;
+  active?: boolean;
+};
+
+export type UpdateChannelPayload = Partial<CreateChannelPayload>;
+
+export type DeleteChannelResponse = {
+  ok: boolean;
+  message: string;
+  cancelled_jobs: number;
+};
+
+export type ChannelTestResponse = {
+  success: boolean;
+  message: string;
+  reason_code?: string | null;
+};
+
+export type ChannelSettingsResponse = {
+  multichannel_enabled: boolean;
+};
+
+export type DistributeDetailItem = {
+  channel_id: string;
+  channel_label: string;
+  action: "created" | "skipped" | "failed";
+  sub_job_id?: string | null;
+  reason?: string | null;
+};
+
+export type DistributeResponse = {
+  master_job_id: string;
+  created: number;
+  skipped: number;
+  failed: number;
+  details: DistributeDetailItem[];
+};
+
 type RequestOptions = {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
 };
 
@@ -686,6 +767,58 @@ export async function fetchAIToggleReport(): Promise<AIToggleReportResponse> {
   return requestJSON<AIToggleReportResponse>("/ai-toggle/report");
 }
 
+export async function fetchChannels(includeInactive = false): Promise<ChannelListResponse> {
+  const query = new URLSearchParams({
+    include_inactive: includeInactive ? "true" : "false",
+  });
+  return requestJSON<ChannelListResponse>(`/channels?${query.toString()}`);
+}
+
+export async function createChannel(payload: CreateChannelPayload): Promise<ChannelItem> {
+  return requestJSON<ChannelItem>("/channels", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function updateChannel(channelId: string, payload: UpdateChannelPayload): Promise<ChannelItem> {
+  return requestJSON<ChannelItem>(`/channels/${channelId}`, {
+    method: "PUT",
+    body: payload,
+  });
+}
+
+export async function deleteChannel(channelId: string): Promise<DeleteChannelResponse> {
+  return requestJSON<DeleteChannelResponse>(`/channels/${channelId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function testChannel(channelId: string): Promise<ChannelTestResponse> {
+  return requestJSON<ChannelTestResponse>(`/channels/${channelId}/test`, {
+    method: "POST",
+  });
+}
+
+export async function fetchChannelSettings(): Promise<ChannelSettingsResponse> {
+  return requestJSON<ChannelSettingsResponse>("/channels/settings");
+}
+
+export async function saveChannelSettings(
+  payload: ChannelSettingsResponse,
+): Promise<ChannelSettingsResponse> {
+  return requestJSON<ChannelSettingsResponse>("/channels/settings", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function distributeSubJobs(jobId: string): Promise<DistributeResponse> {
+  return requestJSON<DistributeResponse>(`/jobs/${jobId}/distribute`, {
+    method: "POST",
+  });
+}
+
 export type LLMProviderStat = {
   metric_type: string;
   total_calls: number;
@@ -715,6 +848,10 @@ export type SchedulerStatusResponse = {
   today_failed: number;
   ready_to_publish: number;
   queued: number;
+  ready_master: number;
+  ready_sub: number;
+  queued_master: number;
+  queued_sub: number;
   next_publish_slot_kst: string | null;
   active_hours: string;
   last_seed_date: string;
@@ -788,6 +925,10 @@ export type DashboardScheduler = {
   today_failed: number;
   ready_to_publish: number;
   queued: number;
+  ready_master: number;
+  ready_sub: number;
+  queued_master: number;
+  queued_sub: number;
   next_publish_slot_kst: string | null;
   active_hours: string;
   last_seed_date: string;

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import EngineSettingsCard from "@/components/settings/engine-settings-card";
 import TelegramSettingsCard from "@/components/settings/telegram-settings-card";
 import AllocationSettingsCard from "@/components/settings/allocation-settings-card";
+import ChannelManagerCard from "@/components/settings/channel-manager-card";
 
 import {
   fetchConfig,
@@ -103,6 +104,8 @@ export default function SettingsPage() {
           <AllocationSettingsCard
             initialOnboardingStatus={onboardingData}
           />
+
+          <ChannelManagerCard />
         </>
       )}
 

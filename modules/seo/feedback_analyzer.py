@@ -239,9 +239,31 @@ class FeedbackAnalyzer:
     def _load_post_metrics(self, platform: str, days: int = 30) -> List[PostPerformanceData]:
         """최근 N일 포스트 성과를 DB에서 로드한다."""
         with self._connection() as conn:
+            master_channel_id = ""
+            try:
+                master_row = conn.execute(
+                    """
+                    SELECT channel_id
+                    FROM channels
+                    WHERE is_master = 1
+                    AND active = 1
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if master_row and master_row["channel_id"]:
+                    master_channel_id = str(master_row["channel_id"])
+            except sqlite3.OperationalError:
+                master_channel_id = ""
+
+            channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = '' OR j.job_kind = 'master')"
+            params: List[str] = [platform, f"-{days} days"]
+            if master_channel_id:
+                channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = ?)"
+                params.append(master_channel_id)
+
             # post_metrics + jobs 조인
             try:
-                cursor = conn.execute("""
+                cursor = conn.execute(f"""
                     SELECT
                         pm.job_id, pm.title, pm.url, pm.views,
                         pm.published_at,
@@ -251,8 +273,9 @@ class FeedbackAnalyzer:
                     JOIN jobs j ON pm.job_id = j.job_id
                     WHERE j.platform = ?
                     AND pm.published_at >= datetime('now', ?)
+                    {channel_filter_sql}
                     ORDER BY pm.views DESC
-                """, (platform, f"-{days} days"))
+                """, tuple(params))
 
                 results = []
                 for row in cursor.fetchall():

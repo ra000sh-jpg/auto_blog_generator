@@ -68,6 +68,26 @@ class MetricsCollector:
         finally:
             conn.close()
 
+    @staticmethod
+    def _get_master_channel_id(conn: sqlite3.Connection) -> str:
+        """활성 마스터 채널 ID를 조회한다."""
+        try:
+            row = conn.execute(
+                """
+                SELECT channel_id
+                FROM channels
+                WHERE is_master = 1
+                AND active = 1
+                LIMIT 1
+                """
+            ).fetchone()
+            if row and row["channel_id"]:
+                return str(row["channel_id"])
+        except sqlite3.OperationalError:
+            # channels 테이블이 없는 레거시 DB 호환
+            return ""
+        return ""
+
     def get_pending_posts(self) -> List[dict]:
         """조회수 수집이 필요한 포스트 목록을 반환한다.
 
@@ -78,12 +98,22 @@ class MetricsCollector:
         - 아직 post_metrics에 없거나 오래된 스냅샷
         """
         with self._connection() as conn:
-            cursor = conn.execute("""
+            master_channel_id = self._get_master_channel_id(conn)
+            params: List[str] = [
+                f"-{self.max_age_days} days",
+                f"-{self.min_age_hours} hours",
+            ]
+            channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = '' OR j.job_kind = 'master')"
+            if master_channel_id:
+                channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = ?)"
+                params.append(master_channel_id)
+
+            cursor = conn.execute(f"""
                 SELECT
                     j.job_id,
                     j.title,
                     j.result_url,
-                    j.updated_at as published_at,
+                    COALESCE(NULLIF(j.completed_at, ''), j.updated_at) as published_at,
                     j.seed_keywords,
                     j.seo_snapshot,
                     j.quality_snapshot,
@@ -93,15 +123,16 @@ class MetricsCollector:
                 LEFT JOIN post_metrics pm ON j.job_id = pm.job_id
                 WHERE j.status = 'completed'
                 AND j.result_url != ''
-                AND j.updated_at >= datetime('now', ?)
-                AND j.updated_at <= datetime('now', ?)
+                AND COALESCE(NULLIF(j.completed_at, ''), j.updated_at) >= datetime('now', ?)
+                AND COALESCE(NULLIF(j.completed_at, ''), j.updated_at) <= datetime('now', ?)
+                {channel_filter_sql}
                 AND (
                     pm.snapshot_at IS NULL
                     OR pm.snapshot_at < datetime('now', '-7 days')
                 )
-                ORDER BY j.updated_at DESC
+                ORDER BY COALESCE(NULLIF(j.completed_at, ''), j.updated_at) DESC
                 LIMIT 50
-            """, (f"-{self.max_age_days} days", f"-{self.min_age_hours} hours"))
+            """, tuple(params))
 
             return [dict(row) for row in cursor.fetchall()]
 

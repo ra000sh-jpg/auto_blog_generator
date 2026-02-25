@@ -247,10 +247,16 @@ export default function SchedulerWidget() {
           <p className="font-semibold text-gray-800 dark:text-gray-100">
             {status.ready_to_publish}건
           </p>
+          <p className="text-[11px] text-gray-500 dark:text-gray-400">
+            마스터 {status.ready_master} / 서브 {status.ready_sub}
+          </p>
         </div>
         <div className="rounded-lg bg-gray-50 dark:bg-gray-700/50 px-3 py-2">
           <p className="text-xs text-gray-500 dark:text-gray-400">큐 대기</p>
           <p className="font-semibold text-gray-800 dark:text-gray-100">{status.queued}건</p>
+          <p className="text-[11px] text-gray-500 dark:text-gray-400">
+            마스터 {status.queued_master} / 서브 {status.queued_sub}
+          </p>
         </div>
         <div className="rounded-lg bg-gray-50 dark:bg-gray-700/50 px-3 py-2">
           <p className="text-xs text-gray-500 dark:text-gray-400">다음 발행 예정</p>

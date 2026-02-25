@@ -360,3 +360,213 @@ def test_daily_quota_seed_respects_strict_holiday_when_idea_stock_empty(tmp_path
     assert int(total_row["count"]) == 3  # 5건 목표 중 idea_vault 2건 미충족 -> 엄격 휴업
     assert idea_row is not None
     assert int(idea_row["count"]) == 0
+
+
+def test_scheduler_sub_job_catchup_creates_missing_sub_jobs(tmp_path: Path):
+    store = build_store(tmp_path, "scheduler_sub_catchup.db")
+    store.set_system_setting("multichannel_enabled", "true")
+
+    master_channel_id = "channel-master-1"
+    sub_channel_id = "channel-sub-1"
+    unsupported_channel_id = "channel-wp-1"
+
+    assert store.insert_channel(
+        {
+            "channel_id": master_channel_id,
+            "platform": "naver",
+            "label": "Master",
+            "blog_url": "https://blog.naver.com/master",
+            "persona_id": "P1",
+            "persona_desc": "",
+            "daily_target": 0,
+            "style_level": 2,
+            "style_model": "",
+            "publish_delay_minutes": 90,
+            "is_master": True,
+            "auth_json": "{}",
+            "active": True,
+        }
+    )
+    assert store.insert_channel(
+        {
+            "channel_id": sub_channel_id,
+            "platform": "naver",
+            "label": "Sub Naver",
+            "blog_url": "https://blog.naver.com/sub",
+            "persona_id": "P2",
+            "persona_desc": "",
+            "daily_target": 0,
+            "style_level": 2,
+            "style_model": "",
+            "publish_delay_minutes": 120,
+            "is_master": False,
+            "auth_json": '{"session_dir":"data/sessions/naver_sub"}',
+            "active": True,
+        }
+    )
+    assert store.insert_channel(
+        {
+            "channel_id": unsupported_channel_id,
+            "platform": "wordpress",
+            "label": "Sub WP",
+            "blog_url": "https://example.com",
+            "persona_id": "P3",
+            "persona_desc": "",
+            "daily_target": 0,
+            "style_level": 2,
+            "style_model": "",
+            "publish_delay_minutes": 120,
+            "is_master": False,
+            "auth_json": "{}",
+            "active": True,
+        }
+    )
+
+    due_now = now_utc()
+    master_job_id = "master-completed-1"
+    assert store.schedule_job(
+        job_id=master_job_id,
+        title="Master Completed",
+        seed_keywords=["alpha", "beta"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        tags=["tag1"],
+        category="IT 자동화",
+        job_kind=store.JOB_KIND_MASTER,
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_MASTER)
+    assert len(claimed) == 1
+    assert store.complete_job(
+        job_id=master_job_id,
+        result_url="https://blog.naver.com/master/1",
+    )
+
+    scheduler = SchedulerService(job_store=store)
+    asyncio.run(scheduler._run_sub_job_catchup())
+    asyncio.run(scheduler._run_sub_job_catchup())  # 중복 호출 시에도 1건만 유지
+
+    created_sub = store.get_sub_job_by_master_channel(master_job_id, sub_channel_id)
+    assert created_sub is not None
+    assert created_sub.job_kind == store.JOB_KIND_SUB
+    assert created_sub.platform == "naver"
+    assert created_sub.status == store.STATUS_QUEUED
+
+    unsupported_sub = store.get_sub_job_by_master_channel(master_job_id, unsupported_channel_id)
+    assert unsupported_sub is None
+
+
+def test_scheduler_sub_job_catchup_logs_stats_with_skip_reason(tmp_path: Path, caplog) -> None:
+    store = build_store(tmp_path, "scheduler_sub_catchup_logs.db")
+    store.set_system_setting("multichannel_enabled", "true")
+
+    assert store.insert_channel(
+        {
+            "channel_id": "channel-master-log",
+            "platform": "naver",
+            "label": "Master",
+            "blog_url": "https://blog.naver.com/master-log",
+            "persona_id": "P1",
+            "is_master": True,
+            "auth_json": "{}",
+            "active": True,
+        }
+    )
+    assert store.insert_channel(
+        {
+            "channel_id": "channel-sub-wp-log",
+            "platform": "wordpress",
+            "label": "Sub WP",
+            "blog_url": "https://example.com",
+            "persona_id": "P2",
+            "is_master": False,
+            "auth_json": "{}",
+            "active": True,
+        }
+    )
+
+    due_now = now_utc()
+    assert store.schedule_job(
+        job_id="master-log-1",
+        title="Master Log",
+        seed_keywords=["alpha"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_MASTER,
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_MASTER)
+    assert len(claimed) == 1
+    assert store.complete_job("master-log-1", "https://blog.naver.com/master-log/1")
+
+    scheduler = SchedulerService(job_store=store)
+    caplog.set_level("INFO")
+    asyncio.run(scheduler._run_sub_job_catchup())
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Sub job catch-up stats" in messages
+    assert "throughput_per_min" in messages
+    assert "publisher_not_implemented" in messages
+
+
+def test_scheduler_sub_job_publish_catchup_logs_stats_when_no_due_jobs(tmp_path: Path, caplog) -> None:
+    store = build_store(tmp_path, "scheduler_sub_publish_logs.db")
+
+    class PipelineStub:
+        async def publish_next_ready_job(self, job_kind: Optional[str] = None) -> bool:
+            del job_kind
+            return False
+
+        async def prepare_next_pending_job(self, job_kind: Optional[str] = None) -> bool:
+            del job_kind
+            return False
+
+    scheduler = SchedulerService(
+        job_store=store,
+        pipeline_service=PipelineStub(),  # type: ignore[arg-type]
+    )
+    caplog.set_level("INFO")
+    asyncio.run(scheduler._run_sub_job_publish_catchup(max_jobs=3))
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Sub job publish catch-up stats" in messages
+    assert "throughput_per_min" in messages
+    assert "no_due_jobs" in messages
+
+
+def test_jobstore_counts_and_claims_support_job_kind_filter(tmp_path: Path):
+    store = build_store(tmp_path, "scheduler_kind_filter.db")
+    due_now = now_utc()
+
+    assert store.schedule_job(
+        job_id="master-kind-1",
+        title="Master Kind",
+        seed_keywords=["master"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_MASTER,
+    )
+    assert store.schedule_job(
+        job_id="sub-kind-1",
+        title="Sub Kind",
+        seed_keywords=["sub"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_SUB,
+        master_job_id="master-kind-1",
+        channel_id="channel-sub-kind",
+    )
+
+    master_claimed = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_MASTER)
+    sub_claimed = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_SUB)
+    assert len(master_claimed) == 1
+    assert len(sub_claimed) == 1
+
+    assert store.complete_job("master-kind-1", "https://blog.naver.com/master-kind/1")
+    assert store.complete_job("sub-kind-1", "https://blog.naver.com/sub-kind/1")
+
+    assert store.get_today_completed_count() >= 2
+    assert store.get_today_completed_count(job_kind=store.JOB_KIND_MASTER) == 1
+    assert store.get_today_completed_count(job_kind=store.JOB_KIND_SUB) == 1

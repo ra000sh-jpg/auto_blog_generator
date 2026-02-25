@@ -219,6 +219,93 @@ def test_playwright_error_classification():
     assert publisher._classify_error(Exception("HTTP 429 rate limited")) == "RATE_LIMITED"
 
 
+def test_pipeline_sub_job_uses_channel_publisher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """서브 잡은 채널 기반 퍼블리셔를 선택해서 발행해야 한다."""
+    store = build_store(tmp_path, "sub_channel_publish.db")
+    channel_id = "channel-sub-1"
+    assert store.insert_channel(
+        {
+            "channel_id": channel_id,
+            "platform": "tistory",
+            "label": "Tistory Sub",
+            "blog_url": "https://sample.tistory.com",
+            "persona_id": "P1",
+            "persona_desc": "",
+            "daily_target": 0,
+            "style_level": 2,
+            "style_model": "",
+            "publish_delay_minutes": 90,
+            "is_master": False,
+            "auth_json": '{"access_token":"x","blog_name":"sample"}',
+            "active": True,
+        }
+    )
+
+    scheduled_at = now_utc()
+    assert store.schedule_job(
+        job_id="sub-job-1",
+        title="서브 잡 테스트",
+        seed_keywords=["a", "b"],
+        platform="tistory",
+        persona_id="P1",
+        scheduled_at=scheduled_at,
+        job_kind=store.JOB_KIND_SUB,
+        master_job_id="master-job-1",
+        channel_id=channel_id,
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=scheduled_at)
+    assert len(claimed) == 1
+    job = claimed[0]
+
+    base_publisher = DummyPublisher(success=True)
+    sub_publisher = DummyPublisher(success=True)
+
+    def _fake_get_publisher(_channel: Dict[str, Any]) -> DummyPublisher:
+        return sub_publisher
+
+    monkeypatch.setattr(
+        "modules.automation.pipeline_service.get_publisher",
+        _fake_get_publisher,
+    )
+
+    async def generate_ok(_job) -> Dict[str, Any]:
+        return {
+            "final_content": "content",
+            "quality_gate": "pass",
+            "quality_snapshot": {},
+            "seo_snapshot": {},
+            "llm_calls_used": 1,
+        }
+
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=base_publisher,
+        generate_fn=generate_ok,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_evaluate_quality_gate",
+        lambda **_kwargs: QualityGateResult(
+            passed=True,
+            gate="pass",
+            score=95,
+            error_code="",
+            summary="ok",
+        ),
+    )
+    asyncio.run(pipeline.run_job(job))
+
+    updated = store.get_job("sub-job-1")
+    assert updated is not None
+    assert updated.status == store.STATUS_COMPLETED
+    assert updated.result_url.endswith("/1")
+    assert base_publisher.called == 0
+    assert sub_publisher.called == 1
+
+
 def test_schedule_post_idempotency(tmp_path: Path):
     """동일 idempotency 키 입력 시 두 번째 등록이 거절되는지 검증."""
     store = build_store(tmp_path)

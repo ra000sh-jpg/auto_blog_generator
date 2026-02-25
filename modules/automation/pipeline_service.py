@@ -31,7 +31,8 @@ from ..images.placement import (
 )
 from ..metrics import MetricsStore
 from .job_store import Job, JobStore
-from ..uploaders.playwright_publisher import PublishResult
+from ..uploaders.base_publisher import PublishResult
+from ..uploaders.publisher_factory import get_publisher
 from ..seo.quality_gate import QualityGate, QualityGateResult
 from ..seo.tag_generator import TagGenerator
 from ..seo.platform_strategy import get_category_for_topic
@@ -128,6 +129,7 @@ class PipelineService:
         self.internal_retry_attempts = max(0, internal_retry_attempts)
         self.queue_retry_limit = max(0, queue_retry_limit)
         self.quality_evaluator = quality_evaluator  # Phase 25
+        self._channel_publishers: Dict[str, PublisherLike] = {}
 
     async def run_job(self, job: Job) -> None:
         """
@@ -517,7 +519,31 @@ class PipelineService:
             )
             return
 
+        try:
+            publisher = self._resolve_publisher_for_job(job)
+        except Exception as exc:
+            result = PublishResult(
+                success=False,
+                error_code="PUBLISHER_NOT_AVAILABLE",
+                error_message=str(exc)[:300],
+            )
+            self._record_failure_metrics(result.error_code)
+            self._record_job_metric(
+                job_id=job_id,
+                metric_type="publish",
+                status="failed",
+                error_code=result.error_code,
+                detail={"message": result.error_message},
+            )
+            self._fail_with_retry_policy(
+                job=job,
+                error_code=result.error_code,
+                error_message=result.error_message,
+            )
+            return
+
         result, publish_duration_sec = await self._publish_with_retry(
+            publisher=publisher,
             job_id=job_id,
             title=str(payload.get("title", job.title)),
             content=str(payload.get("content", "")),
@@ -615,6 +641,7 @@ class PipelineService:
 
     async def _publish_with_retry(
         self,
+        publisher: PublisherLike,
         job_id: str,
         title: str,
         content: str,
@@ -641,7 +668,7 @@ class PipelineService:
 
         for attempt in range(1, total_attempts + 1):
             try:
-                result = await self.publisher.publish(
+                result = await publisher.publish(
                     title=title,
                     content=content,
                     thumbnail=thumbnail,
@@ -681,7 +708,7 @@ class PipelineService:
                 return result, perf_counter() - publish_start
 
             last_result = result
-            retryable = self._is_retryable_publish_error(result.error_code)
+            retryable = self._is_retryable_publish_error(result.error_code, publisher)
             if not retryable or attempt >= total_attempts:
                 return last_result, perf_counter() - publish_start
 
@@ -699,9 +726,36 @@ class PipelineService:
 
         return last_result, perf_counter() - publish_start
 
-    def _is_retryable_publish_error(self, error_code: str) -> bool:
-        retryable_errors: set[str] = set(getattr(self.publisher, "RETRYABLE_ERRORS", set()))
+    def _is_retryable_publish_error(self, error_code: str, publisher: PublisherLike) -> bool:
+        retryable_errors: set[str] = set(getattr(publisher, "RETRYABLE_ERRORS", set()))
         return error_code in retryable_errors
+
+    def _resolve_publisher_for_job(self, job: Job) -> PublisherLike:
+        """잡 메타데이터를 기준으로 발행기를 선택한다."""
+        if job.job_kind != self.job_store.JOB_KIND_SUB:
+            return self.publisher
+
+        channel_id = str(job.channel_id or "").strip()
+        if not channel_id:
+            return self.publisher
+
+        cached = self._channel_publishers.get(channel_id)
+        if cached is not None:
+            return cached
+
+        get_channel_fn = getattr(self.job_store, "get_channel", None)
+        if not callable(get_channel_fn):
+            raise RuntimeError("JobStore.get_channel is not available")
+
+        channel = get_channel_fn(channel_id)
+        if not isinstance(channel, dict):
+            raise RuntimeError(f"channel not found: {channel_id}")
+        if not bool(channel.get("active", False)):
+            raise RuntimeError(f"channel is inactive: {channel_id}")
+
+        publisher = get_publisher(channel)
+        self._channel_publishers[channel_id] = publisher
+        return publisher
 
     def _retry_delay_for_attempt(self, attempt: int) -> float:
         base_delay = self.retry_backoff_base_sec * (2 ** (attempt - 1))
@@ -1139,9 +1193,9 @@ class PipelineService:
                 (json.dumps(snapshot), now_utc(), job_id),
             )
 
-    async def prepare_next_pending_job(self) -> bool:
+    async def prepare_next_pending_job(self, job_kind: Optional[str] = None) -> bool:
         """대기 Job 1건을 선생성해 ready 상태로 저장한다."""
-        jobs = self.job_store.claim_due_jobs(limit=1)
+        jobs = self.job_store.claim_due_jobs(limit=1, job_kind=job_kind)
         if not jobs:
             logger.debug("No pending jobs to prepare")
             return False
@@ -1149,21 +1203,21 @@ class PipelineService:
         job = jobs[0]
         return await self.process_generation(job)
 
-    async def publish_next_ready_job(self) -> bool:
+    async def publish_next_ready_job(self, job_kind: Optional[str] = None) -> bool:
         """ready 상태 Job 1건을 발행한다."""
-        jobs = self.job_store.claim_ready_jobs(limit=1)
+        jobs = self.job_store.claim_ready_jobs(limit=1, job_kind=job_kind)
         if not jobs:
             logger.debug("No prepared jobs to publish")
             return False
 
         return await self.process_publication(jobs[0])
 
-    async def run_next_pending_job(self) -> bool:
+    async def run_next_pending_job(self, job_kind: Optional[str] = None) -> bool:
         """대기 중인 다음 Job 1건을 선점해 실행한다."""
-        if await self.publish_next_ready_job():
+        if await self.publish_next_ready_job(job_kind=job_kind):
             return True
 
-        jobs = self.job_store.claim_due_jobs(limit=1)
+        jobs = self.job_store.claim_due_jobs(limit=1, job_kind=job_kind)
         if not jobs:
             logger.debug("No pending jobs to run")
             return False

@@ -10,6 +10,7 @@ interface DashboardSchedulerCardProps {
     schedulerToggling: boolean;
     toggleMsg: string;
     onToggle: () => void;
+    ideaVaultDailyQuota?: number | null;
 }
 
 export function DashboardSchedulerCard({
@@ -18,6 +19,7 @@ export function DashboardSchedulerCard({
     schedulerToggling,
     toggleMsg,
     onToggle,
+    ideaVaultDailyQuota,
 }: DashboardSchedulerCardProps) {
     const s = dashboard?.scheduler;
     const todayPct = s ? Math.min(100, Math.round((s.today_completed / Math.max(1, s.daily_target)) * 100)) : 0;
@@ -69,8 +71,11 @@ export function DashboardSchedulerCard({
                 <div className="grid grid-cols-2 gap-2 text-xs">
                     {[
                         { label: "실패", value: `${s?.today_failed ?? 0}건`, red: (s?.today_failed ?? 0) > 0 },
-                        { label: "발행 준비", value: `${s?.ready_to_publish ?? 0}건`, red: false },
-                        { label: "큐 대기", value: `${s?.queued ?? 0}건`, red: false },
+                        {
+                            label: "아이디어 일일 할당",
+                            value: ideaVaultDailyQuota != null ? `${ideaVaultDailyQuota}건` : "—",
+                            red: false,
+                        },
                         {
                             label: "다음 발행",
                             value: s?.next_publish_slot_kst
@@ -81,6 +86,7 @@ export function DashboardSchedulerCard({
                                 : "—",
                             red: false,
                         },
+                        { label: "활성 시간", value: s?.active_hours ?? "—", red: false },
                     ].map(({ label, value, red }) => (
                         <div key={label} className="rounded-lg bg-white/70 px-3 py-2">
                             <p className="flex items-center gap-0.5 text-slate-500">

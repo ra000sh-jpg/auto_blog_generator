@@ -113,33 +113,34 @@ def get_idea_vault_stats(
     )
 
 
-@router.get(
-    "/idea-vault/items",
-    response_model=IdeaVaultListResponse,
-    summary="아이디어 창고 목록 조회",
-)
-def list_idea_vault_items(
-    page: int = Query(default=1, ge=1),
-    size: int = Query(default=20, ge=1, le=200),
-    status_filter: Optional[str] = Query(default=None, alias="status"),
-    job_store: JobStore = Depends(get_job_store),
-) -> IdeaVaultListResponse:
-    """아이디어 창고 목록을 페이지네이션으로 조회한다."""
-    offset = (page - 1) * size
-    total = job_store.count_idea_vault_items(status_filter=status_filter)
-    items = job_store.list_idea_vault_items(
-        limit=size,
-        offset=offset,
-        status_filter=status_filter,
-    )
-    pages = max(1, math.ceil(total / size)) if total else 1
-    return IdeaVaultListResponse(
-        page=page,
-        size=size,
-        total=total,
-        pages=pages,
-        items=[IdeaVaultItemDTO(**item) for item in items],
-    )
+# [A-2 미사용 코드 제거] /idea-vault/items – 프로젝트 내 호출처 없음 확인, 주석 처리 (삭제 아님)
+# @router.get(
+#     "/idea-vault/items",
+#     response_model=IdeaVaultListResponse,
+#     summary="아이디어 창고 목록 조회",
+# )
+# def list_idea_vault_items(
+#     page: int = Query(default=1, ge=1),
+#     size: int = Query(default=20, ge=1, le=200),
+#     status_filter: Optional[str] = Query(default=None, alias="status"),
+#     job_store: JobStore = Depends(get_job_store),
+# ) -> IdeaVaultListResponse:
+#     """아이디어 창고 목록을 페이지네이션으로 조회한다."""
+#     offset = (page - 1) * size
+#     total = job_store.count_idea_vault_items(status_filter=status_filter)
+#     items = job_store.list_idea_vault_items(
+#         limit=size,
+#         offset=offset,
+#         status_filter=status_filter,
+#     )
+#     pages = max(1, math.ceil(total / size)) if total else 1
+#     return IdeaVaultListResponse(
+#         page=page,
+#         size=size,
+#         total=total,
+#         pages=pages,
+#         items=[IdeaVaultItemDTO(**item) for item in items],
+#     )
 
 
 @router.post(

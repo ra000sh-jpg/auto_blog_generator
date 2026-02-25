@@ -5,6 +5,7 @@ import { AlertTriangle, RefreshCw, Send, Sparkles } from "lucide-react";
 import {
   fetchDashboard,
   fetchIdeaVaultStats,
+  fetchOnboardingStatus,
   startScheduler,
   stopScheduler,
   type DashboardResponse,
@@ -27,6 +28,7 @@ export function DashboardRenewal() {
   const [toggleMsg, setToggleMsg] = useState("");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [ideaVaultStats, setIdeaVaultStats] = useState<IdeaVaultStatsResponse | null>(null);
+  const [ideaVaultDailyQuota, setIdeaVaultDailyQuota] = useState<number | null>(null);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -43,6 +45,13 @@ export function DashboardRenewal() {
     } finally {
       setDashLoading(false);
     }
+  }, []);
+
+  // Load idea_vault_daily_quota once from onboarding settings
+  useEffect(() => {
+    fetchOnboardingStatus()
+      .then((s) => setIdeaVaultDailyQuota(s.idea_vault_daily_quota ?? null))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -152,6 +161,7 @@ export function DashboardRenewal() {
           schedulerToggling={schedulerToggling}
           toggleMsg={toggleMsg}
           onToggle={handleSchedulerToggle}
+          ideaVaultDailyQuota={ideaVaultDailyQuota}
         />
         <DashboardSystemStatus dashboard={dashboard} dashLoading={dashLoading} />
       </div>

@@ -291,6 +291,7 @@ def normalize_allocations(
                 category=category_name,
                 topic_mode=topic_mode,
                 count=max(0, int(item.count)),
+                percentage=item.percentage,
             )
         )
 
@@ -299,6 +300,17 @@ def normalize_allocations(
 
     total = sum(item.count for item in items)
     if total <= 0:
+        # percentage가 설정된 항목이 있으면 count만 재분배하고 원본을 유지한다.
+        has_pct = any(item.percentage is not None and item.percentage > 0 for item in items)
+        if has_pct:
+            result = build_default_allocations([item.category for item in items], daily_posts_target)
+            # percentage를 원본에서 복사해 보존
+            pct_map = {item.category: item.percentage for item in items}
+            mode_map = {item.category: item.topic_mode for item in items}
+            for r in result:
+                r.percentage = pct_map.get(r.category)
+                r.topic_mode = mode_map.get(r.category, r.topic_mode)
+            return result
         return build_default_allocations([item.category for item in items], daily_posts_target)
 
     if total < daily_posts_target:
@@ -315,7 +327,11 @@ def normalize_allocations(
             deductible = min(item.count, overflow)
             item.count -= deductible
             overflow -= deductible
-        return [item for item in items if item.count > 0]
+        # percentage가 있는 항목은 count=0이어도 살려둔다.
+        return [
+            item for item in items 
+            if item.count > 0 or (item.percentage is not None and item.percentage > 0)
+        ]
 
     return items
 

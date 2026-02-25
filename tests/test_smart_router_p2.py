@@ -3,7 +3,7 @@ from pathlib import Path
 
 from modules.automation.job_store import JobConfig, JobStore
 from modules.collectors.metrics_collector import MetricsCollector
-from server.routers.stats import _build_metrics
+from server.routers.stats import _build_metrics, _build_scheduler_data
 
 
 def _build_store(tmp_path: Path, name: str = "smart_router_p2.db") -> JobStore:
@@ -101,6 +101,78 @@ def test_stats_dashboard_includes_champion_history(tmp_path: Path):
     first = metrics.champion_history[0]
     assert first["champion_model"] == "deepseek-chat"
     assert first["challenger_model"] == "qwen-plus"
+
+
+def test_stats_dashboard_scheduler_includes_master_sub_queue_counts(tmp_path: Path):
+    """대시보드 스케줄러 통계가 마스터/서브 큐 분리 값을 반환해야 한다."""
+    store = _build_store(tmp_path, "scheduler_master_sub_counts.db")
+    due_now = "2026-02-24T00:00:00Z"
+    future_time = "2099-12-31T00:00:00Z"
+
+    assert store.schedule_job(
+        job_id="master-queued-1",
+        title="Master Queued",
+        seed_keywords=["master"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=future_time,
+        job_kind=store.JOB_KIND_MASTER,
+        status=store.STATUS_QUEUED,
+    )
+    assert store.schedule_job(
+        job_id="sub-queued-1",
+        title="Sub Queued",
+        seed_keywords=["sub"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=future_time,
+        job_kind=store.JOB_KIND_SUB,
+        master_job_id="master-queued-1",
+        channel_id="channel-sub-1",
+        status=store.STATUS_QUEUED,
+    )
+
+    assert store.schedule_job(
+        job_id="master-ready-1",
+        title="Master Ready",
+        seed_keywords=["master"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_MASTER,
+        status=store.STATUS_QUEUED,
+    )
+    asserted_master = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_MASTER)
+    assert len(asserted_master) == 1
+    assert store.save_prepared_payload(
+        "master-ready-1",
+        {"title": "master", "content": "본문", "images": [], "image_points": []},
+    )
+
+    assert store.schedule_job(
+        job_id="sub-ready-1",
+        title="Sub Ready",
+        seed_keywords=["sub"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        job_kind=store.JOB_KIND_SUB,
+        master_job_id="master-ready-1",
+        channel_id="channel-sub-1",
+        status=store.STATUS_QUEUED,
+    )
+    asserted_sub = store.claim_due_jobs(limit=1, now_override=due_now, job_kind=store.JOB_KIND_SUB)
+    assert len(asserted_sub) == 1
+    assert store.save_prepared_payload(
+        "sub-ready-1",
+        {"title": "sub", "content": "본문", "images": [], "image_points": []},
+    )
+
+    scheduler_data = _build_scheduler_data(store)
+    assert scheduler_data.ready_master == 1
+    assert scheduler_data.ready_sub == 1
+    assert scheduler_data.queued_master == 1
+    assert scheduler_data.queued_sub == 1
 
 
 def test_traffic_feedback_100_samples_requires_manual_strong_mode(tmp_path: Path):

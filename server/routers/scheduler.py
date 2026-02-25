@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from server.dependencies import get_job_store
+from modules.constants import ACTIVE_HOURS_DISPLAY
 
 if TYPE_CHECKING:
     from modules.automation.job_store import JobStore
@@ -30,6 +31,10 @@ class SchedulerStatusResponse(BaseModel):
     today_failed: int
     ready_to_publish: int
     queued: int
+    ready_master: int
+    ready_sub: int
+    queued_master: int
+    queued_sub: int
     next_publish_slot_kst: Optional[str]
     active_hours: str
     last_seed_date: str
@@ -57,6 +62,11 @@ def set_scheduler_instance(scheduler: Any) -> None:  # noqa: ANN001
 
 def get_scheduler_instance() -> Any:  # noqa: ANN201
     return _scheduler_instance
+
+
+def _is_api_only_scheduler(scheduler: Any) -> bool:
+    """현재 주입된 스케줄러가 API 전용 모드인지 확인한다."""
+    return bool(getattr(scheduler, "api_only_mode", False))
 
 
 # ---------------------------------------------------------------------------
@@ -142,17 +152,31 @@ async def get_scheduler_status(
     today_failed_fn = getattr(job_store, "get_today_failed_count", None)
     today_failed = int(today_failed_fn()) if callable(today_failed_fn) else 0
 
-    # 큐 통계 (get_queue_stats 키: completed/failed/queued/retry_wait)
+    # 큐 통계 (get_queue_stats 키: completed/failed/queued/retry_wait 등)
     queue_stats = job_store.get_queue_stats()
     queued = int(queue_stats.get("queued", 0))
-    # prepared_payload 가 있는 queued 잡 = 발행 즉시 가능
     try:
         with job_store.connection() as _conn:
             _row = _conn.execute(
-                "SELECT COUNT(*) AS cnt FROM jobs WHERE status='queued' AND prepared_payload IS NOT NULL"
+                """
+                SELECT
+                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='master' THEN 1 ELSE 0 END) AS ready_master,
+                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='sub' THEN 1 ELSE 0 END) AS ready_sub,
+                    SUM(CASE WHEN status='queued' AND job_kind='master' THEN 1 ELSE 0 END) AS queued_master,
+                    SUM(CASE WHEN status='queued' AND job_kind='sub' THEN 1 ELSE 0 END) AS queued_sub
+                FROM jobs
+                """
             ).fetchone()
-            ready_to_publish = int(_row["cnt"]) if _row else 0
+            ready_master = int(_row["ready_master"] or 0) if _row else 0
+            ready_sub = int(_row["ready_sub"] or 0) if _row else 0
+            queued_master = int(_row["queued_master"] or 0) if _row else 0
+            queued_sub = int(_row["queued_sub"] or 0) if _row else 0
+            ready_to_publish = ready_master + ready_sub
     except Exception:
+        ready_master = 0
+        ready_sub = 0
+        queued_master = 0
+        queued_sub = 0
         ready_to_publish = 0
 
     # 다음 슬롯
@@ -168,8 +192,12 @@ async def get_scheduler_status(
         today_failed=today_failed,
         ready_to_publish=ready_to_publish,
         queued=queued,
+        ready_master=ready_master,
+        ready_sub=ready_sub,
+        queued_master=queued_master,
+        queued_sub=queued_sub,
         next_publish_slot_kst=next_slot,
-        active_hours="08:00~22:00",
+        active_hours=ACTIVE_HOURS_DISPLAY,
         last_seed_date=last_seed_date,
         last_seed_count=last_seed_count,
     )
@@ -185,6 +213,12 @@ async def start_scheduler() -> TriggerResponse:
     scheduler = get_scheduler_instance()
     if scheduler is None:
         raise HTTPException(status_code=503, detail="스케줄러 인스턴스가 없습니다. 서버를 재시작하세요.")
+
+    if _is_api_only_scheduler(scheduler):
+        return TriggerResponse(
+            ok=True,
+            message="API 전용 모드입니다. 스케줄러 자동 실행은 별도 데몬(run_scheduler)에서 처리됩니다.",
+        )
 
     if getattr(scheduler, "_scheduler", None) is not None:
         return TriggerResponse(ok=True, message="스케줄러가 이미 실행 중입니다.")
@@ -207,6 +241,12 @@ async def stop_scheduler() -> TriggerResponse:
     scheduler = get_scheduler_instance()
     if scheduler is None:
         return TriggerResponse(ok=True, message="스케줄러가 이미 중지 상태입니다.")
+
+    if _is_api_only_scheduler(scheduler):
+        return TriggerResponse(
+            ok=True,
+            message="API 전용 모드입니다. 데몬 상태는 별도 run_scheduler 서비스를 통해 관리됩니다.",
+        )
 
     if getattr(scheduler, "_scheduler", None) is None:
         return TriggerResponse(ok=True, message="스케줄러가 이미 중지 상태입니다.")

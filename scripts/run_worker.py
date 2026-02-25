@@ -59,7 +59,11 @@ def parse_args() -> argparse.Namespace:
         choices=["all", "generator", "publisher"],
         help="실행 모드 (all=생성+발행, generator=생성 전용, publisher=발행 전용)",
     )
-    parser.add_argument("--db", default="data/automation.db")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AUTOBLOG_DB_PATH", "data/automation.db"),
+        help="스케줄러/큐 DB 경로 (기본: AUTOBLOG_DB_PATH 또는 data/automation.db)",
+    )
     parser.add_argument(
         "--log-level",
         default=None,

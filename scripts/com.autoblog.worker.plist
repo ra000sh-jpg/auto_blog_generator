@@ -7,10 +7,10 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Library/Developer/CommandLineTools/usr/bin/python3</string>
-        <string>/Users/naseunghwan/Desktop/auto_blog_generator/scripts/run_scheduler.py</string>
-        <string>--daily-target</string>
-        <string>3</string>
+        <string>{{PYTHON_PATH}}</string>
+        <string>{{RUN_SCHEDULER_PATH}}</string>
+        <string>--db</string>
+        <string>{{DB_PATH}}</string>
         <string>--min-interval</string>
         <string>60</string>
         <string>--max-interval</string>
@@ -28,7 +28,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/naseunghwan/Desktop/auto_blog_generator</string>
+    <string>{{WORKSPACE_DIR}}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -36,6 +36,10 @@
         <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <key>AUTOBLOG_DB_PATH</key>
+        <string>{{DB_PATH}}</string>
+        <key>AUTOBLOG_PYTHON</key>
+        <string>{{PYTHON_PATH}}</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -48,9 +52,9 @@
     <string>Background</string>
 
     <key>StandardOutPath</key>
-    <string>/Users/naseunghwan/Desktop/auto_blog_generator/logs/worker.stdout.log</string>
+    <string>{{WORKSPACE_DIR}}/logs/worker.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/naseunghwan/Desktop/auto_blog_generator/logs/worker.stderr.log</string>
+    <string>{{WORKSPACE_DIR}}/logs/worker.stderr.log</string>
 </dict>
 </plist>

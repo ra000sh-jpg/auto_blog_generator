@@ -9,9 +9,13 @@ from typing import AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from server.dependencies import get_job_store
 from server.routers.config import router as config_router
+from server.routers.channels import router as channels_router
 from server.routers.health import router as health_router
 from server.routers.idea_vault import router as idea_vault_router
 from server.routers.jobs import router as jobs_router
@@ -28,6 +32,33 @@ from server.routers.telegram_webhook import router as telegram_webhook_router
 from server.routers.telegram_webhook import collect_pending_updates
 
 logger = logging.getLogger(__name__)
+
+# --- A-1: API 토큰 인증 미들웨어 ---
+_API_TOKEN: str = os.getenv("AUTOBLOG_API_TOKEN", "").strip()
+_BYPASS_PATHS: frozenset[str] = frozenset(["/api/health", "/docs", "/openapi.json"])
+
+
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    """Simple X-API-Token 헤더 기반 인증 미들웨어.
+
+    - AUTOBLOG_API_TOKEN 환경변수가 비어 있으면 모든 요청을 우회(bypass)한다.
+    - 보호 제외 경로(health/docs/openapi.json)는 항상 통과한다.
+    - 토큰 불일치 시 HTTP 401을 반환한다.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if not _API_TOKEN:
+            return await call_next(request)
+        if request.url.path in _BYPASS_PATHS:
+            return await call_next(request)
+        incoming = request.headers.get("X-API-Token", "").strip()
+        if incoming != _API_TOKEN:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Unauthorized: invalid or missing X-API-Token header"},
+            )
+        return await call_next(request)
+# --- END A-1 ---
 
 
 def _build_scheduler() -> Optional[object]:
@@ -65,6 +96,7 @@ def _build_scheduler() -> Optional[object]:
             notifier=notifier,
             timezone_name="Asia/Seoul",
             daily_posts_target=daily_target,
+            api_only_mode=True,
         )
         return scheduler
     except Exception as exc:
@@ -127,12 +159,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# A-1: 토큰 인증 미들웨어 (CORSMiddleware 이후에 등록해야 CORS Preflight 정상 통과)
+app.add_middleware(TokenAuthMiddleware)
 
 app.include_router(health_router, prefix="/api", tags=["health"])
 app.include_router(jobs_router, prefix="/api", tags=["jobs"])
 app.include_router(metrics_router, prefix="/api", tags=["metrics"])
 app.include_router(ai_toggle_router, prefix="/api", tags=["ai-toggle"])
 app.include_router(config_router, prefix="/api", tags=["config"])
+app.include_router(channels_router, prefix="/api", tags=["channels"])
 app.include_router(onboarding_router, prefix="/api", tags=["onboarding"])
 app.include_router(magic_input_router, prefix="/api", tags=["magic-input"])
 app.include_router(idea_vault_router, prefix="/api", tags=["idea-vault"])

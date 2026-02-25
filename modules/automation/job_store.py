@@ -68,6 +68,10 @@ class Job:
     llm_call_count: int = 0
     created_at: str = ""
     updated_at: str = ""
+    completed_at: str = ""
+    job_kind: str = "master"
+    master_job_id: Optional[str] = None
+    channel_id: Optional[str] = None
     # 플랫폼 유입 전략 관련 필드
     tags: List[str] = field(default_factory=list)        # 발행 시 사용할 태그 목록
     category: str = ""                                    # 발행 카테고리
@@ -102,6 +106,10 @@ class Job:
             llm_call_count=row["llm_call_count"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            completed_at=row["completed_at"] if "completed_at" in keys else "",
+            job_kind=row["job_kind"] if "job_kind" in keys else "master",
+            master_job_id=row["master_job_id"] if "master_job_id" in keys else None,
+            channel_id=row["channel_id"] if "channel_id" in keys else None,
             tags=json.loads(row["tags"] if "tags" in keys else "[]") or [],
             category=row["category"] if "category" in keys else "",
             prepared_payload=json.loads(row["prepared_payload"] if "prepared_payload" in keys else "{}") or {},
@@ -132,6 +140,10 @@ class JobStore:
     STATUS_READY = "ready_to_publish"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+
+    JOB_KIND_MASTER = "master"
+    JOB_KIND_SUB = "sub"
 
     IDEA_STATUS_PENDING = "pending"
     IDEA_STATUS_QUEUED = "queued"
@@ -213,6 +225,10 @@ class JobStore:
                     llm_call_count INTEGER DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    completed_at TEXT DEFAULT '',
+                    job_kind TEXT NOT NULL DEFAULT 'master',
+                    master_job_id TEXT DEFAULT NULL,
+                    channel_id TEXT DEFAULT NULL,
                     tags TEXT DEFAULT '[]',
                     category TEXT DEFAULT '',
                     prepared_payload TEXT DEFAULT '{}'
@@ -229,6 +245,14 @@ class JobStore:
                 conn.execute("ALTER TABLE jobs ADD COLUMN category TEXT DEFAULT ''")
             if "prepared_payload" not in existing:
                 conn.execute("ALTER TABLE jobs ADD COLUMN prepared_payload TEXT DEFAULT '{}'")
+            if "completed_at" not in existing:
+                conn.execute("ALTER TABLE jobs ADD COLUMN completed_at TEXT DEFAULT ''")
+            if "job_kind" not in existing:
+                conn.execute("ALTER TABLE jobs ADD COLUMN job_kind TEXT NOT NULL DEFAULT 'master'")
+            if "master_job_id" not in existing:
+                conn.execute("ALTER TABLE jobs ADD COLUMN master_job_id TEXT DEFAULT NULL")
+            if "channel_id" not in existing:
+                conn.execute("ALTER TABLE jobs ADD COLUMN channel_id TEXT DEFAULT NULL")
             conn.executescript("""
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_retry
@@ -239,6 +263,13 @@ class JobStore:
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_ready
                 ON jobs(status, updated_at) WHERE status = 'ready_to_publish';
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_master_channel
+                ON jobs(master_job_id, channel_id)
+                WHERE master_job_id IS NOT NULL;
+
+                CREATE INDEX IF NOT EXISTS idx_jobs_channel
+                ON jobs(channel_id);
 
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,6 +355,28 @@ class JobStore:
                     setting_value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS channels (
+                    channel_id TEXT PRIMARY KEY,
+                    platform TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    blog_url TEXT NOT NULL DEFAULT '',
+                    persona_id TEXT NOT NULL DEFAULT '',
+                    persona_desc TEXT DEFAULT '',
+                    daily_target INTEGER DEFAULT 0,
+                    style_level INTEGER DEFAULT 2,
+                    style_model TEXT DEFAULT '',
+                    publish_delay_minutes INTEGER DEFAULT 90,
+                    is_master INTEGER DEFAULT 0,
+                    auth_json TEXT DEFAULT '{}',
+                    active INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_master
+                ON channels(is_master)
+                WHERE is_master = 1;
 
                 CREATE TABLE IF NOT EXISTS idea_vault (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -454,9 +507,37 @@ class JobStore:
                     extra={"from_status": "published", "to_status": self.STATUS_COMPLETED, "count": migrated},
                 )
 
-    def _generate_idempotency_key(self, title: str, scheduled_at: str, persona_id: str) -> str:
+            # 완료 시각 분리 컬럼이 비어있는 기존 completed 데이터 보정
+            completed_backfill = conn.execute(
+                """
+                UPDATE jobs
+                SET completed_at = updated_at
+                WHERE status = ?
+                AND (completed_at IS NULL OR completed_at = '')
+                """,
+                (self.STATUS_COMPLETED,),
+            ).rowcount
+            if completed_backfill:
+                logger.info(
+                    "Backfilled completed_at from updated_at",
+                    extra={"count": completed_backfill},
+                )
+
+    def _generate_idempotency_key(
+        self,
+        title: str,
+        scheduled_at: str,
+        persona_id: str,
+        *,
+        job_kind: str = JOB_KIND_MASTER,
+        master_job_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
+    ) -> str:
         """중복 방지용 idempotency key 생성"""
-        data = f"{title}|{scheduled_at}|{persona_id}"
+        data = (
+            f"{title}|{scheduled_at}|{persona_id}|{job_kind}|"
+            f"{master_job_id or ''}|{channel_id or ''}"
+        )
         return hashlib.sha256(data.encode()).hexdigest()[:32]
 
     def schedule_job(
@@ -470,6 +551,10 @@ class JobStore:
         max_retries: Optional[int] = None,
         tags: Optional[List[str]] = None,
         category: str = "",
+        job_kind: str = JOB_KIND_MASTER,
+        master_job_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
+        status: str = STATUS_QUEUED,
     ) -> bool:
         """
         새 작업 등록.
@@ -484,6 +569,10 @@ class JobStore:
             max_retries: 최대 재시도 횟수
             tags: 발행 태그 목록 (미지정 시 파이프라인에서 자동 생성)
             category: 발행 카테고리
+            job_kind: 잡 분류(master/sub)
+            master_job_id: 서브 잡의 원본 마스터 잡 ID
+            channel_id: 대상 채널 ID
+            status: 초기 상태
 
         Returns:
             bool: 등록 성공 여부 (중복 시 False)
@@ -493,7 +582,23 @@ class JobStore:
             max_retries = self.config.max_retries
 
         now = now_utc()
-        idempotency_key = self._generate_idempotency_key(title, scheduled_at, persona_id)
+        normalized_job_kind = str(job_kind or self.JOB_KIND_MASTER).strip().lower()
+        if normalized_job_kind not in {self.JOB_KIND_MASTER, self.JOB_KIND_SUB}:
+            normalized_job_kind = self.JOB_KIND_MASTER
+        normalized_status = str(status or self.STATUS_QUEUED).strip()
+        if not normalized_status:
+            normalized_status = self.STATUS_QUEUED
+        normalized_master_job_id = str(master_job_id or "").strip() or None
+        normalized_channel_id = str(channel_id or "").strip() or None
+
+        idempotency_key = self._generate_idempotency_key(
+            title,
+            scheduled_at,
+            persona_id,
+            job_kind=normalized_job_kind,
+            master_job_id=normalized_master_job_id,
+            channel_id=normalized_channel_id,
+        )
 
         try:
             with self.connection() as conn:
@@ -501,13 +606,18 @@ class JobStore:
                     INSERT INTO jobs (
                         job_id, idempotency_key, status, title, seed_keywords,
                         platform, persona_id, scheduled_at, max_retries,
+                        completed_at, job_kind, master_job_id, channel_id,
                         tags, category,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    job_id, idempotency_key, self.STATUS_QUEUED, title,
+                    job_id, idempotency_key, normalized_status, title,
                     json.dumps(seed_keywords), platform, persona_id,
                     scheduled_at, max_retries,
+                    "",
+                    normalized_job_kind,
+                    normalized_master_job_id,
+                    normalized_channel_id,
                     json.dumps(tags or []), category,
                     now, now
                 ))
@@ -531,7 +641,12 @@ class JobStore:
                 logger.warning(f"Job already exists: {job_id}")
             return False
 
-    def claim_due_jobs(self, limit: int = 5, now_override: Optional[str] = None) -> List[Job]:
+    def claim_due_jobs(
+        self,
+        limit: int = 5,
+        now_override: Optional[str] = None,
+        job_kind: Optional[str] = None,
+    ) -> List[Job]:
         """
         실행 가능한 작업들을 원자적으로 선점.
 
@@ -552,7 +667,20 @@ class JobStore:
 
         with self.connection() as conn:
             # P0 #1: 조건 분리된 쿼리
-            cursor = conn.execute("""
+            where_clauses = [
+                "("
+                "(status = 'queued' AND scheduled_at <= ?)"
+                " OR "
+                "(status = 'retry_wait' AND next_retry_at <= ?)"
+                ")"
+            ]
+            params: List[Any] = [now, now]
+            normalized_kind = str(job_kind or "").strip().lower()
+            if normalized_kind:
+                where_clauses.append("job_kind = ?")
+                params.append(normalized_kind)
+
+            query = f"""
                 UPDATE jobs
                 SET status = ?,
                     claimed_at = ?,
@@ -561,19 +689,24 @@ class JobStore:
                     updated_at = ?
                 WHERE job_id IN (
                     SELECT job_id FROM jobs
-                    WHERE (
-                        (status = 'queued' AND scheduled_at <= ?)
-                        OR
-                        (status = 'retry_wait' AND next_retry_at <= ?)
-                    )
+                    WHERE {' AND '.join(where_clauses)}
                     ORDER BY COALESCE(next_retry_at, scheduled_at) ASC
                     LIMIT ?
                 )
                 RETURNING *
-            """, (
-                self.STATUS_RUNNING, now, worker_id, now, now,
-                now, now, limit
-            ))
+            """
+            cursor = conn.execute(
+                query,
+                (
+                    self.STATUS_RUNNING,
+                    now,
+                    worker_id,
+                    now,
+                    now,
+                    *params,
+                    limit,
+                ),
+            )
 
             jobs = [Job.from_row(row) for row in cursor.fetchall()]
 
@@ -596,9 +729,18 @@ class JobStore:
 
             return jobs
 
-    def claim_for_generate(self, limit: int = 5, now_override: Optional[str] = None) -> List[Job]:
+    def claim_for_generate(
+        self,
+        limit: int = 5,
+        now_override: Optional[str] = None,
+        job_kind: Optional[str] = None,
+    ) -> List[Job]:
         """생성 워커용 claim 래퍼."""
-        return self.claim_due_jobs(limit=limit, now_override=now_override)
+        return self.claim_due_jobs(
+            limit=limit,
+            now_override=now_override,
+            job_kind=job_kind,
+        )
 
     def heartbeat(self, job_id: str) -> bool:
         """
@@ -650,6 +792,7 @@ class JobStore:
                     prepared_payload = '{}',
                     error_code = '',
                     error_message = '',
+                    completed_at = ?,
                     updated_at = ?
                 WHERE job_id = ?
                 AND status = ?
@@ -659,6 +802,7 @@ class JobStore:
                 thumbnail_url,
                 json.dumps(quality_snapshot or {}),
                 json.dumps(seo_snapshot or {}),
+                now,
                 now,
                 job_id,
                 self.STATUS_RUNNING,
@@ -845,6 +989,40 @@ class JobStore:
 
             return Job.from_row(row) if row else None
 
+    def list_recent_completed_jobs(
+        self,
+        limit: int = 200,
+        job_kind: Optional[str] = None,
+    ) -> List[Job]:
+        """최근 완료된 작업 목록을 최신순으로 반환한다."""
+        safe_limit = max(1, min(int(limit or 200), 1000))
+        normalized_kind = str(job_kind or "").strip().lower()
+        with self.connection() as conn:
+            if normalized_kind:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE status = ?
+                    AND job_kind = ?
+                    ORDER BY COALESCE(NULLIF(completed_at, ''), updated_at) DESC
+                    LIMIT ?
+                    """,
+                    (self.STATUS_COMPLETED, normalized_kind, safe_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE status = ?
+                    ORDER BY COALESCE(NULLIF(completed_at, ''), updated_at) DESC
+                    LIMIT ?
+                    """,
+                    (self.STATUS_COMPLETED, safe_limit),
+                ).fetchall()
+        return [Job.from_row(row) for row in rows]
+
     def get_stale_running_jobs(self, now_override: Optional[str] = None) -> List[Job]:
         """
         Lease timeout이 지난 running 상태 작업 조회.
@@ -948,50 +1126,90 @@ class JobStore:
 
             return row["total"]
 
-    def get_today_completed_count(self) -> int:
+    def get_today_completed_count(self, job_kind: Optional[str] = None) -> int:
         """오늘 완료(completed)된 Job 수를 반환한다."""
         with self.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM jobs
-                WHERE status = ?
-                AND date(updated_at) = date('now')
-                """,
-                (self.STATUS_COMPLETED,),
-            ).fetchone()
+            normalized_kind = str(job_kind or "").strip().lower()
+            if normalized_kind:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE status = ?
+                    AND job_kind = ?
+                    AND date(COALESCE(NULLIF(completed_at, ''), updated_at)) = date('now')
+                    """,
+                    (self.STATUS_COMPLETED, normalized_kind),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE status = ?
+                    AND date(COALESCE(NULLIF(completed_at, ''), updated_at)) = date('now')
+                    """,
+                    (self.STATUS_COMPLETED,),
+                ).fetchone()
             return int(row["total"]) if row else 0
 
-    def get_today_failed_count(self) -> int:
+    def get_today_failed_count(self, job_kind: Optional[str] = None) -> int:
         """오늘 실패(failed)된 Job 수를 반환한다."""
         with self.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM jobs
-                WHERE status = ?
-                AND date(updated_at) = date('now')
-                """,
-                (self.STATUS_FAILED,),
-            ).fetchone()
+            normalized_kind = str(job_kind or "").strip().lower()
+            if normalized_kind:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE status = ?
+                    AND job_kind = ?
+                    AND date(updated_at) = date('now')
+                    """,
+                    (self.STATUS_FAILED, normalized_kind),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE status = ?
+                    AND date(updated_at) = date('now')
+                    """,
+                    (self.STATUS_FAILED,),
+                ).fetchone()
             return int(row["total"]) if row else 0
 
-    def get_last_completed_time(self) -> Optional[datetime]:
+    def get_last_completed_time(self, job_kind: Optional[str] = None) -> Optional[datetime]:
         """가장 최근 완료된 Job의 완료 시각(UTC)을 반환한다."""
         with self.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT updated_at
-                FROM jobs
-                WHERE status = ?
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (self.STATUS_COMPLETED,),
-            ).fetchone()
-            if not row or not row["updated_at"]:
+            normalized_kind = str(job_kind or "").strip().lower()
+            if normalized_kind:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(NULLIF(completed_at, ''), updated_at) AS completed_at
+                    FROM jobs
+                    WHERE status = ?
+                    AND job_kind = ?
+                    ORDER BY COALESCE(NULLIF(completed_at, ''), updated_at) DESC
+                    LIMIT 1
+                    """,
+                    (self.STATUS_COMPLETED, normalized_kind),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(NULLIF(completed_at, ''), updated_at) AS completed_at
+                    FROM jobs
+                    WHERE status = ?
+                    ORDER BY COALESCE(NULLIF(completed_at, ''), updated_at) DESC
+                    LIMIT 1
+                    """,
+                    (self.STATUS_COMPLETED,),
+                ).fetchone()
+            if not row or not row["completed_at"]:
                 return None
-            return parse_iso(str(row["updated_at"]))
+            return parse_iso(str(row["completed_at"]))
 
     def save_prepared_payload(self, job_id: str, payload: Dict[str, Any]) -> bool:
         """생성된 초안을 저장하고 발행 대기 상태로 전환한다."""
@@ -1027,14 +1245,28 @@ class JobStore:
                 return True
             return False
 
-    def claim_ready_jobs(self, limit: int = 1, now_override: Optional[str] = None) -> List[Job]:
+    def claim_ready_jobs(
+        self,
+        limit: int = 1,
+        now_override: Optional[str] = None,
+        job_kind: Optional[str] = None,
+    ) -> List[Job]:
         """발행 가능한 준비 완료 Job을 원자적으로 선점한다."""
         now = now_override or now_utc()
         worker_id = self._worker_id
 
         with self.connection() as conn:
-            cursor = conn.execute(
-                """
+            where_clauses = [
+                "status = ?",
+                "scheduled_at <= ?",
+            ]
+            params: List[Any] = [self.STATUS_READY, now]
+            normalized_kind = str(job_kind or "").strip().lower()
+            if normalized_kind:
+                where_clauses.append("job_kind = ?")
+                params.append(normalized_kind)
+
+            query = f"""
                 UPDATE jobs
                 SET status = ?,
                     claimed_at = ?,
@@ -1043,21 +1275,21 @@ class JobStore:
                     updated_at = ?
                 WHERE job_id IN (
                     SELECT job_id FROM jobs
-                    WHERE status = ?
-                    AND scheduled_at <= ?
+                    WHERE {' AND '.join(where_clauses)}
                     ORDER BY updated_at ASC
                     LIMIT ?
                 )
                 RETURNING *
-                """,
+            """
+            cursor = conn.execute(
+                query,
                 (
                     self.STATUS_RUNNING,
                     now,
                     worker_id,
                     now,
                     now,
-                    self.STATUS_READY,
-                    now,
+                    *params,
                     limit,
                 ),
             )
@@ -1071,17 +1303,38 @@ class JobStore:
                 )
             return jobs
 
-    def claim_for_publish(self, limit: int = 1, now_override: Optional[str] = None) -> List[Job]:
+    def claim_for_publish(
+        self,
+        limit: int = 1,
+        now_override: Optional[str] = None,
+        job_kind: Optional[str] = None,
+    ) -> List[Job]:
         """발행 워커용 claim 래퍼."""
-        return self.claim_ready_jobs(limit=limit, now_override=now_override)
+        return self.claim_ready_jobs(
+            limit=limit,
+            now_override=now_override,
+            job_kind=job_kind,
+        )
 
-    def get_ready_to_publish_count(self) -> int:
+    def get_ready_to_publish_count(self, job_kind: Optional[str] = None) -> int:
         """발행 대기(ready) 상태 Job 수를 반환한다."""
         with self.connection() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS total FROM jobs WHERE status = ?",
-                (self.STATUS_READY,),
-            ).fetchone()
+            normalized_kind = str(job_kind or "").strip().lower()
+            if normalized_kind:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE status = ?
+                    AND job_kind = ?
+                    """,
+                    (self.STATUS_READY, normalized_kind),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS total FROM jobs WHERE status = ?",
+                    (self.STATUS_READY,),
+                ).fetchone()
             return int(row["total"]) if row else 0
 
     def _log_event(
@@ -1358,6 +1611,284 @@ class JobStore:
                 }
             )
         return results
+
+    def _serialize_channel_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """channels 테이블 row를 API 친화 dict로 변환한다."""
+        return {
+            "channel_id": str(row["channel_id"]),
+            "platform": str(row["platform"]),
+            "label": str(row["label"]),
+            "blog_url": str(row["blog_url"] or ""),
+            "persona_id": str(row["persona_id"] or ""),
+            "persona_desc": str(row["persona_desc"] or ""),
+            "daily_target": int(row["daily_target"] or 0),
+            "style_level": int(row["style_level"] or 2),
+            "style_model": str(row["style_model"] or ""),
+            "publish_delay_minutes": int(row["publish_delay_minutes"] or 90),
+            "is_master": bool(int(row["is_master"] or 0)),
+            "auth_json": str(row["auth_json"] or "{}"),
+            "active": bool(int(row["active"] or 0)),
+            "created_at": str(row["created_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def list_channels(self, include_inactive: bool = False) -> List[Dict[str, Any]]:
+        """채널 목록을 조회한다."""
+        with self.connection() as conn:
+            if include_inactive:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM channels
+                    ORDER BY is_master DESC, created_at ASC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM channels
+                    WHERE active = 1
+                    ORDER BY is_master DESC, created_at ASC
+                    """
+                ).fetchall()
+        return [self._serialize_channel_row(row) for row in rows]
+
+    def get_channel(self, channel_id: str) -> Optional[Dict[str, Any]]:
+        """채널 1건을 조회한다."""
+        normalized_channel_id = str(channel_id).strip()
+        if not normalized_channel_id:
+            return None
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM channels WHERE channel_id = ?",
+                (normalized_channel_id,),
+            ).fetchone()
+        return self._serialize_channel_row(row) if row else None
+
+    def has_any_active_channel(self) -> bool:
+        """활성 채널 존재 여부를 반환한다."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total FROM channels WHERE active = 1"
+            ).fetchone()
+        return bool(row and int(row["total"]) > 0)
+
+    def has_active_master_channel(self, exclude_channel_id: str = "") -> bool:
+        """활성 마스터 채널 존재 여부를 반환한다."""
+        normalized_exclude = str(exclude_channel_id).strip()
+        with self.connection() as conn:
+            if normalized_exclude:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM channels
+                    WHERE active = 1
+                    AND is_master = 1
+                    AND channel_id != ?
+                    """,
+                    (normalized_exclude,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM channels
+                    WHERE active = 1
+                    AND is_master = 1
+                    """
+                ).fetchone()
+        return bool(row and int(row["total"]) > 0)
+
+    def get_active_master_channel(self) -> Optional[Dict[str, Any]]:
+        """활성 마스터 채널 1건을 반환한다."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM channels
+                WHERE active = 1
+                AND is_master = 1
+                LIMIT 1
+                """
+            ).fetchone()
+        return self._serialize_channel_row(row) if row else None
+
+    def get_active_sub_channels(self) -> List[Dict[str, Any]]:
+        """활성 서브 채널 목록을 반환한다."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM channels
+                WHERE active = 1
+                AND is_master = 0
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return [self._serialize_channel_row(row) for row in rows]
+
+    def insert_channel(self, payload: Dict[str, Any]) -> bool:
+        """채널을 생성한다."""
+        now = now_utc()
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO channels (
+                    channel_id,
+                    platform,
+                    label,
+                    blog_url,
+                    persona_id,
+                    persona_desc,
+                    daily_target,
+                    style_level,
+                    style_model,
+                    publish_delay_minutes,
+                    is_master,
+                    auth_json,
+                    active,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(payload.get("channel_id", "")).strip(),
+                    str(payload.get("platform", "")).strip().lower(),
+                    str(payload.get("label", "")).strip(),
+                    str(payload.get("blog_url", "")).strip(),
+                    str(payload.get("persona_id", "")).strip(),
+                    str(payload.get("persona_desc", "")).strip(),
+                    int(payload.get("daily_target", 0) or 0),
+                    int(payload.get("style_level", 2) or 2),
+                    str(payload.get("style_model", "")).strip(),
+                    int(payload.get("publish_delay_minutes", 90) or 90),
+                    1 if bool(payload.get("is_master", False)) else 0,
+                    str(payload.get("auth_json", "{}") or "{}"),
+                    1 if bool(payload.get("active", True)) else 0,
+                    now,
+                    now,
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def update_channel_fields(self, channel_id: str, updates: Dict[str, Any]) -> bool:
+        """채널 필드를 부분 업데이트한다."""
+        normalized_channel_id = str(channel_id).strip()
+        if not normalized_channel_id:
+            return False
+
+        allowed_fields = {
+            "platform",
+            "label",
+            "blog_url",
+            "persona_id",
+            "persona_desc",
+            "daily_target",
+            "style_level",
+            "style_model",
+            "publish_delay_minutes",
+            "is_master",
+            "auth_json",
+            "active",
+        }
+        assignments: List[str] = []
+        params: List[Any] = []
+        for key, value in updates.items():
+            if key not in allowed_fields:
+                continue
+            assignments.append(f"{key} = ?")
+            if key in {"daily_target", "style_level", "publish_delay_minutes"}:
+                params.append(int(value or 0))
+            elif key in {"is_master", "active"}:
+                params.append(1 if bool(value) else 0)
+            elif key == "platform":
+                params.append(str(value or "").strip().lower())
+            else:
+                params.append(str(value or "").strip())
+
+        if not assignments:
+            return False
+
+        assignments.append("updated_at = ?")
+        params.append(now_utc())
+        params.append(normalized_channel_id)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                f"UPDATE channels SET {', '.join(assignments)} WHERE channel_id = ?",
+                tuple(params),
+            )
+        return cursor.rowcount > 0
+
+    def deactivate_channel_and_cancel_jobs(self, channel_id: str) -> Dict[str, int]:
+        """채널을 비활성화하고 queued/ready 서브 잡을 cancelled로 전환한다."""
+        normalized_channel_id = str(channel_id).strip()
+        if not normalized_channel_id:
+            return {"updated_channels": 0, "cancelled_jobs": 0}
+
+        now = now_utc()
+        with self.connection() as conn:
+            channel_cursor = conn.execute(
+                """
+                UPDATE channels
+                SET active = 0,
+                    updated_at = ?
+                WHERE channel_id = ?
+                """,
+                (now, normalized_channel_id),
+            )
+            jobs_cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    error_code = ?,
+                    error_message = ?,
+                    claimed_at = NULL,
+                    claimed_by = NULL,
+                    heartbeat_at = NULL,
+                    updated_at = ?
+                WHERE channel_id = ?
+                AND job_kind = ?
+                AND status IN (?, ?)
+                """,
+                (
+                    self.STATUS_CANCELLED,
+                    "CHANNEL_DEACTIVATED",
+                    "Channel deactivated by user",
+                    now,
+                    normalized_channel_id,
+                    self.JOB_KIND_SUB,
+                    self.STATUS_QUEUED,
+                    self.STATUS_READY,
+                ),
+            )
+        return {
+            "updated_channels": int(channel_cursor.rowcount),
+            "cancelled_jobs": int(jobs_cursor.rowcount),
+        }
+
+    def get_sub_job_by_master_channel(
+        self,
+        master_job_id: str,
+        channel_id: str,
+    ) -> Optional[Job]:
+        """마스터/채널 조합의 서브 잡 1건을 조회한다."""
+        normalized_master_job_id = str(master_job_id).strip()
+        normalized_channel_id = str(channel_id).strip()
+        if not normalized_master_job_id or not normalized_channel_id:
+            return None
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM jobs
+                WHERE master_job_id = ?
+                AND channel_id = ?
+                LIMIT 1
+                """,
+                (normalized_master_job_id, normalized_channel_id),
+            ).fetchone()
+        return Job.from_row(row) if row else None
 
     def set_system_setting(self, setting_key: str, setting_value: Any) -> None:
         """시스템 설정값을 저장/갱신한다."""

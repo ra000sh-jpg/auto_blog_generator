@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -25,11 +26,21 @@ from modules.logging_config import setup_logging
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Auto Blog Scheduler")
+    default_db_path = os.getenv("AUTOBLOG_DB_PATH", "data/automation.db")
+    parser.add_argument(
+        "--db",
+        default=default_db_path,
+        help="스케줄러에서 사용할 DB 경로 (기본값: AUTOBLOG_DB_PATH 또는 data/automation.db)",
+    )
     parser.add_argument(
         "--daily-target",
         type=int,
-        default=3,
-        help="일일 포스팅 목표 (기본: 3)",
+        default=None,
+        help=(
+            "일일 포스팅 목표 편수. "
+            "지정 시 DB 설정(scheduler_daily_posts_target)보다 우선 적용됩니다. "
+            "미지정 시 기본값 3을 사용합니다."
+        ),
     )
     parser.add_argument(
         "--min-interval",
@@ -108,6 +119,7 @@ def main() -> None:
         "Starting scheduler",
         extra={
             "daily_target": args.daily_target,
+            "db_path": args.db,
             "min_interval_minutes": args.min_interval,
             "max_interval_minutes": args.max_interval,
             "cpu_start_threshold_percent": args.cpu_start_threshold,
@@ -128,6 +140,7 @@ def main() -> None:
 
         asyncio.run(
             run_scheduler_forever(
+                db_path=args.db,
                 daily_posts_target=args.daily_target,
                 min_post_interval_minutes=args.min_interval,
                 publish_interval_max_minutes=args.max_interval,

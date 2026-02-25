@@ -28,6 +28,7 @@ class RouterSettingsPayload(BaseModel):
     images_per_post: int = Field(default=1, ge=0, le=4)
     images_per_post_min: int = Field(default=0, ge=0, le=4)
     images_per_post_max: int = Field(default=4, ge=0, le=4)
+    challenger_model: str = ""
 
 
 class RouterQuoteResponse(BaseModel):
@@ -128,6 +129,7 @@ def save_router_settings(
             "images_per_post": request.images_per_post,
             "images_per_post_min": request.images_per_post_min,
             "images_per_post_max": request.images_per_post_max,
+            "challenger_model": request.challenger_model,
         }
     )
     payload = llm_router.export_for_ui()

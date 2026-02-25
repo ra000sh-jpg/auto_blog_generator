@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import json
 import logging
 import random
@@ -10,6 +11,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time as time_obj, timedelta, timezone
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -22,9 +24,14 @@ if TYPE_CHECKING:
     from .trend_job_service import TrendJobService
 
 from .resource_monitor import CpuHysteresisMonitor
+from .. import constants
 from ..constants import DEFAULT_FALLBACK_CATEGORY
+from .time_utils import parse_iso
 
 logger = logging.getLogger(__name__)
+
+_MULTICHANNEL_SETTING_KEY = "multichannel_enabled"
+_IMPLEMENTED_SUB_PLATFORMS = {"naver", "tistory"}
 
 
 @dataclass
@@ -77,13 +84,13 @@ class SchedulerService:
     """주기적 운영 작업을 스케줄링한다."""
 
     MISFIRE_GRACE_TIME = 86400
-    ACTIVE_HOURS = (8, 22)  # 08:00~22:00
+    ACTIVE_HOURS = (constants.ACTIVE_HOURS_START, constants.ACTIVE_HOURS_END)
     PUBLISH_ANCHOR_HOURS = (9, 12, 19)
     DRAFT_BUFFER_TARGET = 6
-    DEFAULT_GENERATOR_POLL_SECONDS = 30
-    DEFAULT_PUBLISHER_POLL_SECONDS = 20
-    DEFAULT_DAILY_TARGET = 3
-    DEFAULT_IDEA_VAULT_DAILY_QUOTA = 2
+    DEFAULT_GENERATOR_POLL_SECONDS = constants.DEFAULT_GENERATOR_POLL_SECONDS
+    DEFAULT_PUBLISHER_POLL_SECONDS = constants.DEFAULT_PUBLISHER_POLL_SECONDS
+    DEFAULT_DAILY_TARGET = constants.DEFAULT_DAILY_TARGET
+    DEFAULT_IDEA_VAULT_DAILY_QUOTA = constants.DEFAULT_IDEA_VAULT_DAILY_QUOTA
     WEEKLY_COMPETITION_TEST_END_WEEKDAY = 3  # 목요일(월=0)
 
     def __init__(
@@ -107,6 +114,7 @@ class SchedulerService:
         publisher_poll_seconds: int = DEFAULT_PUBLISHER_POLL_SECONDS,
         random_seed: Optional[int] = None,
         notifier: Optional["TelegramNotifier"] = None,
+        api_only_mode: bool = False,
     ):
         self.trend_service = trend_service
         self.pipeline_service = pipeline_service
@@ -136,6 +144,7 @@ class SchedulerService:
         self.publisher_poll_seconds = max(5, publisher_poll_seconds)
         self.random_seed = random_seed
         self.notifier = notifier
+        self.api_only_mode = bool(api_only_mode)
         self._scheduler: Any = None
         self._generator_task: Optional[asyncio.Task[None]] = None
         self._publisher_task: Optional[asyncio.Task[None]] = None
@@ -151,6 +160,10 @@ class SchedulerService:
 
     def setup_scheduler(self) -> None:
         """스케줄러를 구성하고 작업을 등록한다."""
+        if self.api_only_mode:
+            logger.info("API-only mode: schedule jobs are intentionally disabled")
+            return
+
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from apscheduler.triggers.cron import CronTrigger
@@ -246,6 +259,10 @@ class SchedulerService:
 
     async def start(self) -> None:
         """스케줄러를 시작하고 시작 직후 catch-up을 수행한다."""
+        if self.api_only_mode:
+            logger.info("API-only mode: background execution is skipped")
+            return
+
         if self._scheduler is None:
             self.setup_scheduler()
         self._scheduler.start()
@@ -273,6 +290,17 @@ class SchedulerService:
 
     async def stop(self) -> None:
         """스케줄러를 중지한다."""
+        if self.api_only_mode:
+            await self._cancel_task(self._generator_task)
+            await self._cancel_task(self._publisher_task)
+            self._generator_task = None
+            self._publisher_task = None
+            if self._scheduler is not None:
+                self._scheduler.shutdown(wait=False)
+            self._scheduler = None
+            logger.info("API-only scheduler stop requested")
+            return
+
         await self._cancel_task(self._generator_task)
         await self._cancel_task(self._publisher_task)
         self._generator_task = None
@@ -297,6 +325,7 @@ class SchedulerService:
         try:
             while True:
                 try:
+                    await self._run_sub_job_catchup()
                     await self._run_draft_prefetch()
                 except Exception as exc:
                     logger.error("Generator worker error: %s", exc)
@@ -309,6 +338,7 @@ class SchedulerService:
         try:
             while True:
                 try:
+                    await self._run_sub_job_publish_catchup()
                     await self._run_daily_target_check()
                 except Exception as exc:
                     logger.error("Publisher worker error: %s", exc)
@@ -319,10 +349,14 @@ class SchedulerService:
     async def _run_startup_catchup(self) -> None:
         """시작 시점에 놓친 작업을 보정 실행한다."""
         logger.info("Running startup catch-up")
-        await self._run_weekly_model_competition()
         await self._run_daily_quota_seed()
         await self._run_draft_prefetch()
         await self._run_daily_target_check()
+        await self._run_metrics_collection()
+        await self._run_weekly_model_competition()
+        await self._run_feedback_analysis()
+        await self._run_sub_job_catchup()
+        await self._run_sub_job_publish_catchup()
 
     async def _run_idea_vault_auto_collect(self) -> None:
         """RSS 피드에서 아이디어를 수집해 idea_vault 에 저장한다 (Track A)."""
@@ -349,8 +383,16 @@ class SchedulerService:
         logger.info("Running metrics collection")
         if not self.metrics_collector:
             return
+        if self.job_store:
+            today_key = self._today_key()
+            last_key = self.job_store.get_system_setting("scheduler_last_metrics_date", "")
+            if last_key == today_key:
+                logger.debug("Metrics collection skipped: already collected today (%s)", today_key)
+                return
         try:
             count = await self.metrics_collector.collect_all_pending()
+            if self.job_store:
+                self.job_store.set_system_setting("scheduler_last_metrics_date", self._today_key())
             logger.info("Metrics collected: %d", count)
         except Exception as exc:
             logger.error("Metrics collection failed: %s", exc)
@@ -359,16 +401,187 @@ class SchedulerService:
         logger.info("Running feedback analysis")
         if not self.feedback_analyzer:
             return
+        if self.job_store:
+            week_key = self._week_key()
+            last_key = self.job_store.get_system_setting("scheduler_last_feedback_week", "")
+            if last_key == week_key:
+                logger.debug("Feedback analysis skipped: already analyzed week (%s)", week_key)
+                return
         try:
             snapshot = await self.feedback_analyzer.run_analysis(
                 platform="naver",
                 trigger="scheduled",
                 apply_updates=True,
             )
+            if self.job_store:
+                self.job_store.set_system_setting("scheduler_last_feedback_week", self._week_key())
             if snapshot:
                 logger.info("Feedback analysis complete")
         except Exception as exc:
             logger.error("Feedback analysis failed: %s", exc)
+
+    async def _run_sub_job_catchup(self) -> None:
+        """완료된 마스터 잡을 기준으로 누락된 서브 잡을 생성한다."""
+        if not self.job_store:
+            return
+        started_at = perf_counter()
+        skip_reasons: Counter[str] = Counter()
+        created_count = 0
+        scanned_pairs = 0
+        master_count = 0
+        sub_channel_count = 0
+
+        if not self._is_multichannel_enabled():
+            skip_reasons["multichannel_disabled"] += 1
+            self._log_sub_job_catchup_stats(
+                created_count=created_count,
+                scanned_pairs=scanned_pairs,
+                master_count=master_count,
+                sub_channel_count=sub_channel_count,
+                skip_reasons=skip_reasons,
+                started_at=started_at,
+            )
+            return
+
+        sub_channels = self.job_store.get_active_sub_channels()
+        sub_channel_count = len(sub_channels)
+        if not sub_channels:
+            skip_reasons["no_active_sub_channels"] += 1
+            self._log_sub_job_catchup_stats(
+                created_count=created_count,
+                scanned_pairs=scanned_pairs,
+                master_count=master_count,
+                sub_channel_count=sub_channel_count,
+                skip_reasons=skip_reasons,
+                started_at=started_at,
+            )
+            return
+
+        masters = self.job_store.list_recent_completed_jobs(
+            limit=200,
+            job_kind=self._master_job_kind(),
+        )
+        master_count = len(masters)
+        if not masters:
+            skip_reasons["no_recent_completed_masters"] += 1
+            self._log_sub_job_catchup_stats(
+                created_count=created_count,
+                scanned_pairs=scanned_pairs,
+                master_count=master_count,
+                sub_channel_count=sub_channel_count,
+                skip_reasons=skip_reasons,
+                started_at=started_at,
+            )
+            return
+
+        for master in masters:
+            base_time = parse_iso(master.completed_at or master.updated_at)
+            for channel in sub_channels:
+                scanned_pairs += 1
+                platform = str(channel.get("platform", "")).strip().lower()
+                if platform not in _IMPLEMENTED_SUB_PLATFORMS:
+                    skip_reasons["publisher_not_implemented"] += 1
+                    continue
+
+                channel_id = str(channel.get("channel_id", "")).strip()
+                if not channel_id:
+                    skip_reasons["missing_channel_id"] += 1
+                    continue
+
+                existing = self.job_store.get_sub_job_by_master_channel(master.job_id, channel_id)
+                if existing:
+                    skip_reasons["already_exists"] += 1
+                    continue
+
+                delay_minutes = max(0, int(channel.get("publish_delay_minutes", 90)))
+                scheduled_at = (base_time + timedelta(minutes=delay_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                sub_job_id = str(uuid.uuid4())
+                sub_persona = str(channel.get("persona_id", "")).strip() or master.persona_id
+                sub_title = f"[{str(channel.get('label', '')).strip()}] {master.title}"
+
+                success = self.job_store.schedule_job(
+                    job_id=sub_job_id,
+                    title=sub_title,
+                    seed_keywords=list(master.seed_keywords),
+                    platform=platform,
+                    persona_id=sub_persona,
+                    scheduled_at=scheduled_at,
+                    max_retries=max(1, int(master.max_retries)),
+                    tags=list(master.tags or []),
+                    category=str(master.category or ""),
+                    job_kind=self._sub_job_kind(),
+                    master_job_id=master.job_id,
+                    channel_id=channel_id,
+                    status=self.job_store.STATUS_QUEUED,
+                )
+                if success:
+                    created_count += 1
+                else:
+                    skip_reasons["schedule_failed"] += 1
+
+        self._log_sub_job_catchup_stats(
+            created_count=created_count,
+            scanned_pairs=scanned_pairs,
+            master_count=master_count,
+            sub_channel_count=sub_channel_count,
+            skip_reasons=skip_reasons,
+            started_at=started_at,
+        )
+
+    async def _run_sub_job_publish_catchup(self, max_jobs: int = 20) -> None:
+        """예약 시각이 지난 서브 잡을 우선 처리한다."""
+        if not self.job_store or not self.pipeline_service:
+            return
+
+        started_at = perf_counter()
+        skip_reasons: Counter[str] = Counter()
+        processed = 0
+        published_count = 0
+        prepared_count = 0
+        limit = max(1, int(max_jobs or 20))
+
+        for _ in range(limit):
+            published = await self._publish_next_available_job(job_kind=self._sub_job_kind())
+            if published:
+                processed += 1
+                published_count += 1
+                await asyncio.sleep(0.1)
+                continue
+
+            ready_count = self._get_ready_count(job_kind=self._sub_job_kind())
+            due_count = self._get_due_count(job_kind=self._sub_job_kind())
+            if ready_count <= 0 and due_count <= 0:
+                skip_reasons["no_due_jobs"] += 1
+                break
+
+            prepared = await self._prepare_next_available_job(job_kind=self._sub_job_kind())
+            if prepared:
+                processed += 1
+                prepared_count += 1
+                await asyncio.sleep(0.1)
+                continue
+
+            if ready_count > 0:
+                skip_reasons["ready_claim_or_publish_failed"] += 1
+            if due_count > 0:
+                skip_reasons["due_claim_or_prepare_failed"] += 1
+            break
+
+        if processed >= limit:
+            skip_reasons["max_jobs_limit_reached"] += 1
+
+        elapsed_sec = max(0.001, perf_counter() - started_at)
+        throughput_per_min = processed * 60.0 / elapsed_sec
+        logger.info(
+            "Sub job publish catch-up stats: processed=%d published=%d prepared=%d limit=%d throughput_per_min=%.2f skip_reasons=%s elapsed_sec=%.2f",
+            processed,
+            published_count,
+            prepared_count,
+            limit,
+            throughput_per_min,
+            json.dumps(dict(skip_reasons), ensure_ascii=False, sort_keys=True),
+            elapsed_sec,
+        )
 
     async def _run_daily_summary_notification(self) -> None:
         """KST 22:30 일일 요약 알림을 전송한다."""
@@ -441,7 +654,9 @@ class SchedulerService:
             configured_target,
         )
         try:
-            published = await self._publish_next_available_job()
+            published = await self._publish_next_available_job(
+                job_kind=self._master_job_kind() if self.job_store else None
+            )
             if published:
                 self._publish_wait_until_utc = datetime.now(timezone.utc) + timedelta(
                     minutes=self.min_post_interval_minutes
@@ -516,7 +731,9 @@ class SchedulerService:
                         needed,
                     )
                     break
-                prepared = await self._prepare_next_available_job()
+                prepared = await self._prepare_next_available_job(
+                    job_kind=self._master_job_kind() if self.job_store else None
+                )
                 if not prepared:
                     break
                 prepared_count += 1
@@ -532,21 +749,30 @@ class SchedulerService:
 
         logger.info("Draft prefetch done (prepared=%d, needed=%d)", prepared_count, needed)
 
-    async def _prepare_next_available_job(self) -> bool:
+    async def _prepare_next_available_job(self, job_kind: Optional[str] = None) -> bool:
         """파이프라인이 지원하는 방식으로 다음 초안을 생성한다."""
         prepare_fn = getattr(self.pipeline_service, "prepare_next_pending_job", None)
         if prepare_fn and callable(prepare_fn):
-            return bool(await prepare_fn())
+            try:
+                return bool(await prepare_fn(job_kind=job_kind))
+            except TypeError:
+                return bool(await prepare_fn())
         return False
 
-    async def _publish_next_available_job(self) -> bool:
+    async def _publish_next_available_job(self, job_kind: Optional[str] = None) -> bool:
         """파이프라인이 지원하는 방식으로 다음 발행을 실행한다."""
         publish_fn = getattr(self.pipeline_service, "publish_next_ready_job", None)
         if publish_fn and callable(publish_fn):
-            return bool(await publish_fn())
+            try:
+                return bool(await publish_fn(job_kind=job_kind))
+            except TypeError:
+                return bool(await publish_fn())
         run_fn = getattr(self.pipeline_service, "run_next_pending_job", None)
         if run_fn and callable(run_fn):
-            return bool(await run_fn())
+            try:
+                return bool(await run_fn(job_kind=job_kind))
+            except TypeError:
+                return bool(await run_fn())
         return False
 
     def _is_publish_interval_ready(
@@ -1306,8 +1532,83 @@ class SchedulerService:
             return 0
         get_count = getattr(self.job_store, "get_ready_to_publish_count", None)
         if get_count and callable(get_count):
-            return int(get_count())
+            try:
+                return int(get_count(job_kind=self._master_job_kind()))
+            except TypeError:
+                return int(get_count())
         return 0
+
+    def _get_ready_count(self, job_kind: Optional[str] = None) -> int:
+        """지정한 잡 kind의 ready 상태 개수를 반환한다."""
+        if not self.job_store:
+            return 0
+        get_count = getattr(self.job_store, "get_ready_to_publish_count", None)
+        if get_count and callable(get_count):
+            try:
+                return int(get_count(job_kind=job_kind))
+            except TypeError:
+                return int(get_count())
+        return 0
+
+    def _get_due_count(self, job_kind: Optional[str] = None) -> int:
+        """지정한 잡 kind의 실행 가능(queued/retry_wait) 개수를 반환한다."""
+        if not self.job_store:
+            return 0
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        normalized_kind = str(job_kind or "").strip().lower()
+        with self.job_store.connection() as conn:
+            if normalized_kind:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE job_kind = ?
+                      AND (
+                        (status = 'queued' AND scheduled_at <= ?)
+                        OR
+                        (status = 'retry_wait' AND next_retry_at <= ?)
+                      )
+                    """,
+                    (normalized_kind, now, now),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM jobs
+                    WHERE (status = 'queued' AND scheduled_at <= ?)
+                       OR (status = 'retry_wait' AND next_retry_at <= ?)
+                    """,
+                    (now, now),
+                ).fetchone()
+        return int(row["total"] or 0) if row else 0
+
+    def _log_sub_job_catchup_stats(
+        self,
+        *,
+        created_count: int,
+        scanned_pairs: int,
+        master_count: int,
+        sub_channel_count: int,
+        skip_reasons: Counter[str],
+        started_at: float,
+    ) -> None:
+        """서브 잡 catch-up 실행 통계를 로그로 남긴다."""
+        elapsed_sec = max(0.001, perf_counter() - started_at)
+        throughput_per_min = created_count * 60.0 / elapsed_sec
+        scan_per_min = scanned_pairs * 60.0 / elapsed_sec
+        logger.info(
+            "Sub job catch-up stats: masters=%d sub_channels=%d scanned_pairs=%d created=%d throughput_per_min=%.2f scan_per_min=%.2f skip_reasons=%s elapsed_sec=%.2f",
+            master_count,
+            sub_channel_count,
+            scanned_pairs,
+            created_count,
+            throughput_per_min,
+            scan_per_min,
+            json.dumps(dict(skip_reasons), ensure_ascii=False, sort_keys=True),
+            elapsed_sec,
+        )
 
     def _get_now_local(self) -> datetime:
         """로컬 타임존 시각을 반환한다."""
@@ -1318,27 +1619,72 @@ class SchedulerService:
         except Exception:
             return datetime.now()
 
+    def _today_key(self) -> str:
+        """로컬 날짜 키(YYYY-MM-DD)를 반환한다."""
+        return self._get_now_local().strftime("%Y-%m-%d")
+
+    def _week_key(self) -> str:
+        """로컬 주차 키(YYYY-Www)를 반환한다."""
+        local_now = self._get_now_local()
+        week_start = local_now - timedelta(days=local_now.weekday())
+        return week_start.strftime("%Y-W%W")
+
+    def _is_multichannel_enabled(self) -> bool:
+        """멀티채널 기능 플래그를 반환한다."""
+        if not self.job_store:
+            return False
+        raw = str(
+            self.job_store.get_system_setting(_MULTICHANNEL_SETTING_KEY, "false")
+        ).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _master_job_kind(self) -> str:
+        """마스터 잡 kind 상수를 안전하게 반환한다."""
+        if not self.job_store:
+            return "master"
+        return str(getattr(self.job_store, "JOB_KIND_MASTER", "master"))
+
+    def _sub_job_kind(self) -> str:
+        """서브 잡 kind 상수를 안전하게 반환한다."""
+        if not self.job_store:
+            return "sub"
+        return str(getattr(self.job_store, "JOB_KIND_SUB", "sub"))
+
     def _get_today_post_count(self) -> int:
         if not self.job_store:
             return 0
-        return self.job_store.get_today_completed_count()
+        try:
+            return self.job_store.get_today_completed_count(
+                job_kind=self._master_job_kind()
+            )
+        except TypeError:
+            return self.job_store.get_today_completed_count()
 
     def _get_last_post_time(self) -> Optional[datetime]:
         if not self.job_store:
             return None
-        return self.job_store.get_last_completed_time()
+        try:
+            return self.job_store.get_last_completed_time(
+                job_kind=self._master_job_kind()
+            )
+        except TypeError:
+            return self.job_store.get_last_completed_time()
 
     def _get_today_failed_count(self) -> int:
         if not self.job_store:
             return 0
         get_count = getattr(self.job_store, "get_today_failed_count", None)
         if get_count and callable(get_count):
-            return int(get_count())
+            try:
+                return int(get_count(job_kind=self._master_job_kind()))
+            except TypeError:
+                return int(get_count())
         return 0
 
 
 async def run_scheduler_forever(
-    daily_posts_target: int = 3,
+    daily_posts_target: Optional[int] = None,
+    db_path: Optional[str] = None,
     min_post_interval_minutes: int = 60,
     publish_interval_max_minutes: int = 110,
     cpu_start_threshold_percent: float = 28.0,
@@ -1361,16 +1707,26 @@ async def run_scheduler_forever(
     from .pipeline_service import PipelineService, stub_generate_fn
     from .trend_job_service import TrendJobService
 
+    import os
+
     config = load_config()
     setup_logging(level=config.logging.level, log_format=config.logging.format)
 
-    job_store = JobStore()
+    resolved_db_path = db_path or os.getenv("AUTOBLOG_DB_PATH", "data/automation.db")
+    resolved_daily_posts_target = (
+        int(daily_posts_target)
+        if daily_posts_target is not None
+        else SchedulerService.DEFAULT_DAILY_TARGET
+    )
+    if resolved_daily_posts_target < 1:
+        resolved_daily_posts_target = SchedulerService.DEFAULT_DAILY_TARGET
+
+    job_store = JobStore(db_path=resolved_db_path)
     trend_service = TrendJobService(job_store=job_store)
     metrics_collector = MetricsCollector(db_path=job_store.db_path)
 
     dry_run = False
     blog_id = ""
-    import os
 
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
     blog_id = os.getenv("NAVER_BLOG_ID", "")
@@ -1405,6 +1761,7 @@ async def run_scheduler_forever(
         logger.warning("Scheduler LLM init failed, fallback to stub: %s", exc)
 
     quality_evaluator = None
+    feedback_analyzer = None
     try:
         from ..llm.provider_factory import create_client
         from .quality_evaluator import QualityEvaluator
@@ -1417,6 +1774,27 @@ async def run_scheduler_forever(
         logger.info("Scheduler quality evaluator backend: llm")
     except Exception as exc:
         logger.warning("Scheduler quality evaluator init failed: %s", exc)
+
+    try:
+        from ..seo.feedback_analyzer import FeedbackAnalyzer
+        # FeedbackAnalyzer용 LLM 클라이언트: 분석 전용이므로 동일 프로바이더 사용
+        feedback_llm_client = None
+        try:
+            from ..llm.provider_factory import create_client as _create_fb_client
+            feedback_llm_client = _create_fb_client(
+                provider=config.llm.primary_provider,
+                model=config.llm.primary_model,
+                timeout_sec=config.llm.timeout_sec,
+            )
+        except Exception:
+            pass
+        feedback_analyzer = FeedbackAnalyzer(
+            db_path=job_store.db_path,
+            llm_client=feedback_llm_client,
+        )
+        logger.info("Scheduler feedback analyzer: enabled")
+    except Exception as exc:
+        logger.warning("Scheduler feedback analyzer init failed: %s", exc)
 
     pipeline_service = PipelineService(
         job_store=job_store,
@@ -1436,10 +1814,10 @@ async def run_scheduler_forever(
         trend_service=trend_service,
         pipeline_service=pipeline_service,
         metrics_collector=metrics_collector,
-        feedback_analyzer=None,
+        feedback_analyzer=feedback_analyzer,
         job_store=job_store,
         timezone_name="Asia/Seoul",
-        daily_posts_target=daily_posts_target,
+        daily_posts_target=resolved_daily_posts_target,
         min_post_interval_minutes=min_post_interval_minutes,
         publish_interval_min_minutes=min_post_interval_minutes,
         publish_interval_max_minutes=publish_interval_max_minutes,

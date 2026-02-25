@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from modules.automation.time_utils import now_utc
+from modules.constants import ACTIVE_HOURS_DISPLAY
 from server.dependencies import get_app_config, get_job_store, get_llm_router
 from server.routers.scheduler import get_scheduler_instance, _next_publish_slot_kst
 
@@ -110,6 +111,10 @@ class SchedulerData(BaseModel):
     today_failed: int = 0
     ready_to_publish: int = 0
     queued: int = 0
+    ready_master: int = 0
+    ready_sub: int = 0
+    queued_master: int = 0
+    queued_sub: int = 0
     next_publish_slot_kst: Optional[str] = None
     active_hours: str = "08:00~22:00"
     last_seed_date: str = ""
@@ -329,14 +334,28 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
 
     queue_stats = job_store.get_queue_stats()
     queued = int(queue_stats.get("queued", 0))
-    # prepared_payload 가 있는 queued 잡 = 발행 즉시 가능
     try:
         with job_store.connection() as _conn:
             _row = _conn.execute(
-                "SELECT COUNT(*) AS cnt FROM jobs WHERE status='queued' AND prepared_payload IS NOT NULL"
+                """
+                SELECT
+                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='master' THEN 1 ELSE 0 END) AS ready_master,
+                    SUM(CASE WHEN status='ready_to_publish' AND job_kind='sub' THEN 1 ELSE 0 END) AS ready_sub,
+                    SUM(CASE WHEN status='queued' AND job_kind='master' THEN 1 ELSE 0 END) AS queued_master,
+                    SUM(CASE WHEN status='queued' AND job_kind='sub' THEN 1 ELSE 0 END) AS queued_sub
+                FROM jobs
+                """
             ).fetchone()
-            ready_to_publish = int(_row["cnt"]) if _row else 0
+            ready_master = int(_row["ready_master"] or 0) if _row else 0
+            ready_sub = int(_row["ready_sub"] or 0) if _row else 0
+            queued_master = int(_row["queued_master"] or 0) if _row else 0
+            queued_sub = int(_row["queued_sub"] or 0) if _row else 0
+            ready_to_publish = ready_master + ready_sub
     except Exception:
+        ready_master = 0
+        ready_sub = 0
+        queued_master = 0
+        queued_sub = 0
         ready_to_publish = 0
 
     next_slot: Optional[str] = None
@@ -351,8 +370,12 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
         today_failed=today_failed,
         ready_to_publish=ready_to_publish,
         queued=queued,
+        ready_master=ready_master,
+        ready_sub=ready_sub,
+        queued_master=queued_master,
+        queued_sub=queued_sub,
         next_publish_slot_kst=next_slot,
-        active_hours="08:00~22:00",
+        active_hours=ACTIVE_HOURS_DISPLAY,
         last_seed_date=last_seed_date,
         last_seed_count=last_seed_count,
     )

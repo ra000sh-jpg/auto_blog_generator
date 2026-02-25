@@ -100,8 +100,10 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
     }
 
     loadJobs();
+    const timer = setInterval(loadJobs, 30_000);
     return () => {
       isMounted = false;
+      clearInterval(timer);
     };
   }, [page, size, reloadToken]);
 
@@ -166,7 +168,7 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
             <tr>
               <th className="px-3 py-2">Title</th>
               <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Platform</th>
+              <th className="px-3 py-2">Topic / Persona</th>
               <th className="px-3 py-2">Keywords</th>
               <th className="px-3 py-2">Scheduled</th>
             </tr>
@@ -193,7 +195,10 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
                       {job.status}
                     </span>
                   </td>
-                  <td className="px-3 py-3">{job.platform}</td>
+                  <td className="px-3 py-3">
+                    <p className="text-slate-700">{job.category || "—"}</p>
+                    <p className="text-xs text-slate-400">{job.persona_id}</p>
+                  </td>
                   <td className="px-3 py-3">{job.seed_keywords.join(", ")}</td>
                   <td className="px-3 py-3">{formatDate(job.scheduled_at)}</td>
                 </tr>
@@ -230,13 +235,13 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
                 <div className="space-y-4 text-sm">
                   <div>
                     <span className="font-semibold text-slate-800">Job ID:</span>{" "}
-                    <span className="text-slate-600">{jobDetail.job_id}</span>
+                    <span className="font-mono text-xs text-slate-500">{jobDetail.job_id}</span>
                   </div>
                   <div>
                     <span className="font-semibold text-slate-800">Title:</span>{" "}
                     <span className="text-slate-600">{jobDetail.title}</span>
                   </div>
-                  <div className="flex gap-4">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
                       <span className="font-semibold text-slate-800">Status:</span>{" "}
                       <span className="text-slate-600">{jobDetail.status}</span>
@@ -245,7 +250,25 @@ export function JobsTable({ initialPage = 1, size = 20, reloadToken = 0 }: JobsT
                       <span className="font-semibold text-slate-800">Platform:</span>{" "}
                       <span className="text-slate-600">{jobDetail.platform}</span>
                     </div>
+                    <div>
+                      <span className="font-semibold text-slate-800">Persona:</span>{" "}
+                      <span className="text-slate-600">{jobDetail.persona_id || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-800">Topic:</span>{" "}
+                      <span className="text-slate-600">{jobDetail.topic_mode || "—"}</span>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="font-semibold text-slate-800">Category:</span>{" "}
+                      <span className="text-slate-600">{jobDetail.category || "—"}</span>
+                    </div>
                   </div>
+                  {jobDetail.error_message && (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 p-3">
+                      <h4 className="mb-1 font-semibold text-rose-700">오류 메시지</h4>
+                      <p className="text-xs text-rose-600 whitespace-pre-wrap">{jobDetail.error_message}</p>
+                    </div>
+                  )}
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <h4 className="mb-2 font-semibold text-slate-800">Final Content</h4>
                     {jobDetail.final_content ? (

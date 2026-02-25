@@ -117,6 +117,7 @@ def get_onboarding_status(
                         category=str(item.get("category", "")).strip(),
                         topic_mode=normalize_topic_mode(str(item.get("topic_mode", "cafe")).strip()),
                         count=max(0, int(item.get("count", 0))),
+                        percentage=float(item.get("percentage", 0.0)) if item.get("percentage") is not None else None,
                     )
                     for item in decoded
                     if isinstance(item, dict) and str(item.get("category", "")).strip()
@@ -258,7 +259,7 @@ def save_schedule(
     )
     non_vault_target = max(0, normalized_target - normalized_idea_vault_quota)
 
-    # percentage 필드가 지정된 경우 count로 자동 변환
+    # percentage 필드가 지정된 경우 count로 자동 변환 (percentage는 반드시 보존)
     resolved_allocations: List[ScheduleAllocationItem] = []
     has_percentage = any(
         item.percentage is not None for item in request.allocations
@@ -268,13 +269,23 @@ def save_schedule(
             float(item.percentage or 0.0) for item in request.allocations
         )
         effective_pct = max(total_pct, 0.01)  # 0 분모 방지
+        # 소수 누적 분배(largest-remainder)로 정확히 non_vault_target에 맞춤
+        raw_counts = []
         for item in request.allocations:
-            raw_count = (float(item.percentage or 0.0) / effective_pct) * non_vault_target
+            raw_counts.append((float(item.percentage or 0.0) / effective_pct) * non_vault_target)
+        floored = [int(r) for r in raw_counts]  # 내림
+        remainders = [(raw_counts[i] - floored[i], i) for i in range(len(raw_counts))]
+        remainders.sort(key=lambda x: -x[0])  # 나머지 큰 순
+        shortfall = non_vault_target - sum(floored)
+        for j in range(min(shortfall, len(remainders))):
+            floored[remainders[j][1]] += 1
+        for idx, item in enumerate(request.allocations):
             resolved_allocations.append(
                 ScheduleAllocationItem(
                     category=item.category,
                     topic_mode=item.topic_mode,
-                    count=max(0, int(round(raw_count))),
+                    count=max(0, floored[idx]),
+                    percentage=item.percentage,  # 원본 퍼센트 보존
                 )
             )
     else:
@@ -295,14 +306,15 @@ def save_schedule(
             delta = non_vault_target - current_total
             allocations[0].count += delta
 
+    # 모든 카테고리를 유지한다 (count=0이어도 percentage가 있으면 살림)
     allocation_payload = [
         {
             "category": item.category,
             "topic_mode": item.topic_mode,
             "count": item.count,
+            "percentage": item.percentage,
         }
         for item in allocations
-        if item.count > 0
     ]
     job_store.set_system_setting("scheduler_daily_posts_target", str(normalized_target))
     job_store.set_system_setting(
@@ -320,6 +332,7 @@ def save_schedule(
                 category=str(item["category"]),
                 topic_mode=str(item["topic_mode"]),
                 count=int(item["count"]),
+                percentage=float(item["percentage"]) if item.get("percentage") is not None else None,
             )
             for item in allocation_payload
         ],

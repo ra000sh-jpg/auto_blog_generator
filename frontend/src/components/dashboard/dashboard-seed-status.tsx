@@ -30,7 +30,15 @@ export function DashboardSeedStatus({ dashboard, dashLoading }: DashboardSeedSta
                         { label: "마지막 시드 날짜", value: s?.last_seed_date || "—" },
                         { label: "마지막 시드 건수", value: `${s?.last_seed_count ?? 0}건` },
                         { label: "발행 준비 완료", value: `${s?.ready_to_publish ?? 0}건` },
+                        {
+                            label: "발행 준비(마스터/서브)",
+                            value: `${s?.ready_master ?? 0} / ${s?.ready_sub ?? 0}건`,
+                        },
                         { label: "큐 대기 중", value: `${s?.queued ?? 0}건` },
+                        {
+                            label: "큐 대기(마스터/서브)",
+                            value: `${s?.queued_master ?? 0} / ${s?.queued_sub ?? 0}건`,
+                        },
                     ].map(({ label, value }) => (
                         <div
                             key={label}

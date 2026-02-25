@@ -22,6 +22,10 @@ TOKEN_BUDGET = {
     "parser": {"input": 450, "output": 180},
     "quality_step": {"input": 3600, "output": 2400},
     "voice_step": {"input": 2900, "output": 2200},
+    # 추가 파이프라인 단계 (quality_step 역할로 호출, UI 원가에 반영)
+    "self_critique": {"input": 2400, "output": 800},   # 품질 자기검증 1회
+    "seo_step": {"input": 1200, "output": 600},        # SEO 제목/메타 최적화
+    "image_prompt": {"input": 800, "output": 400},     # image_slots 생성
 }
 
 
@@ -527,6 +531,13 @@ class LLMRouter:
             "images_per_post_min": images_per_post_min,
             "images_per_post_max": images_per_post_max,
         }
+        # challenger_model: 빈 문자열이면 기존 값 유지, 값이 있으면 저장
+        challenger_model_raw = str(payload.get("challenger_model", "")).strip()
+        if challenger_model_raw:
+            normalized["challenger_model"] = challenger_model_raw
+        else:
+            normalized["challenger_model"] = str(current.get("challenger_model", "")).strip()
+
         if self.job_store:
             self.job_store.set_system_setting("router_strategy_mode", strategy_mode)
             self.job_store.set_system_setting("router_text_api_keys", _json_text(text_keys))
@@ -546,6 +557,8 @@ class LLMRouter:
             self.job_store.set_system_setting("router_images_per_post", str(images_per_post))
             self.job_store.set_system_setting("router_images_per_post_min", str(images_per_post_min))
             self.job_store.set_system_setting("router_images_per_post_max", str(images_per_post_max))
+            if challenger_model_raw:
+                self.job_store.set_system_setting("router_challenger_model", challenger_model_raw)
 
         return normalized
 
@@ -1172,7 +1185,22 @@ class LLMRouter:
         parser_cost = role_cost_krw(parser_spec, "parser")
         quality_cost = role_cost_krw(quality_spec, "quality_step")
         voice_cost = role_cost_krw(voice_spec, "voice_step")
-        text_cost = parser_cost + quality_cost + voice_cost
+
+        # 추가 파이프라인 단계: quality_spec 모델로 호출되는 self_critique, SEO, 이미지 슬롯
+        # 이 단계들은 내부적으로 quality_step 역할의 모델을 사용한다.
+        def extra_step_cost(role: str) -> float:
+            if not quality_spec:
+                return 0.0
+            budget = TOKEN_BUDGET[role]
+            input_c = (budget["input"] / 1_000_000.0) * quality_spec.input_cost_per_1m_usd
+            output_c = (budget["output"] / 1_000_000.0) * quality_spec.output_cost_per_1m_usd
+            return (input_c + output_c) * USD_TO_KRW
+
+        self_critique_cost = extra_step_cost("self_critique")
+        seo_cost = extra_step_cost("seo_step")
+        image_prompt_cost = extra_step_cost("image_prompt")
+
+        text_cost = parser_cost + quality_cost + voice_cost + self_critique_cost + seo_cost + image_prompt_cost
 
         def resolve_ai_count(total_images: int) -> int:
             safe_total = max(0, int(total_images))

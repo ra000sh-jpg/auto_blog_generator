@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import {
     BookOpen,
     ChevronDown,
@@ -12,21 +12,15 @@ import {
     Sparkles,
     Zap,
 } from "lucide-react";
-import { createMagicJob, ingestIdeaVault, type IdeaVaultStatsResponse } from "@/lib/api";
+import { createMagicJob, ingestIdeaVault, fetchOnboardingStatus, type IdeaVaultStatsResponse } from "@/lib/api";
 import { GlassCard } from "./dashboard-ui";
 
-const PERSONA_OPTIONS = [
-    { value: "P1", label: "Cafe Creator (P1)" },
-    { value: "P2", label: "Tech Blogger (P2)" },
-    { value: "P3", label: "Parenting Writer (P3)" },
-    { value: "P4", label: "Finance Insight (P4)" },
+const FALLBACK_PERSONA_OPTIONS = [
+    { value: "P1", label: "P1" },
 ];
 
-const TOPIC_OPTIONS = [
-    { value: "cafe", label: "Cafe" },
-    { value: "it", label: "IT" },
-    { value: "parenting", label: "Parenting" },
-    { value: "finance", label: "Finance" },
+const FALLBACK_TOPIC_OPTIONS = [
+    { value: "cafe", label: "cafe" },
 ];
 
 function parseCommaValues(rawText: string): string[] {
@@ -56,11 +50,47 @@ export function DashboardWorkspace({
 }: DashboardWorkspaceProps) {
     const [workspaceTab, setWorkspaceTab] = useState<"magic" | "vault">("magic");
 
+    // Dynamic options loaded from onboarding settings
+    const [personaOptions, setPersonaOptions] = useState(FALLBACK_PERSONA_OPTIONS);
+    const [topicOptions, setTopicOptions] = useState(FALLBACK_TOPIC_OPTIONS);
+
+    useEffect(() => {
+        fetchOnboardingStatus().then((status) => {
+            // Build persona options from category_allocations
+            if (status.category_allocations && status.category_allocations.length > 0) {
+                const seenPersonas = new Set<string>();
+                const personas: Array<{ value: string; label: string }> = [];
+                // Use persona_id from onboarding status as the single persona
+                if (status.persona_id) {
+                    personas.push({ value: status.persona_id, label: status.persona_id });
+                    seenPersonas.add(status.persona_id);
+                }
+                if (personas.length > 0) setPersonaOptions(personas);
+
+                // Build topic options from category_allocations
+                const seenTopics = new Set<string>();
+                const topics: Array<{ value: string; label: string }> = [];
+                for (const alloc of status.category_allocations) {
+                    if (alloc.topic_mode && !seenTopics.has(alloc.topic_mode)) {
+                        seenTopics.add(alloc.topic_mode);
+                        topics.push({ value: alloc.topic_mode, label: alloc.category || alloc.topic_mode });
+                    }
+                }
+                if (topics.length > 0) {
+                    setTopicOptions(topics);
+                    setAdvancedTopicMode(topics[0].value);
+                }
+            }
+        }).catch(() => {
+            // silently keep fallback options on error
+        });
+    }, []);
+
     // Magic Input State
     const [instruction, setInstruction] = useState("");
     const [advancedOpen, setAdvancedOpen] = useState(false);
     const [advancedPersonaId, setAdvancedPersonaId] = useState(defaultPersonaId || "P1");
-    const [advancedTopicMode, setAdvancedTopicMode] = useState("cafe");
+    const [advancedTopicMode, setAdvancedTopicMode] = useState("");
     const [advancedScheduleAt, setAdvancedScheduleAt] = useState("");
     const [advancedKeywordsText, setAdvancedKeywordsText] = useState("");
     const [advancedCategory, setAdvancedCategory] = useState("");
@@ -199,7 +229,7 @@ export function DashboardWorkspace({
                                         onChange={(e) => setAdvancedPersonaId(e.target.value)}
                                         className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
                                     >
-                                        {PERSONA_OPTIONS.map((o) => (
+                                        {personaOptions.map((o) => (
                                             <option key={o.value} value={o.value}>
                                                 {o.label}
                                             </option>
@@ -213,7 +243,7 @@ export function DashboardWorkspace({
                                         onChange={(e) => setAdvancedTopicMode(e.target.value)}
                                         className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
                                     >
-                                        {TOPIC_OPTIONS.map((o) => (
+                                        {topicOptions.map((o) => (
                                             <option key={o.value} value={o.value}>
                                                 {o.label}
                                             </option>
