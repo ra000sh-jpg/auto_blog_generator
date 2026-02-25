@@ -9,6 +9,7 @@ LOG_DIR=""
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
 SERVER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.server.plist"
 SCHEDULER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.scheduler.plist"
+FRONTEND_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.frontend.plist"
 REPO_URL="${AUTO_BLOG_REPO_URL:-https://github.com/ra000sh-jpg/auto_blog_generator.git}"
 INSTALL_DIR="${AUTO_BLOG_INSTALL_DIR:-${HOME}/auto_blog_generator}"
 
@@ -80,6 +81,14 @@ step "환경 확인"
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "❌ 이 설치 스크립트는 macOS 전용입니다."
   exit 1
+fi
+
+PROJECT_DIR_REAL="$(cd "${PROJECT_DIR:-${INSTALL_DIR:-.}}" &>/dev/null && pwd || echo "")"
+if [[ "${PROJECT_DIR_REAL}" == *"/Desktop"* || "${PROJECT_DIR_REAL}" == *"/Documents"* || "${PROJECT_DIR_REAL}" == *"/Downloads"* ]]; then
+  echo "⚠️  [경고] 프로젝트가 macOS 보호 폴더(Desktop/Documents/Downloads)에 있습니다."
+  echo "   이 경우 launchd 서비스가 PermissionError로 실행되지 않을 수 있습니다."
+  echo "   설치 완료 후 서비스가 동작하지 않으면 프로젝트 폴더를 홈 디렉토리($HOME)로 이동해 주세요."
+  echo ""
 fi
 
 ARCH="$(uname -m)"
@@ -177,6 +186,10 @@ fi
 step "launchd 서비스 파일 생성/등록"
 mkdir -p "${LAUNCH_AGENTS_DIR}" "${LOG_DIR}"
 
+# Python 및 Node 실행 경로 탐색 (시스템 기본 경로가 꼬일 경우를 대비해 브루 경로 우선 탐색)
+PYTHON_EXECUTABLE="$(command -v python3.11 || command -v python3 || echo "python3")"
+NODE_EXECUTABLE="$(command -v node || echo "node")"
+
 cat > "${SERVER_PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -188,7 +201,7 @@ cat > "${SERVER_PLIST}" <<PLIST
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>cd "${PROJECT_DIR}" &amp;&amp; python3 -m uvicorn server.main:app --host 127.0.0.1 --port 8000</string>
+    <string>cd "${PROJECT_DIR}" &amp;&amp; "${PYTHON_EXECUTABLE}" -m uvicorn server.main:app --host 127.0.0.1 --port 8000</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${PROJECT_DIR}</string>
@@ -215,7 +228,7 @@ cat > "${SCHEDULER_PLIST}" <<PLIST
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>cd "${PROJECT_DIR}" &amp;&amp; python3 scripts/run_scheduler.py</string>
+    <string>cd "${PROJECT_DIR}" &amp;&amp; "${PYTHON_EXECUTABLE}" scripts/run_scheduler.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${PROJECT_DIR}</string>
@@ -231,10 +244,39 @@ cat > "${SCHEDULER_PLIST}" <<PLIST
 </plist>
 PLIST
 
+cat > "${FRONTEND_PLIST}" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autoblog.frontend</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "${FRONTEND_DIR}" &amp;&amp; "${NODE_EXECUTABLE}" ./node_modules/.bin/next start -p 3000</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${FRONTEND_DIR}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/frontend.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/frontend.err.log</string>
+</dict>
+</plist>
+PLIST
+
 launchctl unload "${SERVER_PLIST}" >/dev/null 2>&1 || true
 launchctl unload "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
+launchctl unload "${FRONTEND_PLIST}" >/dev/null 2>&1 || true
 launchctl load "${SERVER_PLIST}"
 launchctl load "${SCHEDULER_PLIST}"
+launchctl load "${FRONTEND_PLIST}"
 
 step "CLI 심볼릭 링크 등록"
 CLI_SOURCE="${PROJECT_DIR}/scripts/auto-blog"
