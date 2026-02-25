@@ -1,13 +1,8 @@
 import json
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
-@dataclass
-class ScheduleAllocationItem:
-    category: str
-    topic_mode: str
-    count: int
-    percentage: Optional[int] = None
+# Pydantic 모델을 단일 진실의 원천으로 사용 (dataclass 중복 제거)
+from server.schemas.onboarding import ScheduleAllocationItem
 
 class PersonaLabRequest(Protocol):
     structure_score: int

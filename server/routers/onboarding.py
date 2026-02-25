@@ -61,6 +61,7 @@ def get_persona_questions() -> PersonaQuestionBankResponse:
 
 
 @router.get("/onboarding", response_model=OnboardingStatusResponse, summary="온보딩 상태 조회")
+@router.get("/wizard/status", response_model=OnboardingStatusResponse, summary="온보딩 상태 조회(alias)")
 def get_onboarding_status(
     job_store: JobStore = Depends(get_job_store),
 ) -> OnboardingStatusResponse:
