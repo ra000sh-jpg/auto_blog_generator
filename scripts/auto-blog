@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 프로젝트 루트 경로를 계산한다.
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
+SERVER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.server.plist"
+SCHEDULER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.scheduler.plist"
+SERVER_LABEL="com.autoblog.server"
+SCHEDULER_LABEL="com.autoblog.scheduler"
+
+usage() {
+  cat <<USAGE
+사용법: auto-blog <command>
+
+명령어:
+  start    서비스 시작 (server + scheduler)
+  stop     서비스 중지 (server + scheduler)
+  restart  서비스 재시작
+  update   업데이트 스크립트 실행
+  status   서비스 상태 + 현재 커밋 표시
+  logs     최신 로그 tail -f
+USAGE
+}
+
+start_services() {
+  echo "🔧 서비스 시작..."
+  if [[ -f "${SERVER_PLIST}" ]]; then
+    launchctl load "${SERVER_PLIST}" >/dev/null 2>&1 || true
+  fi
+  if [[ -f "${SCHEDULER_PLIST}" ]]; then
+    launchctl load "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
+  fi
+  echo "✅ 시작 완료"
+}
+
+stop_services() {
+  echo "🔧 서비스 중지..."
+  if [[ -f "${SERVER_PLIST}" ]]; then
+    launchctl unload "${SERVER_PLIST}" >/dev/null 2>&1 || true
+  fi
+  if [[ -f "${SCHEDULER_PLIST}" ]]; then
+    launchctl unload "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
+  fi
+  echo "✅ 중지 완료"
+}
+
+status_services() {
+  local server_status scheduler_status commit_hash
+
+  if launchctl list | grep -q "${SERVER_LABEL}"; then
+    server_status="running"
+  else
+    server_status="stopped"
+  fi
+
+  if launchctl list | grep -q "${SCHEDULER_LABEL}"; then
+    scheduler_status="running"
+  else
+    scheduler_status="stopped"
+  fi
+
+  commit_hash="$(cd "${PROJECT_DIR}" && git rev-parse --short HEAD)"
+  echo "server: ${server_status}"
+  echo "scheduler: ${scheduler_status}"
+  echo "commit: ${commit_hash}"
+}
+
+tail_latest_log() {
+  local latest_log
+  latest_log="$(ls -1t "${PROJECT_DIR}"/logs/*.log 2>/dev/null | head -n 1 || true)"
+  if [[ -z "${latest_log}" ]]; then
+    echo "❌ logs 디렉터리에서 로그 파일을 찾지 못했습니다: ${PROJECT_DIR}/logs"
+    exit 1
+  fi
+  echo "🔧 최신 로그 추적: ${latest_log}"
+  tail -f "${latest_log}"
+}
+
+command_name="${1:-}"
+
+case "${command_name}" in
+  start)
+    start_services
+    ;;
+  stop)
+    stop_services
+    ;;
+  restart)
+    stop_services
+    start_services
+    ;;
+  update)
+    bash "${PROJECT_DIR}/scripts/update.sh"
+    ;;
+  status)
+    status_services
+    ;;
+  logs)
+    tail_latest_log
+    ;;
+  *)
+    usage
+    ;;
+esac

@@ -1,5 +1,31 @@
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
+function resolveApiBaseCandidates(): string[] {
+  const candidates: string[] = [];
+  const envBase = String(process.env.NEXT_PUBLIC_API_URL || "").trim();
+  if (envBase) {
+    candidates.push(envBase);
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol || "http:";
+    const hostname = window.location.hostname || "localhost";
+    candidates.push(`${protocol}//${hostname}:8000/api`);
+  }
+
+  candidates.push("http://localhost:8000/api");
+  candidates.push("http://127.0.0.1:8000/api");
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const normalized = candidate.replace(/\/+$/, "");
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+  return deduped;
+}
 
 
 export const DEFAULT_FALLBACK_CATEGORY = "다양한 생각들";
@@ -541,33 +567,123 @@ type RequestOptions = {
 
 async function requestJSON<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body } = options;
-  const response = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers: body
-      ? {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      }
-      : {
-        Accept: "application/json",
-      },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
+  const baseCandidates = resolveApiBaseCandidates();
+  let lastNetworkError: Error | null = null;
 
-  if (!response.ok) {
-    let detailMessage = "";
+  for (const baseUrl of baseCandidates) {
+    let response: Response;
     try {
-      const payload = (await response.json()) as { detail?: string };
-      detailMessage = typeof payload.detail === "string" ? payload.detail : "";
-    } catch {
-      detailMessage = "";
+      response = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: body
+          ? {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          }
+          : {
+            Accept: "application/json",
+          },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: "no-store",
+      });
+    } catch (networkError) {
+      if (networkError instanceof Error) {
+        lastNetworkError = networkError;
+      } else {
+        lastNetworkError = new Error("Network error");
+      }
+      continue;
     }
-    const baseMessage = `API request failed (${response.status})`;
-    throw new Error(detailMessage ? `${baseMessage}: ${detailMessage}` : baseMessage);
+
+    if (!response.ok) {
+      let detailMessage = "";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        detailMessage = typeof payload.detail === "string" ? payload.detail : "";
+      } catch {
+        detailMessage = "";
+      }
+      const baseMessage = `API request failed (${response.status})`;
+      throw new Error(detailMessage ? `${baseMessage}: ${detailMessage}` : baseMessage);
+    }
+
+    return (await response.json()) as T;
   }
 
-  return (await response.json()) as T;
+  const fallbackMessage = lastNetworkError?.message || "Failed to fetch";
+  throw new Error(`백엔드 API 연결 실패: ${fallbackMessage} (후보: ${baseCandidates.join(", ")})`);
+}
+
+async function requestTextStream(
+  path: string,
+  onChunk: (chunk: string) => void,
+  options: RequestOptions = {},
+): Promise<void> {
+  const { method = "GET", body } = options;
+  const baseCandidates = resolveApiBaseCandidates();
+  let lastNetworkError: Error | null = null;
+
+  for (const baseUrl of baseCandidates) {
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: body
+          ? {
+            Accept: "text/plain",
+            "Content-Type": "application/json",
+          }
+          : {
+            Accept: "text/plain",
+          },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: "no-store",
+      });
+    } catch (networkError) {
+      if (networkError instanceof Error) {
+        lastNetworkError = networkError;
+      } else {
+        lastNetworkError = new Error("Network error");
+      }
+      continue;
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      const baseMessage = `API request failed (${response.status})`;
+      throw new Error(errorText ? `${baseMessage}: ${errorText}` : baseMessage);
+    }
+
+    if (!response.body) {
+      const plainText = await response.text();
+      if (plainText) {
+        onChunk(plainText);
+      }
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      const chunk = decoder.decode(value, { stream: true });
+      if (chunk) {
+        onChunk(chunk);
+      }
+    }
+
+    const tail = decoder.decode();
+    if (tail) {
+      onChunk(tail);
+    }
+    return;
+  }
+
+  const fallbackMessage = lastNetworkError?.message || "Failed to fetch";
+  throw new Error(`백엔드 API 연결 실패: ${fallbackMessage} (후보: ${baseCandidates.join(", ")})`);
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
@@ -606,7 +722,12 @@ export async function fetchMetrics(page = 1, size = 20): Promise<MetricsResponse
 }
 
 export async function fetchOnboardingStatus(): Promise<OnboardingStatusResponse> {
-  return requestJSON<OnboardingStatusResponse>("/onboarding");
+  try {
+    return await requestJSON<OnboardingStatusResponse>("/onboarding");
+  } catch {
+    // 일부 환경에서 onboarding 경로가 네트워크 레벨에서 차단되는 경우를 우회한다.
+    return requestJSON<OnboardingStatusResponse>("/wizard/status");
+  }
 }
 
 export async function savePersonaLab(payload: PersonaLabPayload): Promise<PersonaLabResponse> {
@@ -968,4 +1089,27 @@ export type TelegramStatusResponse = {
 export async function fetchTelegramStatus(): Promise<TelegramStatusResponse> {
   // 미연결 기능: 백엔드 라우터가 존재하므로 향후 UI 연결 시 사용한다.
   return requestJSON<TelegramStatusResponse>("/telegram/status");
+}
+
+export type UpdateVersionResponse = {
+  commit_hash: string;
+  commit_message: string;
+  committed_at: string;
+};
+
+export type UpdateCheckResponse = {
+  behind: number;
+  up_to_date: boolean;
+};
+
+export async function fetchUpdateVersion(): Promise<UpdateVersionResponse> {
+  return requestJSON<UpdateVersionResponse>("/update/version");
+}
+
+export async function fetchUpdateCheck(): Promise<UpdateCheckResponse> {
+  return requestJSON<UpdateCheckResponse>("/update/check");
+}
+
+export async function runUpdate(onChunk: (chunk: string) => void): Promise<void> {
+  return requestTextStream("/update/run", onChunk, { method: "POST" });
 }

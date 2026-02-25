@@ -31,7 +31,7 @@ export default function SettingsPage() {
 
     async function loadConfig() {
       try {
-        const [configResponse, onboardingResponse, routerSettings, naverConnectState] = await Promise.all([
+        const [configResult, onboardingResult, routerResult, naverResult] = await Promise.allSettled([
           fetchConfig(),
           fetchOnboardingStatus(),
           fetchRouterSettings(),
@@ -41,10 +41,39 @@ export default function SettingsPage() {
           return;
         }
 
-        setData(configResponse);
-        setOnboardingData(onboardingResponse);
-        setRouterData(routerSettings);
-        setNaverStatus(naverConnectState);
+        const errors: string[] = [];
+
+        if (configResult.status === "fulfilled") {
+          setData(configResult.value);
+        } else {
+          errors.push(`config: ${configResult.reason instanceof Error ? configResult.reason.message : "요청 실패"}`);
+        }
+
+        if (onboardingResult.status === "fulfilled") {
+          setOnboardingData(onboardingResult.value);
+        } else {
+          errors.push(
+            `onboarding: ${onboardingResult.reason instanceof Error ? onboardingResult.reason.message : "요청 실패"}`
+          );
+        }
+
+        if (routerResult.status === "fulfilled") {
+          setRouterData(routerResult.value);
+        } else {
+          errors.push(`router: ${routerResult.reason instanceof Error ? routerResult.reason.message : "요청 실패"}`);
+        }
+
+        if (naverResult.status === "fulfilled") {
+          setNaverStatus(naverResult.value);
+        } else {
+          errors.push(`naver: ${naverResult.reason instanceof Error ? naverResult.reason.message : "요청 실패"}`);
+        }
+
+        if (errors.length > 0) {
+          setError(`일부 설정을 불러오지 못했습니다. ${errors.join(" | ")}`);
+        } else {
+          setError("");
+        }
       } catch (requestError) {
         if (!isMounted) {
           return;
@@ -90,7 +119,7 @@ export default function SettingsPage() {
         </p>
       )}
 
-      {!loading && !error && onboardingData && routerData && (
+      {!loading && onboardingData && routerData && (
         <>
           <EngineSettingsCard
             initialRouterSettings={routerData}
