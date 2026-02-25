@@ -27,10 +27,10 @@ ensure_brew_shellenv() {
 }
 
 ensure_node_toolchain_path() {
-  local node18_prefix node_prefix
-  node18_prefix="$(brew --prefix node@18 2>/dev/null || true)"
-  if [[ -n "${node18_prefix}" && -d "${node18_prefix}/bin" ]]; then
-    export PATH="${node18_prefix}/bin:${PATH}"
+  local node20_prefix node_prefix
+  node20_prefix="$(brew --prefix node@20 2>/dev/null || true)"
+  if [[ -n "${node20_prefix}" && -d "${node20_prefix}/bin" ]]; then
+    export PATH="${node20_prefix}/bin:${PATH}"
   fi
 
   node_prefix="$(brew --prefix node 2>/dev/null || true)"
@@ -49,17 +49,31 @@ raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
 }
 
-is_node_18_or_higher() {
+is_node_20_9_or_higher() {
   if ! command -v node >/dev/null 2>&1; then
     return 1
   fi
-  local version major
+  local version major minor
   version="$(node --version 2>/dev/null | sed 's/^v//')"
+  if [[ "${version}" != *.* ]]; then
+    return 1
+  fi
   major="${version%%.*}"
+  minor="${version#*.}"
+  minor="${minor%%.*}"
   if [[ ! "${major}" =~ ^[0-9]+$ ]]; then
     return 1
   fi
-  [[ "${major}" -ge 18 ]]
+  if [[ ! "${minor}" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if [[ "${major}" -gt 20 ]]; then
+    return 0
+  fi
+  if [[ "${major}" -lt 20 ]]; then
+    return 1
+  fi
+  [[ "${minor}" -ge 9 ]]
 }
 
 step "환경 확인"
@@ -119,16 +133,16 @@ else
   brew install python@3.11
 fi
 
-step "Node.js 18+ 확인"
-if is_node_18_or_higher; then
+step "Node.js 20.9+ 확인"
+if is_node_20_9_or_higher; then
   echo "✓ 이미 설치됨"
 else
-  brew install node@18
+  brew install node@20
 fi
 ensure_node_toolchain_path
 if ! command -v npm >/dev/null 2>&1; then
-  # node@18이 keg-only인 환경에서 PATH 노출을 시도한다.
-  brew link --overwrite --force node@18 >/dev/null 2>&1 || true
+  # node@20이 keg-only인 환경에서 PATH 노출을 시도한다.
+  brew link --overwrite --force node@20 >/dev/null 2>&1 || true
   ensure_node_toolchain_path
 fi
 if ! command -v npm >/dev/null 2>&1; then
