@@ -989,6 +989,182 @@ class JobStore:
 
             return Job.from_row(row) if row else None
 
+    def get_jobs_page(
+        self,
+        *,
+        statuses: Optional[List[str]] = None,
+        size: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """작업 목록 페이지 조회 결과(총 건수 + 목록)를 반환한다."""
+        safe_size = max(1, min(int(size or 20), 100))
+        safe_offset = max(0, int(offset or 0))
+        normalized_statuses = [
+            str(value).strip()
+            for value in (statuses or [])
+            if str(value).strip()
+        ]
+
+        with self.connection() as conn:
+            where_clause = ""
+            params: List[Any] = []
+            if normalized_statuses:
+                placeholders = ",".join(["?"] * len(normalized_statuses))
+                where_clause = f" WHERE status IN ({placeholders})"
+                params.extend(normalized_statuses)
+
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS total FROM jobs" + where_clause,
+                tuple(params),
+            ).fetchone()
+            total = int(total_row["total"]) if total_row else 0
+
+            query = """
+                SELECT *
+                FROM jobs
+            """
+            query = query + where_clause + """
+                ORDER BY created_at DESC
+                LIMIT ?
+                OFFSET ?
+            """
+            rows = conn.execute(
+                query,
+                tuple(params + [safe_size, safe_offset]),
+            ).fetchall()
+
+        return {
+            "total": total,
+            "items": [Job.from_row(row) for row in rows],
+        }
+
+    def get_post_metrics_page(
+        self,
+        *,
+        size: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """post_metrics 페이지 조회 결과(총 건수 + 요약 + 목록)를 반환한다."""
+        safe_size = max(1, min(int(size or 20), 100))
+        safe_offset = max(0, int(offset or 0))
+
+        with self.connection() as conn:
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS total FROM post_metrics"
+            ).fetchone()
+            total = int(total_row["total"]) if total_row else 0
+
+            summary_row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_posts,
+                    COALESCE(SUM(views), 0) AS total_views,
+                    COALESCE(SUM(likes), 0) AS total_likes,
+                    COALESCE(SUM(comments), 0) AS total_comments,
+                    COALESCE(AVG(views), 0.0) AS avg_views
+                FROM post_metrics
+                """
+            ).fetchone()
+
+            rows = conn.execute(
+                """
+                SELECT
+                    pm.post_id,
+                    pm.job_id,
+                    pm.title,
+                    pm.url,
+                    pm.published_at,
+                    pm.views,
+                    pm.likes,
+                    pm.comments,
+                    pm.shares,
+                    pm.ctr,
+                    pm.ai_total,
+                    pm.seo_score,
+                    pm.dup_score,
+                    pm.post_score,
+                    pm.snapshot_at,
+                    j.platform,
+                    j.persona_id,
+                    j.category
+                FROM post_metrics pm
+                LEFT JOIN jobs j ON pm.job_id = j.job_id
+                ORDER BY pm.snapshot_at DESC
+                LIMIT ?
+                OFFSET ?
+                """,
+                (safe_size, safe_offset),
+            ).fetchall()
+
+        return {
+            "total": total,
+            "summary": {
+                "total_posts": int(summary_row["total_posts"]) if summary_row else 0,
+                "total_views": int(summary_row["total_views"]) if summary_row else 0,
+                "total_likes": int(summary_row["total_likes"]) if summary_row else 0,
+                "total_comments": int(summary_row["total_comments"]) if summary_row else 0,
+                "avg_views": float(summary_row["avg_views"]) if summary_row else 0.0,
+            },
+            "items": [dict(row) for row in rows],
+        }
+
+    def get_dashboard_metrics_snapshot(self, *, today: str) -> Dict[str, Any]:
+        """대시보드 메트릭 집계를 위한 원시 통계를 반환한다."""
+        normalized_today = str(today or "").strip()
+        with self.connection() as conn:
+            today_row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM jobs
+                WHERE status = 'completed'
+                  AND date(updated_at) = ?
+                """,
+                (normalized_today,),
+            ).fetchone()
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'completed'"
+            ).fetchone()
+            vault_row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM idea_vault WHERE status = 'pending'"
+            ).fetchone()
+            vault_total_row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM idea_vault"
+            ).fetchone()
+            llm_rows = conn.execute(
+                """
+                SELECT
+                    metric_type,
+                    COUNT(*) AS total_calls,
+                    AVG(input_tokens) AS avg_input,
+                    AVG(output_tokens) AS avg_output
+                FROM job_metrics
+                GROUP BY metric_type
+                """
+            ).fetchall()
+            trend_rows = conn.execute(
+                """
+                SELECT
+                    strftime('%Y-%W', measured_at) AS week_key,
+                    MIN(substr(measured_at, 1, 10)) AS week_start,
+                    AVG(score_per_won) AS avg_score_per_won,
+                    AVG(quality_score) AS avg_quality_score
+                FROM model_performance_log
+                WHERE measured_at >= datetime('now', '-84 days')
+                  AND score_per_won IS NOT NULL
+                GROUP BY week_key
+                ORDER BY week_key ASC
+                LIMIT 12
+                """
+            ).fetchall()
+
+        return {
+            "today_published": int(today_row["cnt"]) if today_row else 0,
+            "total_published": int(total_row["cnt"]) if total_row else 0,
+            "idea_vault_pending": int(vault_row["cnt"]) if vault_row else 0,
+            "idea_vault_total": int(vault_total_row["cnt"]) if vault_total_row else 0,
+            "llm_rows": [dict(row) for row in llm_rows],
+            "trend_rows": [dict(row) for row in trend_rows],
+        }
+
     def list_recent_completed_jobs(
         self,
         limit: int = 200,

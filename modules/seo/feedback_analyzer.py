@@ -255,6 +255,7 @@ class FeedbackAnalyzer:
             except sqlite3.OperationalError:
                 master_channel_id = ""
 
+            # channel_filter_sql은 코드 내부에서만 선택되는 고정 SQL 조각(외부 입력 미포함)이다.
             channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = '' OR j.job_kind = 'master')"
             params: List[str] = [platform, f"-{days} days"]
             if master_channel_id:
@@ -263,7 +264,7 @@ class FeedbackAnalyzer:
 
             # post_metrics + jobs 조인
             try:
-                cursor = conn.execute(f"""
+                query = """
                     SELECT
                         pm.job_id, pm.title, pm.url, pm.views,
                         pm.published_at,
@@ -273,9 +274,9 @@ class FeedbackAnalyzer:
                     JOIN jobs j ON pm.job_id = j.job_id
                     WHERE j.platform = ?
                     AND pm.published_at >= datetime('now', ?)
-                    {channel_filter_sql}
-                    ORDER BY pm.views DESC
-                """, tuple(params))
+                """
+                query = query + "\n" + channel_filter_sql + "\nORDER BY pm.views DESC"
+                cursor = conn.execute(query, tuple(params))
 
                 results = []
                 for row in cursor.fetchall():

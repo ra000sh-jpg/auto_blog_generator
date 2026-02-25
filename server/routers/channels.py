@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field
 
 from modules.automation.job_store import JobStore
 from modules.automation.time_utils import parse_iso
-from modules.uploaders.publisher_factory import get_publisher
+from modules.uploaders.publisher_factory import get_publisher, get_supported_platforms
 from server.dependencies import get_job_store
 
 router = APIRouter()
 
-_SUPPORTED_PLATFORMS = {"naver", "tistory", "wordpress"}
-_IMPLEMENTED_SUB_PLATFORMS = {"naver", "tistory"}
+_SUPPORTED_PLATFORMS = set(get_supported_platforms())
+_IMPLEMENTED_SUB_PLATFORMS = set(get_supported_platforms())
 _MULTICHANNEL_SETTING_KEY = "multichannel_enabled"
 _CHANNEL_TEST_TIMEOUT_SEC = 10.0
 

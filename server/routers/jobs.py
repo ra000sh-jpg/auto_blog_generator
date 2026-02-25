@@ -56,6 +56,42 @@ class CreateJobResponse(BaseModel):
     category: str
 
 
+class JobDetailResponse(BaseModel):
+    """작업 상세 응답."""
+
+    job_id: str
+    status: str
+    title: str
+    seed_keywords: List[str]
+    platform: str
+    persona_id: str
+    scheduled_at: str
+    retry_count: int
+    max_retries: int
+    next_retry_at: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    claimed_at: Optional[str] = None
+    claimed_by: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    publish_attempt_id: Optional[str] = None
+    result_url: str = ""
+    thumbnail_url: str = ""
+    error_code: str = ""
+    error_message: str = ""
+    quality_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    seo_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    llm_call_count: int = 0
+    created_at: str
+    updated_at: str
+    completed_at: str = ""
+    job_kind: str = "master"
+    master_job_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    category: str = ""
+    prepared_payload: Dict[str, Any] = Field(default_factory=dict)
+
+
 def _serialize_job(job: Job) -> Dict[str, Any]:
     """Job dataclass를 API 응답용 dict로 변환한다."""
     payload = asdict(job)
@@ -98,33 +134,13 @@ def list_jobs(
     statuses = [
         token.strip() for token in (status_filter or "").split(",") if token.strip()
     ]
-
-    where_sql = ""
-    params: List[Any] = []
-    if statuses:
-        placeholders = ",".join(["?"] * len(statuses))
-        where_sql = f" WHERE status IN ({placeholders})"
-        params.extend(statuses)
-
-    with job_store.connection() as conn:
-        total_row = conn.execute(
-            f"SELECT COUNT(*) AS total FROM jobs{where_sql}",
-            tuple(params),
-        ).fetchone()
-        total = int(total_row["total"]) if total_row else 0
-
-        cursor = conn.execute(
-            f"""
-            SELECT *
-            FROM jobs
-            {where_sql}
-            ORDER BY created_at DESC
-            LIMIT ?
-            OFFSET ?
-            """,
-            tuple(params + [size, offset]),
-        )
-        jobs = [Job.from_row(row) for row in cursor.fetchall()]
+    page_payload = job_store.get_jobs_page(
+        statuses=statuses,
+        size=size,
+        offset=offset,
+    )
+    total = int(page_payload["total"])
+    jobs: List[Job] = page_payload["items"]
 
     pages = max(1, math.ceil(total / size)) if total else 1
     return JobsListResponse(
@@ -204,12 +220,13 @@ def create_job(
 
 @router.get(
     "/jobs/{job_id}",
+    response_model=JobDetailResponse,
     summary="작업 상세 조회",
 )
 def get_job_detail(
     job_id: str,
     job_store: JobStore = Depends(get_job_store),
-) -> Dict[str, Any]:
+) -> JobDetailResponse:
     """특정 작업(Job)의 상세 정보를 조회한다."""
     job = job_store.get_job(job_id)
     if not job:
@@ -217,4 +234,4 @@ def get_job_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"작업을 찾을 수 없습니다: {job_id}",
         )
-    return _serialize_job(job)
+    return JobDetailResponse(**_serialize_job(job))

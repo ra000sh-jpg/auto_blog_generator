@@ -1,14 +1,5 @@
-export const BASE_URL =
+const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
-
-// A-1: API 인증 토큰 헤더 유틸
-// NEXT_PUBLIC_API_TOKEN 환경변수가 있으면 X-API-Token 헤더를 자동으로 포함한다.
-export function getApiHeaders(extra?: Record<string, string>): HeadersInit {
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...extra };
-  const token = process.env.NEXT_PUBLIC_API_TOKEN ?? "";
-  if (token) headers["X-API-Token"] = token;
-  return headers;
-}
 
 
 export const DEFAULT_FALLBACK_CATEGORY = "다양한 생각들";
@@ -667,6 +658,7 @@ export async function saveOnboardingSchedule(
 export async function testTelegramSetup(
   payload: TelegramTestPayload,
 ): Promise<TelegramTestResponse> {
+  // 미연결 기능: 백엔드 라우터가 존재하므로 향후 UI 연결 시 사용한다.
   return requestJSON<TelegramTestResponse>("/onboarding/telegram/test", {
     method: "POST",
     body: payload,
@@ -700,6 +692,7 @@ export async function completeOnboarding(): Promise<CompleteOnboardingResponse> 
 export async function parseMagicInput(
   payload: MagicInputParsePayload,
 ): Promise<MagicInputParseResponse> {
+  // 미연결 기능: 백엔드 라우터가 존재하므로 향후 UI 연결 시 사용한다.
   return requestJSON<MagicInputParseResponse>("/magic-input/parse", {
     method: "POST",
     body: payload,
@@ -973,5 +966,6 @@ export type TelegramStatusResponse = {
 };
 
 export async function fetchTelegramStatus(): Promise<TelegramStatusResponse> {
+  // 미연결 기능: 백엔드 라우터가 존재하므로 향후 UI 연결 시 사용한다.
   return requestJSON<TelegramStatusResponse>("/telegram/status");
 }

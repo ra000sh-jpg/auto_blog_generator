@@ -207,65 +207,13 @@ async def _fetch_telegram_status(job_store: "JobStore") -> TelegramStatusData:
 def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
     """DB에서 발행 통계 및 LLM 비용을 집계한다."""
     today = _get_today_kst()
-
-    with job_store.connection() as conn:
-        # 오늘 발행 완료 건수
-        today_row = conn.execute(
-            """
-            SELECT COUNT(*) AS cnt FROM jobs
-            WHERE status = 'completed'
-              AND date(updated_at) = ?
-            """,
-            (today,),
-        ).fetchone()
-        today_published = int(today_row["cnt"]) if today_row else 0
-
-        # 전체 누적 발행 건수
-        total_row = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'completed'"
-        ).fetchone()
-        total_published = int(total_row["cnt"]) if total_row else 0
-
-        # Idea Vault pending
-        vault_row = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM idea_vault WHERE status = 'pending'"
-        ).fetchone()
-        idea_vault_pending = int(vault_row["cnt"]) if vault_row else 0
-
-        # Idea Vault 전체
-        vault_total_row = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM idea_vault"
-        ).fetchone()
-        idea_vault_total = int(vault_total_row["cnt"]) if vault_total_row else 0
-
-        # LLM 누적 비용 계산 (전체 기간)
-        llm_rows = conn.execute(
-            """
-            SELECT
-                metric_type,
-                COUNT(*) AS total_calls,
-                AVG(input_tokens) AS avg_input,
-                AVG(output_tokens) AS avg_output
-            FROM job_metrics
-            GROUP BY metric_type
-            """
-        ).fetchall()
-
-        trend_rows = conn.execute(
-            """
-            SELECT
-                strftime('%Y-%W', measured_at) AS week_key,
-                MIN(substr(measured_at, 1, 10)) AS week_start,
-                AVG(score_per_won) AS avg_score_per_won,
-                AVG(quality_score) AS avg_quality_score
-            FROM model_performance_log
-            WHERE measured_at >= datetime('now', '-84 days')
-              AND score_per_won IS NOT NULL
-            GROUP BY week_key
-            ORDER BY week_key ASC
-            LIMIT 12
-            """
-        ).fetchall()
+    snapshot = job_store.get_dashboard_metrics_snapshot(today=today)
+    today_published = int(snapshot.get("today_published", 0))
+    total_published = int(snapshot.get("total_published", 0))
+    idea_vault_pending = int(snapshot.get("idea_vault_pending", 0))
+    idea_vault_total = int(snapshot.get("idea_vault_total", 0))
+    llm_rows = list(snapshot.get("llm_rows", []))
+    trend_rows = list(snapshot.get("trend_rows", []))
 
     total_cost_usd = 0.0
     total_llm_calls = 0

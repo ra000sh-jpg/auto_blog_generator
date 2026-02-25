@@ -43,63 +43,18 @@ def get_metrics(
 ) -> MetricsListResponse:
     """최근 발행 포스트의 성과 데이터를 반환한다."""
     offset = (page - 1) * size
-
-    with job_store.connection() as conn:
-        total_row = conn.execute(
-            "SELECT COUNT(*) AS total FROM post_metrics"
-        ).fetchone()
-        total = int(total_row["total"]) if total_row else 0
-
-        summary_row = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS total_posts,
-                COALESCE(SUM(views), 0) AS total_views,
-                COALESCE(SUM(likes), 0) AS total_likes,
-                COALESCE(SUM(comments), 0) AS total_comments,
-                COALESCE(AVG(views), 0.0) AS avg_views
-            FROM post_metrics
-            """
-        ).fetchone()
-
-        cursor = conn.execute(
-            """
-            SELECT
-                pm.post_id,
-                pm.job_id,
-                pm.title,
-                pm.url,
-                pm.published_at,
-                pm.views,
-                pm.likes,
-                pm.comments,
-                pm.shares,
-                pm.ctr,
-                pm.ai_total,
-                pm.seo_score,
-                pm.dup_score,
-                pm.post_score,
-                pm.snapshot_at,
-                j.platform,
-                j.persona_id,
-                j.category
-            FROM post_metrics pm
-            LEFT JOIN jobs j ON pm.job_id = j.job_id
-            ORDER BY pm.snapshot_at DESC
-            LIMIT ?
-            OFFSET ?
-            """,
-            (size, offset),
-        )
-        items = [dict(row) for row in cursor.fetchall()]
+    metrics_payload = job_store.get_post_metrics_page(size=size, offset=offset)
+    total = int(metrics_payload["total"])
+    summary_row = metrics_payload["summary"]
+    items = metrics_payload["items"]
 
     pages = max(1, math.ceil(total / size)) if total else 1
     summary = MetricsSummary(
-        total_posts=int(summary_row["total_posts"]) if summary_row else 0,
-        total_views=int(summary_row["total_views"]) if summary_row else 0,
-        total_likes=int(summary_row["total_likes"]) if summary_row else 0,
-        total_comments=int(summary_row["total_comments"]) if summary_row else 0,
-        avg_views=float(summary_row["avg_views"]) if summary_row else 0.0,
+        total_posts=int(summary_row["total_posts"]),
+        total_views=int(summary_row["total_views"]),
+        total_likes=int(summary_row["total_likes"]),
+        total_comments=int(summary_row["total_comments"]),
+        avg_views=float(summary_row["avg_views"]),
     )
 
     return MetricsListResponse(

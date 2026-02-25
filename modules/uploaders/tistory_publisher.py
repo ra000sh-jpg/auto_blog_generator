@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .base_publisher import BasePublisher, PublishResult
+from .publisher_registry import register_publisher
 
 if TYPE_CHECKING:
     from ..images.placement import ImageInsertionPoint
 
 
+@register_publisher("tistory")
 class TistoryPublisher(BasePublisher):
     """티스토리 Open API 기반 발행기."""
 
@@ -25,11 +27,36 @@ class TistoryPublisher(BasePublisher):
     def __init__(
         self,
         *,
-        access_token: str,
-        blog_name: str,
+        access_token: str = "",
+        blog_name: str = "",
+        channel: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self.access_token = str(access_token or "").strip()
-        self.blog_name = str(blog_name or "").strip()
+        resolved_access_token = str(access_token or "").strip()
+        resolved_blog_name = str(blog_name or "").strip()
+
+        if isinstance(channel, dict):
+            raw_auth = str(channel.get("auth_json", "{}") or "{}")
+            try:
+                auth = json.loads(raw_auth)
+            except Exception:
+                auth = {}
+            if not isinstance(auth, dict):
+                auth = {}
+
+            if not resolved_access_token:
+                resolved_access_token = str(auth.get("access_token", "")).strip()
+            if not resolved_blog_name:
+                resolved_blog_name = str(auth.get("blog_name", "")).strip()
+            if not resolved_blog_name:
+                raw_url = str(channel.get("blog_url", "")).strip()
+                if raw_url and "://" not in raw_url:
+                    raw_url = f"https://{raw_url}"
+                hostname = str(urlparse(raw_url).hostname or "").strip().lower()
+                if hostname.endswith(".tistory.com"):
+                    resolved_blog_name = hostname.replace(".tistory.com", "").strip()
+
+        self.access_token = resolved_access_token
+        self.blog_name = resolved_blog_name
 
     async def publish(
         self,

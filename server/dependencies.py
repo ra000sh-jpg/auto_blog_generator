@@ -32,35 +32,6 @@ def get_job_store() -> JobStore:
 
 
 @lru_cache(maxsize=1)
-def get_pipeline_service() -> PipelineService:
-    """PipelineService 인스턴스를 반환한다.
-
-    현재 Step 1에서는 라우터에서 직접 사용하지 않지만,
-    이후 확장을 위해 DI 구조만 먼저 고정한다.
-    """
-    config = get_app_config()
-    quality_evaluator = None
-    try:
-        from modules.llm.provider_factory import create_client
-        from modules.automation.quality_evaluator import QualityEvaluator
-        eval_client = create_client(
-            provider=config.llm.primary_provider,
-            model=config.llm.primary_model,
-            timeout_sec=config.llm.timeout_sec,
-        )
-        quality_evaluator = QualityEvaluator(llm_client=eval_client)
-    except Exception:
-        pass
-
-    return PipelineService(
-        job_store=get_job_store(),
-        publisher=_NoopPublisher(),
-        generate_fn=stub_generate_fn,
-        quality_evaluator=quality_evaluator,
-    )
-
-
-@lru_cache(maxsize=1)
 def get_llm_router() -> LLMRouter:
     """LLM 라우터 인스턴스를 반환한다."""
     return LLMRouter(

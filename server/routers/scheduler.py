@@ -90,16 +90,20 @@ def _get_kst_now_iso() -> str:
 
 def _next_publish_slot_kst(scheduler: Any) -> Optional[str]:
     """스케줄러의 다음 발행 슬롯 시각을 KST ISO 문자열로 반환한다."""
+    get_next_slot = getattr(scheduler, "get_next_publish_slot_kst", None)
+    if callable(get_next_slot):
+        return get_next_slot()
+
+    # 하위 호환: legacy private 접근 경로
     try:
-        now_local = scheduler._get_now_local()
-        today_completed = scheduler._get_today_post_count()
+        get_completed = getattr(scheduler, "get_today_post_count", None)
+        today_completed = int(get_completed()) if callable(get_completed) else 0
         slots = scheduler._daily_publish_slots
         if not slots:
             return None
         idx = today_completed
         if idx < len(slots):
-            slot = slots[idx]
-            return slot.isoformat(timespec="seconds")
+            return slots[idx].isoformat(timespec="seconds")
     except Exception:
         pass
     return None
@@ -121,6 +125,9 @@ async def get_scheduler_status(
     """스케줄러 실행 상태와 오늘의 발행 현황을 반환한다."""
     scheduler = get_scheduler_instance()
     scheduler_running = scheduler is not None and getattr(scheduler, "_scheduler", None) is not None
+    next_slot = None
+    if scheduler_running and scheduler:
+        next_slot = _next_publish_slot_kst(scheduler)
 
     # 날짜
     try:
@@ -160,11 +167,6 @@ async def get_scheduler_status(
     queued_master = int(queue_stats.get("queued_master", 0))
     queued_sub = int(queue_stats.get("queued_sub", 0))
     ready_to_publish = ready_master + ready_sub
-
-    # 다음 슬롯
-    next_slot = None
-    if scheduler_running and scheduler:
-        next_slot = _next_publish_slot_kst(scheduler)
 
     return SchedulerStatusResponse(
         scheduler_running=scheduler_running,
@@ -257,7 +259,7 @@ async def trigger_seed() -> TriggerResponse:
         # 중복 방지 날짜 키를 초기화해 강제 재실행
         if scheduler.job_store:
             scheduler.job_store.set_system_setting("scheduler_last_seed_date", "")
-        await scheduler._run_daily_quota_seed()
+        await scheduler.trigger_seed_cycle()
         count_raw = scheduler.job_store.get_system_setting("scheduler_last_seed_count", "0") if scheduler.job_store else "0"
         return TriggerResponse(ok=True, message=f"큐 시드 완료 ({count_raw}건 생성)")
     except Exception as exc:
@@ -276,8 +278,7 @@ async def trigger_draft() -> TriggerResponse:
     if scheduler is None:
         raise HTTPException(status_code=503, detail="스케줄러가 실행 중이 아닙니다.")
     try:
-        await scheduler._run_draft_prefetch()
-        ready = scheduler._get_ready_draft_count()
+        ready = await scheduler.trigger_draft_cycle()
         return TriggerResponse(ok=True, message=f"초안 선생성 완료 (ready_to_publish={ready}건)")
     except Exception as exc:
         logger.error("Manual draft trigger failed: %s", exc)
@@ -295,7 +296,7 @@ async def trigger_publish() -> TriggerResponse:
     if scheduler is None:
         raise HTTPException(status_code=503, detail="스케줄러가 실행 중이 아닙니다.")
     try:
-        published = await scheduler._publish_next_available_job()
+        published = await scheduler.trigger_publish_cycle()
         if published:
             return TriggerResponse(ok=True, message="발행 1건 완료")
         return TriggerResponse(ok=False, message="발행할 준비된 초안이 없습니다.")

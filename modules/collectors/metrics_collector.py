@@ -103,12 +103,13 @@ class MetricsCollector:
                 f"-{self.max_age_days} days",
                 f"-{self.min_age_hours} hours",
             ]
+            # channel_filter_sql은 코드 내부에서만 선택되는 고정 SQL 조각(외부 입력 미포함)이다.
             channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = '' OR j.job_kind = 'master')"
             if master_channel_id:
                 channel_filter_sql = "AND (j.channel_id IS NULL OR j.channel_id = ?)"
                 params.append(master_channel_id)
 
-            cursor = conn.execute(f"""
+            query = """
                 SELECT
                     j.job_id,
                     j.title,
@@ -125,14 +126,16 @@ class MetricsCollector:
                 AND j.result_url != ''
                 AND COALESCE(NULLIF(j.completed_at, ''), j.updated_at) >= datetime('now', ?)
                 AND COALESCE(NULLIF(j.completed_at, ''), j.updated_at) <= datetime('now', ?)
-                {channel_filter_sql}
+            """
+            query = query + "\n" + channel_filter_sql + """
                 AND (
                     pm.snapshot_at IS NULL
                     OR pm.snapshot_at < datetime('now', '-7 days')
                 )
                 ORDER BY COALESCE(NULLIF(j.completed_at, ''), j.updated_at) DESC
                 LIMIT 50
-            """, tuple(params))
+            """
+            cursor = conn.execute(query, tuple(params))
 
             return [dict(row) for row in cursor.fetchall()]
 

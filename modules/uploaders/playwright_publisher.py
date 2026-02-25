@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..exceptions import PublishError, SessionExpiredError
 from .base_publisher import PublishResult
+from .publisher_registry import register_publisher
 
 if TYPE_CHECKING:
     from ..images.placement import ImageInsertionPoint
@@ -79,6 +80,7 @@ async def _apply_stealth(page) -> None:
         logger.warning(f"playwright-stealth 적용 실패 (무시하고 진행): {e}")
 
 
+@register_publisher("naver")
 class PlaywrightPublisher:
     """
     네이버 블로그 Playwright 발행기.

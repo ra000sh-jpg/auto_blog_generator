@@ -6,16 +6,16 @@ Groq, Cerebras, Gemini Flash 등 OpenAI Chat Completions API를 지원하는
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import random
 from typing import Any, Optional
 
 import httpx
 
+from .. import constants
 from ..exceptions import RateLimitError
 from .base_client import BaseLLMClient, LLMResponse
+from .retry_helper import llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class OpenAICompatClient(BaseLLMClient):
         model: str,
         provider: str,
         api_key: Optional[str] = None,
-        timeout_sec: float = 60.0,
+        timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     ):
         resolved_key = api_key or os.getenv(api_key_env, "")
         if not resolved_key:
@@ -108,9 +108,11 @@ class OpenAICompatClient(BaseLLMClient):
         max_tokens: int = 4096,
     ) -> LLMResponse:
         attempts = max(1, max_retries)
-        last_error: Optional[Exception] = None
+        current_attempt = 0
 
-        for attempt in range(1, attempts + 1):
+        async def _execute() -> LLMResponse:
+            nonlocal current_attempt
+            current_attempt += 1
             try:
                 return await self.generate(
                     system_prompt=system_prompt,
@@ -119,40 +121,17 @@ class OpenAICompatClient(BaseLLMClient):
                     max_tokens=max_tokens,
                 )
             except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code == 429:
-                    if attempt >= attempts:
-                        raise RateLimitError(f"{self._provider} rate limited (429)") from exc
-                    delay = min(2**attempt, 30) + random.uniform(0.1, 0.5)
-                    logger.warning(
-                        "%s rate limited, retrying",
-                        self._provider,
-                        extra={"attempt": attempt, "delay_sec": delay},
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                if attempt >= attempts:
-                    raise
-                delay = min(2**attempt, 30) + random.uniform(0.1, 0.5)
-                logger.warning(
-                    "%s transient http error, retrying",
-                    self._provider,
-                    extra={"attempt": attempt, "delay_sec": delay, "status_code": exc.response.status_code},
-                )
-                await asyncio.sleep(delay)
-            except Exception as exc:
-                last_error = exc
-                if attempt >= attempts:
-                    raise
-                delay = float(attempt)
-                logger.warning(
-                    "%s transient error, retrying",
-                    self._provider,
-                    extra={"attempt": attempt, "delay_sec": delay},
-                )
-                await asyncio.sleep(delay)
+                if exc.response.status_code == 429 and current_attempt >= attempts:
+                    raise RateLimitError(f"{self._provider} rate limited (429)") from exc
+                raise
 
-        raise last_error or RuntimeError(f"{self._provider} API failed after retries")
+        return await llm_retry(
+            func=_execute,
+            attempts=attempts,
+            base_delay=constants.LLM_RETRY_BASE_DELAY_SEC,
+            logger=logger,
+            provider=self._provider,
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -162,7 +141,7 @@ class OpenAICompatClient(BaseLLMClient):
 
 def create_groq_client(
     model: str = "llama-3.3-70b-versatile",
-    timeout_sec: float = 60.0,
+    timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     api_key: Optional[str] = None,
 ) -> OpenAICompatClient:
     return OpenAICompatClient(
@@ -177,7 +156,7 @@ def create_groq_client(
 
 def create_cerebras_client(
     model: str = "llama3.3-70b",
-    timeout_sec: float = 60.0,
+    timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     api_key: Optional[str] = None,
 ) -> OpenAICompatClient:
     return OpenAICompatClient(
@@ -192,7 +171,7 @@ def create_cerebras_client(
 
 def create_gemini_client(
     model: str = "gemini-2.0-flash",
-    timeout_sec: float = 60.0,
+    timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     api_key: Optional[str] = None,
 ) -> OpenAICompatClient:
     return OpenAICompatClient(
@@ -207,7 +186,7 @@ def create_gemini_client(
 
 def create_openai_client(
     model: str = "gpt-4.1-mini",
-    timeout_sec: float = 60.0,
+    timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     api_key: Optional[str] = None,
 ) -> OpenAICompatClient:
     return OpenAICompatClient(

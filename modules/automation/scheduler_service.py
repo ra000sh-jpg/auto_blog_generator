@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 from .resource_monitor import CpuHysteresisMonitor
 from .. import constants
 from ..constants import DEFAULT_FALLBACK_CATEGORY
+from .scheduler_seed import run_daily_quota_seed
+from .scheduler_workers import generator_worker_loop, publisher_worker_loop
 from .time_utils import parse_iso
 
 logger = logging.getLogger(__name__)
@@ -322,29 +324,11 @@ class SchedulerService:
 
     async def _generator_worker_loop(self) -> None:
         """CPU 여유 시 초안 선생성을 수행하는 워커 루프."""
-        try:
-            while True:
-                try:
-                    await self._run_sub_job_catchup()
-                    await self._run_draft_prefetch()
-                except Exception as exc:
-                    logger.error("Generator worker error: %s", exc)
-                await asyncio.sleep(self.generator_poll_seconds)
-        except asyncio.CancelledError:
-            logger.info("Generator worker stopped")
+        await generator_worker_loop(self)
 
     async def _publisher_worker_loop(self) -> None:
         """시간 분포 기반 발행 워커 루프."""
-        try:
-            while True:
-                try:
-                    await self._run_sub_job_publish_catchup()
-                    await self._run_daily_target_check()
-                except Exception as exc:
-                    logger.error("Publisher worker error: %s", exc)
-                await asyncio.sleep(self.publisher_poll_seconds)
-        except asyncio.CancelledError:
-            logger.info("Publisher worker stopped")
+        await publisher_worker_loop(self)
 
     async def _run_startup_catchup(self) -> None:
         """시작 시점에 놓친 작업을 보정 실행한다."""
@@ -545,7 +529,7 @@ class SchedulerService:
             if published:
                 processed += 1
                 published_count += 1
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(constants.SCHEDULER_SUBJOB_STEP_SLEEP_SEC)
                 continue
 
             ready_count = self._get_ready_count(job_kind=self._sub_job_kind())
@@ -558,7 +542,7 @@ class SchedulerService:
             if prepared:
                 processed += 1
                 prepared_count += 1
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(constants.SCHEDULER_SUBJOB_STEP_SLEEP_SEC)
                 continue
 
             if ready_count > 0:
@@ -737,7 +721,7 @@ class SchedulerService:
                 if not prepared:
                     break
                 prepared_count += 1
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(constants.SCHEDULER_DRAFT_PREFETCH_STEP_SLEEP_SEC)
         finally:
             # watchdog 정리: 루프가 끝나면 이벤트를 set 해 watchdog 코루틴도 종료
             interrupt_event.set()
@@ -939,151 +923,20 @@ class SchedulerService:
 
     async def _run_daily_quota_seed(self) -> None:
         """매일 자정에 사용자 설정 비율대로 큐를 생성한다."""
-        if not self.job_store:
-            return
+        await run_daily_quota_seed(self)
 
-        now_local = self._get_now_local()
-        today_local = now_local.date().isoformat()
-        last_seed_date = self.job_store.get_system_setting("scheduler_last_seed_date", "")
-        if last_seed_date == today_local:
-            return
+    async def trigger_seed_cycle(self) -> None:
+        """시드 잡 생성 사이클을 1회 실행한다."""
+        await self._run_daily_quota_seed()
 
-        daily_target, allocations = self._load_daily_quota_allocations()
-        if daily_target <= 0:
-            return
+    async def trigger_draft_cycle(self) -> int:
+        """초안 선생성 사이클을 1회 실행하고, 최신 준비 건수를 반환한다."""
+        await self._run_draft_prefetch()
+        return self.get_ready_draft_count()
 
-        idea_vault_quota = self._get_configured_idea_vault_quota(daily_target)
-        non_vault_target = max(0, daily_target - idea_vault_quota)
-        
-        # 가중 확률 랜덤 추출 (random.choices)
-        selected_categories = []
-        if non_vault_target > 0 and allocations:
-            import random
-            population = []
-            weights = []
-            for alloc in allocations:
-                w = int(alloc.get("count", 0))
-                if w > 0:
-                    population.append(alloc)
-                    weights.append(w)
-            
-            if population:
-                selected_categories = random.choices(population, weights=weights, k=non_vault_target)
-            else:
-                # 가중치가 모두 0인 경우 fallback으로 채움
-                fallback_alloc = {
-                    "category": DEFAULT_FALLBACK_CATEGORY,
-                    "topic_mode": "cafe"
-                }
-                selected_categories = [fallback_alloc] * non_vault_target
-
-        created = 0
-        created_non_vault = 0
-        created_idea_vault = 0
-        seed_base_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        sequence = 0
-        
-        for allocation in selected_categories:
-            category_name = str(allocation.get("category", "")).strip()
-            topic_mode = str(allocation.get("topic_mode", "cafe")).strip()
-            if not category_name:
-                continue
-
-            persona_id = self._persona_id_for_topic(topic_mode)
-            scheduled_at = (seed_base_utc + timedelta(minutes=sequence)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            sequence += 1
-            title = self._build_seed_title(
-                category=category_name,
-                topic_mode=topic_mode,
-                local_date=today_local,
-                sequence=sequence,
-            )
-            seed_keywords = self._build_seed_keywords(category_name, topic_mode)
-            success = self.job_store.schedule_job(
-                job_id=str(uuid.uuid4()),
-                title=title,
-                seed_keywords=seed_keywords,
-                platform="naver",
-                persona_id=persona_id,
-                scheduled_at=scheduled_at,
-                max_retries=3,
-                category=category_name,
-            )
-            if success:
-                created += 1
-                created_non_vault += 1
-
-        if idea_vault_quota > 0:
-            claim_fn = getattr(self.job_store, "claim_random_idea_vault_items", None)
-            release_fn = getattr(self.job_store, "release_idea_vault_job_lock", None)
-            if claim_fn and callable(claim_fn):
-                idea_job_ids = [str(uuid.uuid4()) for _ in range(idea_vault_quota)]
-                claimed_items = claim_fn(idea_job_ids)
-                if len(claimed_items) < idea_vault_quota:
-                    logger.info(
-                        "Idea vault stock is short; strict holiday rule keeps unfilled quota",
-                        extra={
-                            "requested": idea_vault_quota,
-                            "claimed": len(claimed_items),
-                        },
-                    )
-                for claimed in claimed_items:
-                    idea_job_id = str(claimed.get("queued_job_id", "")).strip()
-                    raw_text = str(claimed.get("raw_text", "")).strip()
-                    category_name = str(claimed.get("mapped_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
-                    topic_mode = self._normalize_topic_mode(str(claimed.get("topic_mode", "")).strip())
-                    if not idea_job_id or not raw_text:
-                        continue
-                    sequence += 1
-                    scheduled_at = (
-                        seed_base_utc + timedelta(minutes=sequence)
-                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    title = self._build_vault_seed_title(
-                        raw_text=raw_text,
-                        local_date=today_local,
-                        sequence=sequence,
-                    )
-                    seed_keywords = self._build_vault_seed_keywords(
-                        raw_text=raw_text,
-                        category=category_name,
-                        topic_mode=topic_mode,
-                    )
-                    persona_id = self._persona_id_for_topic(topic_mode)
-                    success = self.job_store.schedule_job(
-                        job_id=idea_job_id,
-                        title=title,
-                        seed_keywords=seed_keywords,
-                        platform="naver",
-                        persona_id=persona_id,
-                        scheduled_at=scheduled_at,
-                        max_retries=3,
-                        tags=["idea_vault"],
-                        category=category_name,
-                    )
-                    if success:
-                        created += 1
-                        created_idea_vault += 1
-                    elif release_fn and callable(release_fn):
-                        release_fn(idea_job_id)
-            else:
-                logger.debug("Idea vault claim function is not available")
-
-        self.job_store.set_system_setting("scheduler_last_seed_date", today_local)
-        self.job_store.set_system_setting("scheduler_last_seed_count", str(created))
-        self.job_store.set_system_setting("scheduler_last_seed_non_vault_count", str(created_non_vault))
-        self.job_store.set_system_setting("scheduler_last_seed_idea_vault_count", str(created_idea_vault))
-        logger.info(
-            "Daily quota seed completed",
-            extra={
-                "date": today_local,
-                "target": daily_target,
-                "created_count": created,
-                "allocation_count": len(selected_categories),
-                "idea_vault_quota": idea_vault_quota,
-                "created_non_vault": created_non_vault,
-                "created_idea_vault": created_idea_vault,
-            },
-        )
+    async def trigger_publish_cycle(self) -> bool:
+        """준비된 초안 1건을 즉시 발행하고 발행 결과를 반환한다."""
+        return await self._publish_next_available_job()
 
     def _week_start_local(self, now_local: datetime) -> date:
         """현재 시각 기준 주 시작일(월요일)을 반환한다."""
@@ -1538,6 +1391,10 @@ class SchedulerService:
                 return int(get_count())
         return 0
 
+    def get_ready_draft_count(self) -> int:
+        """외부 호출용으로 현재 ready 초안 개수를 조회한다."""
+        return self._get_ready_draft_count()
+
     def _get_ready_count(self, job_kind: Optional[str] = None) -> int:
         """지정한 잡 kind의 ready 상태 개수를 반환한다."""
         if not self.job_store:
@@ -1659,6 +1516,25 @@ class SchedulerService:
             )
         except TypeError:
             return self.job_store.get_today_completed_count()
+
+    def get_today_post_count(self) -> int:
+        """외부 호출용으로 당일 마스터 발행 건수를 조회한다."""
+        return self._get_today_post_count()
+
+    def get_next_publish_slot_kst(self) -> Optional[str]:
+        """다음 발행 슬롯 시각을 KST ISO 문자열로 반환한다."""
+        try:
+            now_local = self._get_now_local()
+            today_completed = self._get_today_post_count()
+            slots = self._daily_publish_slots
+            if not slots:
+                return None
+            idx = today_completed
+            if idx < len(slots):
+                return slots[idx].isoformat(timespec="seconds")
+        except Exception:
+            pass
+        return None
 
     def _get_last_post_time(self) -> Optional[datetime]:
         if not self.job_store:
@@ -1834,7 +1710,7 @@ async def run_scheduler_forever(
 
     try:
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(constants.SCHEDULER_DAEMON_KEEPALIVE_SEC)
     except (KeyboardInterrupt, asyncio.CancelledError):
         await scheduler.stop()
     finally:
