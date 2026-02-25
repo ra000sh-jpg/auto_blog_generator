@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from modules.images import DashScopeImageClient
+from modules.images.dashscope_image_client import DashScopeImageClient
 
 
 async def main() -> None:

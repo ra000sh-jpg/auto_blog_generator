@@ -323,6 +323,16 @@ class TelegramVerifyResponse(BaseModel):
     used_fallback: bool = False
 
 
+class TelegramWebhookResponse(BaseModel):
+    """텔레그램 웹훅 처리 응답."""
+
+    ok: bool
+    stored: bool = False
+    reason: Optional[str] = None
+    mapped_category: Optional[str] = None
+    auth_verified: Optional[bool] = None
+
+
 @router.post(
     "/telegram/verify-token",
     response_model=TelegramVerifyTokenResponse,
@@ -432,6 +442,7 @@ async def verify_telegram_connection(
 
 @router.post(
     "/telegram/webhook",
+    response_model=TelegramWebhookResponse,
     summary="텔레그램 봇 Webhook 수신 (Track B)",
     status_code=200,
 )
@@ -439,7 +450,7 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
     job_store: Any = Depends(get_job_store),
-) -> Dict[str, Any]:
+) -> TelegramWebhookResponse:
     """텔레그램 봇으로 전송된 메시지를 수신해 아이디어 금고에 적재한다.
 
     보안 흐름:

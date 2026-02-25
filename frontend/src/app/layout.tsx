@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import UpdateButton from "@/components/update-button";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -22,6 +23,7 @@ export default function RootLayout({
                 Auto Blog Control
               </div>
               <nav className="flex items-center gap-2 text-sm font-medium sm:gap-3">
+                <UpdateButton />
                 <Link
                   href="/"
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 transition hover:border-slate-400"

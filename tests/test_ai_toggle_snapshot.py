@@ -81,9 +81,15 @@ def test_ai_toggle_alert_message_includes_summary_counts():
 
 def test_prune_old_debug_files_keeps_latest_n(tmp_path: Path):
     """디버그 파일 보관 정책이 최신 N개만 유지해야 한다."""
+    import os, time
+
     for index in range(5):
         target = tmp_path / f"sample_{index}.png"
         target.write_text(f"payload-{index}", encoding="utf-8")
+        # CI(Linux)에서 mtime 해상도 문제로 정렬이 불안정해지는 것을 방지하기 위해
+        # 파일마다 mtime을 1초씩 다르게 명시적으로 설정한다.
+        mtime = 1_000_000 + index
+        os.utime(target, (mtime, mtime))
 
     PlaywrightPublisher._prune_old_debug_files(tmp_path, "*.png", keep=2)
 

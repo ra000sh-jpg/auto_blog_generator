@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import random
 from typing import Any, Optional
 
 import httpx
 
+from .. import constants
 from ..exceptions import RateLimitError
 from .base_client import BaseLLMClient, LLMResponse
+from .retry_helper import llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class QwenClient(BaseLLMClient):
         self,
         api_key: Optional[str] = None,
         model: str = "qwen-plus",
-        timeout_sec: float = 120.0,
+        timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
         base_url: Optional[str] = None,
     ):
         resolved_api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
@@ -110,9 +110,11 @@ class QwenClient(BaseLLMClient):
         max_tokens: int = 4096,
     ) -> LLMResponse:
         attempts = max(1, max_retries)
-        last_error: Optional[Exception] = None
+        current_attempt = 0
 
-        for attempt in range(1, attempts + 1):
+        async def _execute() -> LLMResponse:
+            nonlocal current_attempt
+            current_attempt += 1
             try:
                 return await self.generate(
                     system_prompt=system_prompt,
@@ -121,31 +123,17 @@ class QwenClient(BaseLLMClient):
                     max_tokens=max_tokens,
                 )
             except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code == 429:
-                    if attempt >= attempts:
-                        raise RateLimitError("qwen rate limited (429)") from exc
-                    delay = min(2**attempt, 30) + random.uniform(0.1, 0.5)
-                    logger.warning("Qwen rate limited, retrying", extra={"attempt": attempt, "delay_sec": delay})
-                    await asyncio.sleep(delay)
-                    continue
-                if attempt >= attempts:
-                    raise
-                delay = float(attempt)
-                logger.warning(
-                    "Qwen http error, retrying",
-                    extra={"attempt": attempt, "delay_sec": delay, "status_code": exc.response.status_code},
-                )
-                await asyncio.sleep(delay)
-            except Exception as exc:
-                last_error = exc
-                if attempt >= attempts:
-                    raise
-                delay = float(attempt)
-                logger.warning("Qwen transient error, retrying", extra={"attempt": attempt, "delay_sec": delay})
-                await asyncio.sleep(delay)
+                if exc.response.status_code == 429 and current_attempt >= attempts:
+                    raise RateLimitError("qwen rate limited (429)") from exc
+                raise
 
-        raise last_error or RuntimeError("Qwen API failed after retries")
+        return await llm_retry(
+            func=_execute,
+            attempts=attempts,
+            base_delay=constants.LLM_RETRY_BASE_DELAY_SEC,
+            logger=logger,
+            provider=self.provider_name,
+        )
 
     async def close(self) -> None:
         """내부 HTTP 클라이언트를 종료한다."""

@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Callable, Dict, Optional, Protocol, Tuple
 
+from .. import constants
 from ..exceptions import ContentGenerationError, PublishError
 from ..images.placement import (
     ImageInsertionPoint,
@@ -1273,7 +1274,7 @@ async def stub_generate_fn(job: Job) -> Dict[str, Any]:
 
     실제 LLM 호출 없이 더미 콘텐츠 반환.
     """
-    await asyncio.sleep(0.1)  # 비동기 시뮬레이션
+    await asyncio.sleep(constants.PIPELINE_STUB_ASYNC_DELAY_SEC)  # 비동기 시뮬레이션
 
     keywords = ", ".join(job.seed_keywords[:3])
     content = f"""# {job.title}

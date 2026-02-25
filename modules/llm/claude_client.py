@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 from typing import Any, Optional
 
+from .. import constants
 from .base_client import BaseLLMClient, LLMResponse
+from .retry_helper import llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class ClaudeClient(BaseLLMClient):
         api_key: Optional[str] = None,
         model: str = "claude-sonnet-4-20250514",
         max_tokens: int = 4096,
-        timeout_sec: float = 120.0,
+        timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     ):
         resolved_api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         if not resolved_api_key:
@@ -89,7 +90,7 @@ class ClaudeClient(BaseLLMClient):
     ) -> LLMResponse:
         """지수 백오프를 적용한 생성."""
         attempts = max(1, max_retries)
-        for attempt in range(1, attempts + 1):
+        async def _execute() -> LLMResponse:
             try:
                 return await self.generate(
                     system_prompt,
@@ -98,23 +99,17 @@ class ClaudeClient(BaseLLMClient):
                     max_tokens=max_tokens,
                 )
             except Exception as exc:
-                retryable = self._is_retryable_error(exc)
-                if (not retryable) or attempt >= attempts:
-                    raise
+                if not self._is_retryable_error(exc):
+                    setattr(exc, "llm_retryable", False)
+                raise
 
-                delay = min(2 ** (attempt - 1), 30) + random.uniform(0.0, 0.5)
-                logger.warning(
-                    "Claude retry",
-                    extra={
-                        "attempt": attempt,
-                        "max_retries": attempts,
-                        "delay_sec": round(delay, 3),
-                        "error_type": exc.__class__.__name__,
-                    },
-                )
-                await asyncio.sleep(delay)
-
-        raise RuntimeError("unreachable retry state")
+        return await llm_retry(
+            func=_execute,
+            attempts=attempts,
+            base_delay=constants.LLM_RETRY_BASE_DELAY_SEC,
+            logger=logger,
+            provider=self.provider_name,
+        )
 
     def _to_llm_response(self, response: Any) -> LLMResponse:
         content_parts = getattr(response, "content", []) or []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .. import constants
 from .base_client import BaseLLMClient
 from .claude_client import ClaudeClient
 from .deepseek_client import DeepSeekClient
@@ -19,7 +20,7 @@ from .qwen_client import QwenClient
 def create_client(
     provider: str,
     model: Optional[str] = None,
-    timeout_sec: float = 120.0,
+    timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     max_tokens: int = 4096,
     api_key: Optional[str] = None,
 ) -> BaseLLMClient:

@@ -30,6 +30,7 @@ from server.routers.scheduler import set_scheduler_instance
 from server.routers.stats import router as stats_router
 from server.routers.telegram_webhook import router as telegram_webhook_router
 from server.routers.telegram_webhook import collect_pending_updates
+from server.routers.update import router as update_router
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,7 @@ app.include_router(naver_connect_router, prefix="/api", tags=["naver-connect"])
 app.include_router(scheduler_router, prefix="/api", tags=["scheduler"])
 app.include_router(stats_router, prefix="/api", tags=["stats"])
 app.include_router(telegram_webhook_router, prefix="/api", tags=["telegram"])
+app.include_router(update_router, prefix="/api", tags=["update"])
 
 
 @app.get("/", tags=["root"])

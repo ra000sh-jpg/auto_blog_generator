@@ -24,9 +24,30 @@ ACTIVE_HOURS_START: int = 8    # 08:00
 ACTIVE_HOURS_END: int = 22     # 22:00
 ACTIVE_HOURS_DISPLAY: str = "08:00~22:00"
 
+# ---------------------------------------------------------------------------
+# 타이밍 / 폴링 상수
+# ---------------------------------------------------------------------------
+
+# 스케줄러 워커 폴링
+SCHEDULER_GENERATOR_POLL_SEC: int = 30
+SCHEDULER_PUBLISHER_POLL_SEC: int = 20
+
+# 스케줄러 내부 반복 지연
+SCHEDULER_SUBJOB_STEP_SLEEP_SEC: float = 0.1
+SCHEDULER_DRAFT_PREFETCH_STEP_SLEEP_SEC: float = 0.3
+SCHEDULER_DAEMON_KEEPALIVE_SEC: int = 3600
+
+# 발행/LLM 공통 타이밍
+PLAYWRIGHT_ACTION_DELAY_SEC: float = 0.6
+LLM_RETRY_BASE_DELAY_SEC: float = 1.0
+LLM_REQUEST_TIMEOUT_SEC: float = 60.0
+PUBLISH_RETRY_SLEEP_SEC: float = 5.0
+METRICS_POLL_INTERVAL_SEC: int = 300
+PIPELINE_STUB_ASYNC_DELAY_SEC: float = 0.1
+
 # 워커 폴링 간격 (초)
-DEFAULT_GENERATOR_POLL_SECONDS: int = 30
-DEFAULT_PUBLISHER_POLL_SECONDS: int = 20
+DEFAULT_GENERATOR_POLL_SECONDS: int = SCHEDULER_GENERATOR_POLL_SEC
+DEFAULT_PUBLISHER_POLL_SECONDS: int = SCHEDULER_PUBLISHER_POLL_SEC
 
 # 일일 발행 목표 (DB system_settings 미설정 시 fallback)
 DEFAULT_DAILY_TARGET: int = 3
