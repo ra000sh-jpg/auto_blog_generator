@@ -138,6 +138,7 @@ class JobStore:
     STATUS_FAILED_QUALITY = "failed_quality"
     
     STATUS_READY = "ready_to_publish"
+    STATUS_AWAITING_IMAGES = "awaiting_images"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
@@ -1387,39 +1388,178 @@ class JobStore:
                 return None
             return parse_iso(str(row["completed_at"]))
 
-    def save_prepared_payload(self, job_id: str, payload: Dict[str, Any]) -> bool:
-        """생성된 초안을 저장하고 발행 대기 상태로 전환한다."""
+    def save_prepared_payload(
+        self,
+        job_id: str,
+        payload: Dict[str, Any],
+        *,
+        mark_ready: bool = True,
+    ) -> bool:
+        """생성된 초안을 저장한다.
+
+        Args:
+            job_id: 대상 잡 ID
+            payload: 저장할 발행 페이로드
+            mark_ready: True면 ready_to_publish 상태로 전환한다.
+        """
+        now = now_utc()
+        payload_json = json.dumps(payload)
+        allowed_statuses = (self.STATUS_RUNNING, self.STATUS_AWAITING_IMAGES)
+        success = False
+        with self.connection() as conn:
+            if mark_ready:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        prepared_payload = ?,
+                        claimed_at = NULL,
+                        claimed_by = NULL,
+                        heartbeat_at = NULL,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    AND status IN (?, ?)
+                    """,
+                    (
+                        self.STATUS_READY,
+                        payload_json,
+                        now,
+                        job_id,
+                        *allowed_statuses,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET prepared_payload = ?,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    AND status IN (?, ?)
+                    """,
+                    (
+                        payload_json,
+                        now,
+                        job_id,
+                        *allowed_statuses,
+                    ),
+                )
+            if cursor.rowcount > 0:
+                self._log_event(
+                    conn,
+                    job_id,
+                    "prepared" if mark_ready else "prepared_cached",
+                    {
+                        "payload_keys": sorted(payload.keys()),
+                        "mark_ready": mark_ready,
+                    },
+                )
+                success = True
+        if success and not mark_ready:
+            # semi_auto 경로에서 재생성 방지용 캐시를 별도 키에도 보존한다.
+            self.set_system_setting(f"prepared_payload_{job_id}", payload_json)
+        return success
+
+    def load_prepared_payload(self, job_id: str) -> Dict[str, Any]:
+        """저장된 prepared_payload를 반환한다."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT prepared_payload
+                FROM jobs
+                WHERE job_id = ?
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        raw = str(row["prepared_payload"] or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+
+        cached_raw = self.get_system_setting(f"prepared_payload_{job_id}", "")
+        if not cached_raw:
+            return {}
+        try:
+            cached = json.loads(cached_raw)
+        except Exception:
+            return {}
+        return cached if isinstance(cached, dict) else {}
+
+    def clear_prepared_payload(self, job_id: str) -> bool:
+        """prepared_payload를 비운다."""
         now = now_utc()
         with self.connection() as conn:
             cursor = conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?,
-                    prepared_payload = ?,
-                    claimed_at = NULL,
-                    claimed_by = NULL,
-                    heartbeat_at = NULL,
+                SET prepared_payload = '{}',
                     updated_at = ?
                 WHERE job_id = ?
-                AND status = ?
                 """,
-                (
-                    self.STATUS_READY,
-                    json.dumps(payload),
-                    now,
-                    job_id,
-                    self.STATUS_RUNNING,
-                ),
+                (now, job_id),
             )
+        self.set_system_setting(f"prepared_payload_{job_id}", "")
+        return cursor.rowcount > 0
+
+    def update_job_status(self, job_id: str, status: str) -> bool:
+        """잡 상태를 갱신한다."""
+        normalized_status = str(status or "").strip()
+        if not normalized_status:
+            return False
+        now = now_utc()
+        with self.connection() as conn:
+            if normalized_status == self.STATUS_RUNNING:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (normalized_status, now, job_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        claimed_at = NULL,
+                        claimed_by = NULL,
+                        heartbeat_at = NULL,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (normalized_status, now, job_id),
+                )
             if cursor.rowcount > 0:
                 self._log_event(
                     conn,
                     job_id,
-                    "prepared",
-                    {"payload_keys": sorted(payload.keys())},
+                    "status_updated",
+                    {"status": normalized_status},
                 )
-                return True
-            return False
+        return cursor.rowcount > 0
+
+    def list_awaiting_images_jobs(self) -> List[Job]:
+        """이미지 수집 대기 중인 잡 목록을 반환한다."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM jobs
+                WHERE status = ?
+                ORDER BY created_at ASC
+                """,
+                (self.STATUS_AWAITING_IMAGES,),
+            ).fetchall()
+        return [Job.from_row(row) for row in rows]
 
     def claim_ready_jobs(
         self,

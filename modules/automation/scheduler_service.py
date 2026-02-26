@@ -27,7 +27,11 @@ from .resource_monitor import CpuHysteresisMonitor
 from .. import constants
 from ..constants import DEFAULT_FALLBACK_CATEGORY
 from .scheduler_seed import run_daily_quota_seed
-from .scheduler_workers import generator_worker_loop, publisher_worker_loop
+from .scheduler_workers import (
+    generator_worker_loop,
+    image_collector_worker_loop,
+    publisher_worker_loop,
+)
 from .time_utils import parse_iso
 from . import scheduler_cycles
 
@@ -151,6 +155,7 @@ class SchedulerService:
         self._scheduler: Any = None
         self._generator_task: Optional[asyncio.Task[None]] = None
         self._publisher_task: Optional[asyncio.Task[None]] = None
+        self._image_collector_task: Optional[asyncio.Task[None]] = None
         self._daily_publish_slots: List[datetime] = []
         self._publish_slot_date: Optional[date] = None
         self._publish_wait_until_utc: Optional[datetime] = None
@@ -290,6 +295,10 @@ class SchedulerService:
                 self._publisher_worker_loop(),
                 name="scheduler-publisher-worker",
             )
+            self._image_collector_task = asyncio.create_task(
+                self._image_collector_worker_loop(),
+                name="scheduler-image-collector-worker",
+            )
             logger.info(
                 "Worker loops started",
                 extra={
@@ -305,8 +314,10 @@ class SchedulerService:
         if self.api_only_mode:
             await self._cancel_task(self._generator_task)
             await self._cancel_task(self._publisher_task)
+            await self._cancel_task(self._image_collector_task)
             self._generator_task = None
             self._publisher_task = None
+            self._image_collector_task = None
             if self._scheduler is not None:
                 self._scheduler.shutdown(wait=False)
             self._scheduler = None
@@ -315,8 +326,10 @@ class SchedulerService:
 
         await self._cancel_task(self._generator_task)
         await self._cancel_task(self._publisher_task)
+        await self._cancel_task(self._image_collector_task)
         self._generator_task = None
         self._publisher_task = None
+        self._image_collector_task = None
 
         if self._scheduler is not None:
             self._scheduler.shutdown(wait=False)
@@ -339,6 +352,10 @@ class SchedulerService:
     async def _publisher_worker_loop(self) -> None:
         """시간 분포 기반 발행 워커 루프."""
         await publisher_worker_loop(self)
+
+    async def _image_collector_worker_loop(self) -> None:
+        """텔레그램 반자동 이미지 수집 워커 루프."""
+        await image_collector_worker_loop(self)
 
     async def _run_startup_catchup(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_startup_catchup(self, *args, **kwargs)

@@ -37,6 +37,7 @@ from ..uploaders.publisher_factory import get_publisher
 from ..seo.quality_gate import QualityGate, QualityGateResult
 from ..seo.tag_generator import TagGenerator
 from ..seo.platform_strategy import get_category_for_topic
+from .telegram_image_collector import TelegramImageCollector, is_semi_auto_mode
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,18 @@ class PublisherLike(Protocol):
 
 class NotifierLike(Protocol):
     """파이프라인이 기대하는 알림 인터페이스."""
+
+    @property
+    def enabled(self) -> bool:
+        ...
+
+    async def send_message(
+        self,
+        text: str,
+        *,
+        disable_notification: bool = False,
+    ) -> bool:
+        ...
 
     def notify_critical_background(
         self,
@@ -131,6 +144,14 @@ class PipelineService:
         self.queue_retry_limit = max(0, queue_retry_limit)
         self.quality_evaluator = quality_evaluator  # Phase 25
         self._channel_publishers: Dict[str, PublisherLike] = {}
+        self._image_output_dir = "data/images"
+        if self.image_generator is not None:
+            output_dir = getattr(self.image_generator, "output_dir", None)
+            if not output_dir:
+                client = getattr(self.image_generator, "client", None)
+                output_dir = getattr(client, "output_dir", None)
+            if output_dir:
+                self._image_output_dir = str(output_dir)
 
     async def run_job(self, job: Job) -> None:
         """
@@ -274,12 +295,59 @@ class PipelineService:
                 )
                 return None
 
+        seo_data = content_result.get("seo_snapshot", {})
+        topic_mode = str(seo_data.get("topic_mode", "")).strip().lower()
+
+        # semi_auto 모드에서는 이미지 자동 생성을 건너뛰고 텔레그램 수집 대기로 전환한다.
+        if is_semi_auto_mode(self.job_store):
+            notifier_ready = bool(self.notifier and getattr(self.notifier, "enabled", False))
+            raw_slots = content_result.get("image_slots")
+            image_slots = raw_slots if isinstance(raw_slots, list) else []
+            if notifier_ready and image_slots:
+                text_only_payload = await self._build_text_only_payload(job, content_result)
+                saved = self.job_store.save_prepared_payload(
+                    job.job_id,
+                    text_only_payload,
+                    mark_ready=False,
+                )
+                if not saved:
+                    self._record_failure_metrics("PIPELINE_ERROR")
+                    self._fail_with_retry_policy(
+                        job=job,
+                        error_code="PIPELINE_ERROR",
+                        error_message="semi_auto payload 저장 실패",
+                    )
+                    return None
+
+                collector = TelegramImageCollector(
+                    job_store=self.job_store,
+                    notifier=self.notifier,  # type: ignore[arg-type]
+                    image_output_dir=self._image_output_dir,
+                )
+                collector.init_slots(job.job_id, image_slots)
+                self.job_store.update_job_status(job.job_id, self.job_store.STATUS_AWAITING_IMAGES)
+                await collector.send_next_prompt(job.job_id, job.title)
+                logger.info(
+                    "[Pipeline] %s: semi_auto mode -> awaiting_images",
+                    job.job_id,
+                )
+                return None
+
+            if not notifier_ready:
+                logger.warning(
+                    "Semi-auto requested but notifier unavailable, fallback to auto image generation",
+                    extra={"job_id": job_id},
+                )
+            elif not image_slots:
+                logger.warning(
+                    "Semi-auto requested but image_slots missing, fallback to auto image generation",
+                    extra={"job_id": job_id},
+                )
+
         # 이미지 생성은 실패해도 본문 발행을 계속 진행한다.
         thumbnail_path: Optional[str] = None
         content_image_paths: list[str] = []
         image_sources: dict[str, dict[str, str]] = {}
-        seo_data = content_result.get("seo_snapshot", {})
-        topic_mode = str(seo_data.get("topic_mode", "")).strip().lower()
         if self.image_generator:
             image_start = perf_counter()
             try:
@@ -426,6 +494,54 @@ class PipelineService:
             "images": content_image_paths,
             "image_sources": image_sources,
             "image_points": [asdict(point) for point in image_points],
+            "tags": tags,
+            "category": category,
+            "quality_snapshot": content_result.get("quality_snapshot", {}),
+            "seo_snapshot": content_result.get("seo_snapshot", {}),
+            "llm_token_usage": content_result.get("llm_token_usage", {}),
+        }
+
+    async def _build_text_only_payload(
+        self,
+        job: Job,
+        content_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """semi_auto용 텍스트 페이로드를 생성한다."""
+        seo_data = content_result.get("seo_snapshot", {})
+        topic_mode = str(seo_data.get("topic_mode", "")).strip()
+
+        tags: list[str] = list(job.tags)
+        category: str = job.category
+        if not category and topic_mode:
+            category = get_category_for_topic(topic_mode, job.platform)
+            logger.info(
+                "Category auto-assigned from topic",
+                extra={"topic_mode": topic_mode, "category": category},
+            )
+
+        if self.tag_generator and not tags:
+            try:
+                tag_result = await self.tag_generator.generate(
+                    title=job.title,
+                    seed_keywords=job.seed_keywords,
+                    platform=job.platform,
+                    topic_mode=topic_mode,
+                    content_summary=content_result.get("final_content", "")[:300],
+                )
+                tags = tag_result.tags
+                self.job_store.update_job_tags(job.job_id, tags, category)
+            except Exception:
+                logger.warning("Tag generation failed in semi_auto", extra={"job_id": job.job_id})
+
+        raw_content = str(content_result.get("final_content", "")).strip()
+        processed_content = convert_markdown_for_naver_editor(raw_content)
+        return {
+            "title": job.title,
+            "content": processed_content,
+            "thumbnail": "",
+            "images": [],
+            "image_sources": {},
+            "image_points": [],
             "tags": tags,
             "category": category,
             "quality_snapshot": content_result.get("quality_snapshot", {}),
@@ -1060,6 +1176,10 @@ class PipelineService:
 
         payload = await self._build_publish_payload(job, allow_internal_retry=True)
         if not payload:
+            updated = self.job_store.get_job(job.job_id)
+            if updated and updated.status == self.job_store.STATUS_AWAITING_IMAGES:
+                logger.info("Draft moved to awaiting_images", extra={"job_id": job.job_id})
+                return True
             return False
 
         # ──────────────────────────────────────────────────────────
@@ -1168,6 +1288,8 @@ class PipelineService:
     async def process_publication(self, job: Job) -> bool:
         """발행 단계만 수행한다. 준비된 payload가 없으면 즉시 생성 후 발행한다."""
         payload = job.prepared_payload
+        if not payload:
+            payload = self.job_store.load_prepared_payload(job.job_id)
         if not payload:
             payload = await self._build_publish_payload(job, allow_internal_retry=True)
             if not payload:
