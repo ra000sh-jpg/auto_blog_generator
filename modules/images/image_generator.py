@@ -537,9 +537,17 @@ class ImageGenerator:
         if raw_quota is None:
             return None
         value = str(raw_quota).strip().lower()
-        if value in {"1", "all"}:
+        if value in {"0", "1", "2", "3", "4", "all"}:
             return value
-        return "0"
+        try:
+            numeric_value = int(value)
+            if numeric_value <= 0:
+                return "0"
+            if numeric_value >= 4:
+                return "all"
+            return str(numeric_value)
+        except (TypeError, ValueError):
+            return "0"
 
     def _resolve_ai_quota_for_topic(self, topic_mode: Optional[str]) -> str:
         """토픽별 override를 반영한 유효 quota를 계산한다."""
@@ -552,11 +560,12 @@ class ImageGenerator:
     def _quota_to_count(self, quota_value: str) -> int:
         """quota 문자열을 슬롯 수로 변환한다."""
         normalized = self._normalize_ai_quota(quota_value) or "0"
-        if normalized == "1":
-            return 1
         if normalized == "all":
-            return 4
-        return 0
+            return self.max_content_images + 1
+        try:
+            return max(0, int(normalized))
+        except (TypeError, ValueError):
+            return 0
 
     def _select_ai_slot_ids(self, slots: List[Dict[str, Any]], quota_value: str) -> set[str]:
         """슬롯 메타를 기반으로 AI 생성 대상을 선택한다."""

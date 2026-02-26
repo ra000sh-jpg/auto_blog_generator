@@ -49,6 +49,42 @@ _DEFAULT_IDEA_VAULT_DAILY_QUOTA = 2
 _QUESTIONNAIRE_REQUIRED_COUNT = 5
 
 
+def _sync_image_settings_from_allocations(
+    job_store: JobStore,
+    allocations: List[dict],
+) -> None:
+    """카테고리 할당의 이미지 설정을 라우터 설정으로 동기화한다."""
+    topic_quota_overrides: dict[str, str] = {}
+    max_images_per_post = 0
+
+    for item in allocations:
+        if not isinstance(item, dict):
+            continue
+        topic_mode = str(item.get("topic_mode", "")).strip().lower()
+        if not topic_mode:
+            continue
+
+        total = max(0, min(4, int(item.get("images_per_post", 2) or 2)))
+        ai = max(0, min(total, int(item.get("ai_images", 0) or 0)))
+        max_images_per_post = max(max_images_per_post, total)
+
+        if ai <= 0:
+            topic_quota_overrides[topic_mode] = "0"
+        elif ai >= total:
+            topic_quota_overrides[topic_mode] = "all"
+        else:
+            topic_quota_overrides[topic_mode] = str(ai)
+
+    if topic_quota_overrides:
+        job_store.set_system_setting(
+            "router_image_topic_quota_overrides",
+            json.dumps(topic_quota_overrides, ensure_ascii=False),
+        )
+    if max_images_per_post > 0:
+        job_store.set_system_setting("router_images_per_post", str(max_images_per_post))
+        job_store.set_system_setting("router_images_per_post_max", str(max_images_per_post))
+
+
 @router.get(
     "/onboarding/persona/questions",
     response_model=PersonaQuestionBankResponse,
@@ -119,6 +155,14 @@ def get_onboarding_status(
                         topic_mode=normalize_topic_mode(str(item.get("topic_mode", "cafe")).strip()),
                         count=max(0, int(item.get("count", 0))),
                         percentage=float(item.get("percentage", 0.0)) if item.get("percentage") is not None else None,
+                        images_per_post=max(0, min(4, int(item.get("images_per_post", 2) or 2))),
+                        ai_images=max(
+                            0,
+                            min(
+                                int(item.get("images_per_post", 2) or 2),
+                                int(item.get("ai_images", 0) or 0),
+                            ),
+                        ),
                     )
                     for item in decoded
                     if isinstance(item, dict) and str(item.get("category", "")).strip()
@@ -287,6 +331,8 @@ def save_schedule(
                     topic_mode=item.topic_mode,
                     count=max(0, floored[idx]),
                     percentage=item.percentage,  # 원본 퍼센트 보존
+                    images_per_post=max(0, min(4, int(item.images_per_post))),
+                    ai_images=max(0, min(int(item.images_per_post), int(item.ai_images))),
                 )
             )
     else:
@@ -314,6 +360,8 @@ def save_schedule(
             "topic_mode": item.topic_mode,
             "count": item.count,
             "percentage": item.percentage,
+            "images_per_post": int(item.images_per_post),
+            "ai_images": min(int(item.ai_images), int(item.images_per_post)),
         }
         for item in allocations
     ]
@@ -323,6 +371,7 @@ def save_schedule(
         str(normalized_idea_vault_quota),
     )
     job_store.set_system_setting("scheduler_category_allocations", to_json_string(allocation_payload))
+    _sync_image_settings_from_allocations(job_store, allocation_payload)
     job_store.set_system_setting("category_mapping", to_json_string(request.category_mapping))
 
     return ScheduleSetupResponse(
@@ -334,6 +383,11 @@ def save_schedule(
                 topic_mode=str(item["topic_mode"]),
                 count=int(item["count"]),
                 percentage=float(item["percentage"]) if item.get("percentage") is not None else None,
+                images_per_post=int(item.get("images_per_post", 2)),
+                ai_images=min(
+                    int(item.get("ai_images", 0)),
+                    int(item.get("images_per_post", 2)),
+                ),
             )
             for item in allocation_payload
         ],

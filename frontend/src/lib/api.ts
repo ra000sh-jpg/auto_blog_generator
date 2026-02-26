@@ -240,6 +240,8 @@ export type ScheduleAllocationItem = {
   topic_mode: string;
   count: number;
   percentage?: number;
+  images_per_post?: number;
+  ai_images?: number;
 };
 
 export type ScheduleSetupPayload = {

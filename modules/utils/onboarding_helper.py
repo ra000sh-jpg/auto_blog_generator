@@ -281,6 +281,8 @@ def build_default_allocations(categories: List[str], daily_posts_target: int) ->
             category=category_name,
             topic_mode=infer_topic_mode(category_name),
             count=0,
+            images_per_post=2,
+            ai_images=0,
         )
         for category_name in normalized_categories
     ]
@@ -308,6 +310,8 @@ def normalize_allocations(
                 topic_mode=topic_mode,
                 count=max(0, int(item.count)),
                 percentage=item.percentage,
+                images_per_post=max(0, min(4, int(item.images_per_post))),
+                ai_images=max(0, min(int(item.images_per_post), int(item.ai_images))),
             )
         )
 
@@ -323,9 +327,13 @@ def normalize_allocations(
             # percentage를 원본에서 복사해 보존
             pct_map = {item.category: item.percentage for item in items}
             mode_map = {item.category: item.topic_mode for item in items}
+            img_map = {item.category: (item.images_per_post, item.ai_images) for item in items}
             for r in result:
                 r.percentage = pct_map.get(r.category)
                 r.topic_mode = mode_map.get(r.category, r.topic_mode)
+                imgs = img_map.get(r.category, (2, 0))
+                r.images_per_post = int(imgs[0])
+                r.ai_images = int(imgs[1])
             return result
         return build_default_allocations([item.category for item in items], daily_posts_target)
 

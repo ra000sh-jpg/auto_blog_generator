@@ -95,6 +95,8 @@ class ScheduleAllocationItem(BaseModel):
     topic_mode: str = "cafe"
     count: int = Field(default=0, ge=0, le=20)
     percentage: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    images_per_post: int = Field(default=2, ge=0, le=4)
+    ai_images: int = Field(default=0, ge=0, le=4)
 
 
 class ScheduleSetupRequest(BaseModel):

@@ -40,9 +40,7 @@ export default function EngineSettingsCard({
     );
     const [imageEngine, setImageEngine] = useState(initialRouterSettings.settings.image_engine || "pexels");
     const [imageEnabled, setImageEnabled] = useState(Boolean(initialRouterSettings.settings.image_enabled));
-    const [imageAiQuota, setImageAiQuota] = useState<"0" | "1" | "all">(
-        (initialRouterSettings.settings.image_ai_quota as "0" | "1" | "all") || "0"
-    );
+    const [imageAiQuota] = useState<"0" | "1" | "all">("1");
     const [imageAiEngine, setImageAiEngine] = useState(
         initialRouterSettings.settings.image_ai_engine || "together_flux"
     );
@@ -204,7 +202,6 @@ export default function EngineSettingsCard({
             setImageApiMasks(saved.settings.image_api_keys_masked || {});
             setImageEngine(saved.settings.image_engine || "pexels");
             setImageEnabled(Boolean(saved.settings.image_enabled));
-            setImageAiQuota((saved.settings.image_ai_quota as "0" | "1" | "all") || "0");
             setImageAiEngine(saved.settings.image_ai_engine || "together_flux");
             setImageTopicQuotaOverrides((saved.settings.image_topic_quota_overrides as Record<string, string>) || {});
             setTrafficFeedbackStrongMode(Boolean(saved.settings.traffic_feedback_strong_mode));
@@ -341,88 +338,46 @@ export default function EngineSettingsCard({
 
                     {imageEnabled && (
                         <div className="space-y-5">
-                            {/* ① AI 생성 이미지 상한선 */}
                             <div className="rounded-xl border border-slate-200 bg-white p-4">
                                 <p className="mb-3 text-sm font-semibold text-slate-800">
-                                    포스팅당 AI 생성 이미지 수
-                                    <span className="ml-2 text-xs font-normal text-slate-500">(썸네일 포함)</span>
+                                    AI 생성 엔진
                                 </p>
-                                <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+                                <div className="flex flex-col gap-2">
                                     {[
-                                        { value: "0", label: "0장", desc: "무료 실사진만 (Pexels)", icon: "📷" },
-                                        { value: "1", label: "1장", desc: "AI 추천 최고점 1장", icon: "✨" },
-                                        { value: "all", label: "전체", desc: "최대 4장 AI 생성", icon: "🎨" },
+                                        { value: "together_flux", label: "Together FLUX", desc: "무료 Tier 우선 사용", badge: "무료", badgeColor: "text-emerald-700 bg-emerald-100" },
+                                        { value: "fal_flux", label: "FAL Flux", desc: "고품질 유료 이미지", badge: "유료", badgeColor: "text-amber-700 bg-amber-100" },
+                                        { value: "openai_dalle3", label: "DALL-E 3", desc: "OpenAI 키 공유 사용", badge: "유료", badgeColor: "text-amber-700 bg-amber-100" },
                                     ].map((option) => (
                                         <label
                                             key={option.value}
-                                            className={`flex flex-1 cursor-pointer items-center gap-3 rounded-xl border-2 p-3 transition ${imageAiQuota === option.value
-                                                ? "border-emerald-500 bg-emerald-50"
+                                            className={`flex cursor-pointer items-center gap-3 rounded-xl border-2 p-3 transition ${imageAiEngine === option.value
+                                                ? "border-indigo-500 bg-indigo-50"
                                                 : "border-slate-200 hover:border-slate-300"
                                                 }`}
                                         >
                                             <input
                                                 type="radio"
-                                                name="imageAiQuota"
+                                                name="imageAiEngine"
                                                 value={option.value}
-                                                checked={imageAiQuota === option.value}
-                                                onChange={() => setImageAiQuota(option.value as "0" | "1" | "all")}
+                                                checked={imageAiEngine === option.value}
+                                                onChange={() => setImageAiEngine(option.value)}
                                                 className="sr-only"
                                             />
-                                            <span className="text-lg">{option.icon}</span>
-                                            <span className="flex flex-col">
-                                                <span className={`text-sm font-semibold ${imageAiQuota === option.value ? "text-emerald-700" : "text-slate-700"}`}>
+                                            <span className="flex flex-1 items-center gap-2">
+                                                <span className={`text-sm font-semibold ${imageAiEngine === option.value ? "text-indigo-700" : "text-slate-700"}`}>
                                                     {option.label}
                                                 </span>
-                                                <span className="text-xs text-slate-500">{option.desc}</span>
+                                                <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${option.badgeColor}`}>
+                                                    {option.badge}
+                                                </span>
                                             </span>
+                                            <span className="text-xs text-slate-500">{option.desc}</span>
                                         </label>
                                     ))}
                                 </div>
                             </div>
 
-                            {/* ② AI 생성 엔진 선택 (quota > 0일 때만 표시) */}
-                            {imageAiQuota !== "0" && (
-                                <div className="rounded-xl border border-slate-200 bg-white p-4">
-                                    <p className="mb-3 text-sm font-semibold text-slate-800">
-                                        AI 생성 엔진
-                                    </p>
-                                    <div className="flex flex-col gap-2">
-                                        {[
-                                            { value: "together_flux", label: "Together FLUX", desc: "무료 Tier 우선 사용", badge: "무료", badgeColor: "text-emerald-700 bg-emerald-100" },
-                                            { value: "fal_flux", label: "FAL Flux", desc: "고품질 유료 이미지", badge: "유료", badgeColor: "text-amber-700 bg-amber-100" },
-                                            { value: "openai_dalle3", label: "DALL-E 3", desc: "OpenAI 키 공유 사용", badge: "유료", badgeColor: "text-amber-700 bg-amber-100" },
-                                        ].map((option) => (
-                                            <label
-                                                key={option.value}
-                                                className={`flex cursor-pointer items-center gap-3 rounded-xl border-2 p-3 transition ${imageAiEngine === option.value
-                                                    ? "border-indigo-500 bg-indigo-50"
-                                                    : "border-slate-200 hover:border-slate-300"
-                                                    }`}
-                                            >
-                                                <input
-                                                    type="radio"
-                                                    name="imageAiEngine"
-                                                    value={option.value}
-                                                    checked={imageAiEngine === option.value}
-                                                    onChange={() => setImageAiEngine(option.value)}
-                                                    className="sr-only"
-                                                />
-                                                <span className="flex flex-1 items-center gap-2">
-                                                    <span className={`text-sm font-semibold ${imageAiEngine === option.value ? "text-indigo-700" : "text-slate-700"}`}>
-                                                        {option.label}
-                                                    </span>
-                                                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${option.badgeColor}`}>
-                                                        {option.badge}
-                                                    </span>
-                                                </span>
-                                                <span className="text-xs text-slate-500">{option.desc}</span>
-                                            </label>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* ③ 이미지 API 키 */}
+                            {/* 이미지 API 키 */}
                             <div className="grid gap-3 sm:grid-cols-2">
                                 {Array.from(
                                     new Set(

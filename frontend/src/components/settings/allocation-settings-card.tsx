@@ -22,6 +22,17 @@ type AllocationSettingsCardProps = {
 export default function AllocationSettingsCard({
     initialOnboardingStatus,
 }: AllocationSettingsCardProps) {
+    const withImageDefaults = (rows: ScheduleAllocationItem[]): ScheduleAllocationItem[] =>
+        rows.map((row) => {
+            const total = Math.max(0, Math.min(4, Number(row.images_per_post ?? 2)));
+            const ai = Math.max(0, Math.min(total, Number(row.ai_images ?? 0)));
+            return {
+                ...row,
+                images_per_post: total,
+                ai_images: ai,
+            };
+        });
+
     const [savingSchedule, setSavingSchedule] = useState(false);
     const [scheduleMessage, setScheduleMessage] = useState("");
     const [savingAllocation, setSavingAllocation] = useState(false);
@@ -45,11 +56,11 @@ export default function AllocationSettingsCard({
     );
     const scheduleCategories = (initialOnboardingStatus.categories || []).filter(c => c !== IDEA_VAULT_CATEGORY);
     const [categoryAllocations, setCategoryAllocations] = useState<ScheduleAllocationItem[]>(() =>
-        normalizeAllocations(
+        withImageDefaults(normalizeAllocations(
             scheduleCategories,
             trendInitial,
             (initialOnboardingStatus.category_allocations || []).filter(a => a.category !== IDEA_VAULT_CATEGORY),
-        )
+        ))
     );
     const [categoryMapping, setCategoryMapping] = useState<Record<string, string>>(
         initialOnboardingStatus.category_mapping || {}
@@ -106,7 +117,7 @@ export default function AllocationSettingsCard({
                 allocations: normalized,
                 category_mapping: categoryMapping,
             });
-            setCategoryAllocations(response.allocations || []);
+            setCategoryAllocations(withImageDefaults(response.allocations || []));
             setAllocationMessage("✅ 할당 비율이 저장되었습니다.");
             setTimeout(() => setAllocationMessage(""), 3000);
         } catch (requestError) {
@@ -133,7 +144,7 @@ export default function AllocationSettingsCard({
                 allocations: normalized,
                 category_mapping: categoryMapping,
             });
-            setCategoryAllocations(response.allocations || []);
+            setCategoryAllocations(withImageDefaults(response.allocations || []));
             setCategoryMapping(response.category_mapping || {});
             setDailyPostsTarget(response.daily_posts_target || 3);
             setIdeaVaultDailyQuota(response.idea_vault_daily_quota || 0);
@@ -190,9 +201,11 @@ export default function AllocationSettingsCard({
 
             <div className="mt-4 rounded-xl border border-slate-200">
                 <div className="grid grid-cols-12 border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
-                    <div className="col-span-5">Category</div>
-                    <div className="col-span-4">Topic Mode</div>
+                    <div className="col-span-3">Category</div>
+                    <div className="col-span-2">Topic Mode</div>
                     <div className="col-span-3">할당량</div>
+                    <div className="col-span-2">총 이미지</div>
+                    <div className="col-span-2">AI 이미지</div>
                 </div>
                 <div className="divide-y divide-slate-200">
                     {categoryAllocations
@@ -201,10 +214,10 @@ export default function AllocationSettingsCard({
                             const originalIndex = categoryAllocations.findIndex((x) => x.category === item.category);
                             return (
                                 <div key={item.category} className="grid grid-cols-12 items-center gap-4 px-3 py-3">
-                                    <div className="col-span-4 text-sm font-medium text-slate-800">
+                                    <div className="col-span-3 text-sm font-medium text-slate-800">
                                         {item.category}
                                     </div>
-                                    <div className="col-span-3">
+                                    <div className="col-span-2">
                                         <select
                                             value={item.topic_mode}
                                             onChange={(event) => {
@@ -222,7 +235,7 @@ export default function AllocationSettingsCard({
                                             ))}
                                         </select>
                                     </div>
-                                    <div className="col-span-5 flex items-center gap-3">
+                                    <div className="col-span-3 flex items-center gap-3">
                                         <input
                                             type="range"
                                             min={0}
@@ -244,6 +257,48 @@ export default function AllocationSettingsCard({
                                                 : "text-indigo-600"
                                                 }`}>{item.percentage || 0}%</span>
                                         </div>
+                                    </div>
+                                    <div className="col-span-2">
+                                        <select
+                                            value={item.images_per_post ?? 2}
+                                            onChange={(event) => {
+                                                const newTotal = Number(event.target.value);
+                                                const temp = [...categoryAllocations];
+                                                const currentAi = Number(temp[originalIndex].ai_images ?? 0);
+                                                temp[originalIndex] = {
+                                                    ...temp[originalIndex],
+                                                    images_per_post: newTotal,
+                                                    ai_images: Math.min(currentAi, newTotal),
+                                                };
+                                                setCategoryAllocations(temp);
+                                            }}
+                                            className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                        >
+                                            {[0, 1, 2, 3, 4].map((n) => (
+                                                <option key={n} value={n}>{n}장</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="col-span-2">
+                                        <select
+                                            value={item.ai_images ?? 0}
+                                            onChange={(event) => {
+                                                const temp = [...categoryAllocations];
+                                                temp[originalIndex] = {
+                                                    ...temp[originalIndex],
+                                                    ai_images: Number(event.target.value),
+                                                };
+                                                setCategoryAllocations(temp);
+                                            }}
+                                            className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                        >
+                                            {Array.from(
+                                                { length: (item.images_per_post ?? 2) + 1 },
+                                                (_, i) => i,
+                                            ).map((n) => (
+                                                <option key={n} value={n}>{n}장</option>
+                                            ))}
+                                        </select>
                                     </div>
                                 </div>
                             );
@@ -275,6 +330,11 @@ export default function AllocationSettingsCard({
                                 topic_mode: categoryAllocations[idx]?.topic_mode || inferTopicMode(cat),
                                 count: 0,
                                 percentage: evenPct,
+                                images_per_post: categoryAllocations[idx]?.images_per_post ?? 2,
+                                ai_images: Math.min(
+                                    Number(categoryAllocations[idx]?.ai_images ?? 0),
+                                    Number(categoryAllocations[idx]?.images_per_post ?? 2),
+                                ),
                             }));
                             const remainder = 100 - evenPct * cats.length;
                             if (evenAllocations.length > 0) evenAllocations[0].percentage! += remainder;

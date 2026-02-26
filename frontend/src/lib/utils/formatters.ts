@@ -40,6 +40,8 @@ export function normalizeAllocations(
             topic_mode: existing?.topic_mode || inferTopicMode(categoryName),
             count: existing?.count || 0,
             percentage: snappedPct,
+            images_per_post: existing?.images_per_post ?? 2,
+            ai_images: existing?.ai_images ?? 0,
         };
     });
 

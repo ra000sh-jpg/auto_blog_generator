@@ -192,7 +192,7 @@ DEFAULT_IMAGES_PER_POST = 1
 DEFAULT_IMAGES_PER_POST_MIN = 0
 DEFAULT_IMAGES_PER_POST_MAX = 4
 DEFAULT_IMAGE_AI_QUOTA = "0"
-IMAGE_AI_QUOTA_VALUES = {"0", "1", "all"}
+IMAGE_AI_QUOTA_VALUES = {"0", "1", "2", "3", "4", "all"}
 DEFAULT_IMAGE_AI_ENGINE = "together_flux"
 DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES = {
     "cafe": "0",
@@ -230,6 +230,15 @@ def normalize_image_ai_quota(raw_value: Any, default: str = DEFAULT_IMAGE_AI_QUO
     value = str(raw_value or "").strip().lower()
     if value in IMAGE_AI_QUOTA_VALUES:
         return value
+    try:
+        numeric_value = int(value)
+        if numeric_value <= 0:
+            return "0"
+        if numeric_value >= 4:
+            return "all"
+        return str(numeric_value)
+    except (TypeError, ValueError):
+        pass
     return str(default).strip().lower() if str(default).strip().lower() in IMAGE_AI_QUOTA_VALUES else DEFAULT_IMAGE_AI_QUOTA
 
 
@@ -1222,11 +1231,12 @@ class LLMRouter:
         def resolve_ai_count(total_images: int) -> int:
             safe_total = max(0, int(total_images))
             normalized_quota = normalize_image_ai_quota(image_ai_quota)
-            if normalized_quota == "1":
-                return min(1, safe_total)
             if normalized_quota == "all":
-                return min(4, safe_total)
-            return 0
+                return safe_total
+            try:
+                return min(int(normalized_quota), safe_total)
+            except (TypeError, ValueError):
+                return 0
 
         ai_count_max = resolve_ai_count(images_per_post)
         ai_count_min = resolve_ai_count(images_per_post_min)

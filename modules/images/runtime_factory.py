@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Optional
@@ -125,7 +126,33 @@ def build_runtime_image_generator(
     image_plan = dict(plan.get("image", {}))
 
     image_enabled = bool(image_plan.get("enabled", True))
-    images_per_post = int(image_plan.get("images_per_post", app_config.images.max_content_images) or 0)
+    global_images_per_post = int(image_plan.get("images_per_post", app_config.images.max_content_images) or 0)
+    images_per_post = global_images_per_post
+    raw_allocations = job_store.get_system_setting("scheduler_category_allocations", "[]")
+    try:
+        allocation_list = json.loads(raw_allocations) if raw_allocations else []
+        if not isinstance(allocation_list, list):
+            allocation_list = []
+    except Exception:
+        allocation_list = []
+    normalized_topic_mode = str(topic_mode or "").strip().lower()
+    for allocation_item in allocation_list:
+        if not isinstance(allocation_item, dict):
+            continue
+        allocation_topic = str(allocation_item.get("topic_mode", "")).strip().lower()
+        if allocation_topic != normalized_topic_mode:
+            continue
+        images_per_post = max(
+            0,
+            min(
+                4,
+                int(
+                    allocation_item.get("images_per_post", global_images_per_post)
+                    or global_images_per_post
+                ),
+            ),
+        )
+        break
     ai_quota = _resolve_base_ai_quota(saved=saved, image_plan=image_plan)
     effective_quota_for_init_topic = _resolve_ai_quota_for_topic(
         saved=saved,
