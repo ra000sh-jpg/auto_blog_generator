@@ -66,7 +66,7 @@ export function DashboardSchedulerCard({
                         disabled={pauseToggling || dashLoading}
                         className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${s?.paused
                                 ? "bg-emerald-500 text-white hover:bg-emerald-600"
-                                : "bg-amber-500 text-white hover:bg-amber-600"
+                                : "bg-rose-500 text-white hover:bg-rose-600"
                             }`}
                     >
                         {pauseToggling ? (
@@ -76,7 +76,7 @@ export function DashboardSchedulerCard({
                         ) : (
                             <Pause className="h-3.5 w-3.5" />
                         )}
-                        {s?.paused ? "재개" : "일시정지"}
+                        {s?.paused ? "재가동" : "정지"}
                     </button>
                 </div>
             </div>

@@ -299,7 +299,8 @@ class PipelineService:
         topic_mode = str(seo_data.get("topic_mode", "")).strip().lower()
 
         # semi_auto 모드에서는 이미지 자동 생성을 건너뛰고 텔레그램 수집 대기로 전환한다.
-        if is_semi_auto_mode(self.job_store):
+        # topic_mode 를 전달하면 토픽별 분리(방안 A) 또는 전역 semi_auto 로 판단한다.
+        if is_semi_auto_mode(self.job_store, topic_mode):
             notifier_ready = bool(self.notifier and getattr(self.notifier, "enabled", False))
             raw_slots = content_result.get("image_slots")
             image_slots = raw_slots if isinstance(raw_slots, list) else []

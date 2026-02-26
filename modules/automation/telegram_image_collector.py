@@ -17,12 +17,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MODE_KEY = "telegram_image_mode"
+_SEMI_AUTO_TOPICS_KEY = "scheduler_semi_auto_topics"
 _LAST_UPDATE_KEY = "telegram_last_update_id"
 _SLOT_KEY_PREFIX = "img_slot_"
 
 
-def is_semi_auto_mode(job_store: "JobStore") -> bool:
-    """semi_auto 모드 활성화 여부를 반환한다."""
+def is_semi_auto_mode(job_store: "JobStore", topic_mode: str = "") -> bool:
+    """semi_auto 모드 활성화 여부를 반환한다.
+
+    우선순위:
+    1. scheduler_semi_auto_topics 설정에 topic_mode 가 포함된 경우 → True  (방안 A: 토픽별 분리)
+    2. 전역 telegram_image_mode == "semi_auto" → True  (레거시 글로벌 모드)
+    3. 그 외 → False (Pexels/API 자동생성)
+    """
+    # 방안 A: 토픽 모드별 분리
+    if topic_mode:
+        raw = job_store.get_system_setting(_SEMI_AUTO_TOPICS_KEY, "")
+        if raw:
+            try:
+                topics = json.loads(raw)
+                if isinstance(topics, list) and topic_mode in topics:
+                    return True
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # 레거시: 전역 semi_auto 모드
     return job_store.get_system_setting(_MODE_KEY, "auto") == "semi_auto"
 
 
