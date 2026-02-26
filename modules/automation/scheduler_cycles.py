@@ -39,7 +39,8 @@ async def cycle_run_startup_catchup(service: "SchedulerService") -> None:
     await service._run_draft_prefetch()
     await service._run_daily_target_check()
     await service._run_metrics_collection()
-    await service._run_weekly_model_competition()
+    await service._run_daily_model_eval()
+    await service._run_auto_champion_switch()
     await service._run_feedback_analysis()
     await service._run_sub_job_catchup()
     await service._run_sub_job_publish_catchup()
@@ -700,186 +701,190 @@ def cycle_build_daily_publish_slots(service: "SchedulerService", target_date: da
 
 
 
-def cycle_week_start_local(service: "SchedulerService", now_local: datetime) -> date:
-    """현재 시각 기준 주 시작일(월요일)을 반환한다."""
-    return now_local.date() - timedelta(days=now_local.weekday())
+def _normalize_model_id(value: str) -> str:
+    """모델 식별자를 비교 가능한 형태로 정규화한다."""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+    if ":" in normalized:
+        return normalized.split(":", 1)[1].strip()
+    return normalized
 
 
-
-def cycle_next_week_apply_at_local_iso(service: "SchedulerService", week_start: date) -> str:
-    """다음 주 월요일 00:05 로컬 시각 ISO를 반환한다."""
-    next_week = week_start + timedelta(days=7)
-    dt = datetime.combine(
-        next_week,
-        time_obj(hour=0, minute=5),
-        tzinfo=service._get_now_local().tzinfo,
-    )
-    return dt.isoformat(timespec="seconds")
-
-
-
-def cycle_build_competition_candidates(service: "SchedulerService") -> List[Dict[str, Any]]:
-    """라우터 설정 기준으로 주간 경쟁 후보 모델을 구성한다."""
-    from ..llm.llm_router import LLMRouter
-
-    router = LLMRouter(job_store=service.job_store)
-    plan = router.build_plan()
-    available = list(plan.get("available_text_models", []))
-    normalized: List[Dict[str, Any]] = []
-    for item in available:
-        model_id = str(item.get("model", "")).strip()
-        provider = str(item.get("provider", "")).strip().lower()
-        if not model_id or not provider:
-            continue
-        normalized.append(
-            {
-                "model_id": model_id,
-                "provider": provider,
-                "base_quality": float(item.get("quality_score", 0) or 0),
-                "scores": [],
-                "eliminated": False,
-            }
-        )
-    normalized.sort(key=lambda x: (-float(x.get("base_quality", 0.0)), str(x.get("model_id", ""))))
-    return normalized[:3]
-
-
-
-async def cycle_run_weekly_model_competition(service: "SchedulerService") -> None:
-    """주간 모델 경쟁 상태를 갱신한다 (shadow -> champion_ops)."""
+async def cycle_run_daily_model_eval(service: "SchedulerService") -> None:
+    """매일 1회 오늘의 eval 대상 모델을 선정하고 저장한다."""
     if not service.job_store:
         return
 
-    now_local = service._get_now_local()
-    week_start = service._week_start_local(now_local).isoformat()
-    apply_at = service._next_week_apply_at_local_iso(service._week_start_local(now_local))
-    state = service.job_store.get_weekly_competition_state(week_start)
-
-    if state is None:
-        candidates = service._build_competition_candidates()
-        if not candidates:
-            logger.info("Weekly competition skipped: no candidates")
-            return
-        champion_model = str(candidates[0].get("model_id", "")).strip()
-        challenger_model = str(candidates[1].get("model_id", "")).strip() if len(candidates) > 1 else ""
-        service.job_store.upsert_weekly_competition_state(
-            week_start=week_start,
-            phase="testing",
-            candidates=candidates,
-            champion_model=champion_model,
-            challenger_model=challenger_model,
-            early_terminated=False,
-            apply_at=apply_at,
-        )
-        service.job_store.set_system_setting("router_competition_phase", "testing")
-        service.job_store.set_system_setting("router_competition_week_start", week_start)
-        service.job_store.set_system_setting("router_competition_apply_at", apply_at)
-        service.job_store.set_system_setting("router_shadow_mode", "true")
-        service.job_store.set_system_setting("router_champion_model", champion_model)
-        service.job_store.set_system_setting("router_challenger_model", challenger_model)
-        logger.info(
-            "Weekly competition initialized",
-            extra={
-                "week_start": week_start,
-                "phase": "testing",
-                "champion_model": champion_model,
-                "challenger_model": challenger_model,
-            },
-        )
+    today_key = service._today_key()
+    last_run = service.job_store.get_system_setting("router_eval_last_run_date", "")
+    if last_run == today_key:
+        logger.debug("Daily eval already ran today (%s)", today_key)
         return
 
-    current_phase = str(state.get("phase", "testing")).strip().lower()
-    if current_phase != "testing":
-        return
-    if now_local.weekday() < service.WEEKLY_COMPETITION_TEST_END_WEEKDAY:
+    raw_registered = service.job_store.get_system_setting("router_registered_models", "[]")
+    try:
+        registered_models = json.loads(raw_registered) if raw_registered else []
+        if not isinstance(registered_models, list):
+            registered_models = []
+    except Exception:
+        registered_models = []
+
+    active_models = [
+        model for model in registered_models
+        if isinstance(model, dict) and bool(model.get("active", True))
+    ]
+    if not active_models:
+        logger.info("Daily eval skipped: no active registered models")
         return
 
+    since_90d = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
     summary = service.job_store.get_model_performance_summary(
-        since=f"{week_start}T00:00:00Z",
-        slot_types=["shadow", "challenger", "main"],
+        since=since_90d,
+        slot_types=["eval", "main", "shadow", "challenger"],
     )
-    by_model = {str(item.get("model_id", "")): item for item in summary}
-    candidates = list(state.get("candidates", []))
-    ranked: List[Dict[str, Any]] = []
-    for candidate in candidates:
-        model_id = str(candidate.get("model_id", "")).strip()
+
+    samples_map: Dict[str, int] = {}
+    for row in summary:
+        model_id = _normalize_model_id(str(row.get("model_id", "")))
         if not model_id:
             continue
-        perf = by_model.get(model_id, {})
-        avg_quality = float(perf.get("avg_quality_score", candidate.get("base_quality", 0.0)) or 0.0)
-        samples = int(perf.get("samples", 0) or 0)
-        avg_cost = float(perf.get("avg_cost_won", 0.0) or 0.0)
-        ranked.append(
+        samples_map[model_id] = int(row.get("samples", 0) or 0)
+
+    candidates: List[Dict[str, Any]] = []
+    for model in active_models:
+        model_id = str(model.get("model_id", "")).strip()
+        if not model_id:
+            continue
+        normalized_model_id = _normalize_model_id(model_id)
+        candidates.append(
             {
                 "model_id": model_id,
-                "provider": str(candidate.get("provider", "")).strip().lower(),
-                "avg_quality_score": avg_quality,
-                "samples": samples,
-                "avg_cost_won": avg_cost,
+                "provider": str(model.get("provider", "")).strip().lower(),
+                "samples": samples_map.get(normalized_model_id, 0),
             }
         )
-    if not ranked:
+
+    if not candidates:
+        logger.info("Daily eval skipped: no candidate models")
         return
 
-    ranked.sort(
-        key=lambda x: (
-            -float(x.get("avg_quality_score", 0.0)),
-            -int(x.get("samples", 0)),
-            float(x.get("avg_cost_won", 0.0)),
+    candidates.sort(key=lambda item: (int(item["samples"]), str(item["model_id"])))
+    selected = candidates[0]
+    service.job_store.set_system_setting("router_eval_model_today", str(selected["model_id"]))
+    service.job_store.set_system_setting("router_eval_last_run_date", today_key)
+    logger.info(
+        "Daily eval model selected: %s (samples=%d)",
+        selected["model_id"],
+        selected["samples"],
+    )
+
+
+async def cycle_auto_champion_switch(service: "SchedulerService") -> None:
+    """누적 성능 데이터 기준으로 챔피언 모델 자동 교체를 시도한다."""
+    if not service.job_store:
+        return
+
+    raw_registered = service.job_store.get_system_setting("router_registered_models", "[]")
+    try:
+        registered_models = json.loads(raw_registered) if raw_registered else []
+        if not isinstance(registered_models, list):
+            registered_models = []
+    except Exception:
+        registered_models = []
+    active_model_ids = {
+        _normalize_model_id(str(model.get("model_id", "")))
+        for model in registered_models
+        if isinstance(model, dict) and bool(model.get("active", True))
+    }
+    active_model_ids.discard("")
+    if not active_model_ids:
+        return
+
+    try:
+        min_samples = max(1, int(service.job_store.get_system_setting("router_eval_min_samples", "5") or "5"))
+    except ValueError:
+        min_samples = 5
+    try:
+        threshold = max(0.0, float(
+            service.job_store.get_system_setting("router_champion_switch_threshold", "2.0") or "2.0"
+        ))
+    except ValueError:
+        threshold = 2.0
+
+    strategy_mode = str(service.job_store.get_system_setting("router_strategy_mode", "cost")).strip().lower()
+    strategy_mode = "quality" if strategy_mode == "quality" else "cost"
+    current_champion = str(service.job_store.get_system_setting("router_champion_model", "")).strip()
+    normalized_current = _normalize_model_id(current_champion)
+
+    since_90d = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    summary = service.job_store.get_model_performance_summary(
+        since=since_90d,
+        slot_types=["eval", "main", "shadow", "challenger"],
+    )
+    filtered_summary = [
+        item for item in summary
+        if _normalize_model_id(str(item.get("model_id", ""))) in active_model_ids
+    ]
+    if not filtered_summary:
+        return
+
+    eligible = [item for item in filtered_summary if int(item.get("samples", 0) or 0) >= min_samples]
+    if not eligible:
+        return
+
+    if strategy_mode == "quality":
+        eligible.sort(key=lambda item: -float(item.get("avg_quality_score", 0.0) or 0.0))
+    else:
+        eligible.sort(key=lambda item: -(float(item.get("avg_score_per_won", 0.0) or 0.0)))
+
+    best = eligible[0]
+    best_model_id = str(best.get("model_id", "")).strip()
+    normalized_best = _normalize_model_id(best_model_id)
+    if not best_model_id or normalized_best == normalized_current:
+        return
+
+    champion_data = next(
+        (
+            item for item in filtered_summary
+            if _normalize_model_id(str(item.get("model_id", ""))) == normalized_current
+        ),
+        None,
+    )
+
+    should_switch = False
+    if strategy_mode == "quality":
+        champion_quality = float(champion_data.get("avg_quality_score", 0.0) or 0.0) if champion_data else 0.0
+        best_quality = float(best.get("avg_quality_score", 0.0) or 0.0)
+        should_switch = champion_data is None or best_quality > champion_quality + threshold
+    else:
+        champion_spr = float(champion_data.get("avg_score_per_won", 0.0) or 0.0) if champion_data else 0.0
+        champion_quality = float(champion_data.get("avg_quality_score", 0.0) or 0.0) if champion_data else 0.0
+        best_spr = float(best.get("avg_score_per_won", 0.0) or 0.0)
+        best_quality = float(best.get("avg_quality_score", 0.0) or 0.0)
+        should_switch = champion_data is None or (
+            best_spr > champion_spr + threshold
+            and best_quality >= champion_quality - 2.0
         )
-    )
-    champion = ranked[0]
-    challenger = ranked[1] if len(ranked) > 1 else None
 
-    champion_model = str(champion.get("model_id", "")).strip()
-    challenger_model = str(challenger.get("model_id", "")).strip() if challenger else ""
+    if not should_switch:
+        return
 
-    service.job_store.upsert_weekly_competition_state(
-        week_start=week_start,
-        phase="champion_ops",
-        candidates=candidates,
-        champion_model=champion_model,
-        challenger_model=challenger_model,
-        early_terminated=False,
-        apply_at=apply_at,
-    )
-    service.job_store.record_champion_history(
-        week_start=week_start,
-        champion_model=champion_model,
-        challenger_model=challenger_model,
-        avg_champion_score=float(champion.get("avg_quality_score", 0.0)),
-        topic_mode_scores={},
-        cost_won=float(champion.get("avg_cost_won", 0.0)),
-        early_terminated=False,
-        shadow_only=True,
-    )
-    service.job_store.set_system_setting("router_competition_phase", "champion_ops")
-    service.job_store.set_system_setting("router_competition_week_start", week_start)
-    service.job_store.set_system_setting("router_competition_apply_at", apply_at)
-    service.job_store.set_system_setting("router_shadow_mode", "false")
-    service.job_store.set_system_setting("router_champion_model", champion_model)
-    service.job_store.set_system_setting("router_challenger_model", challenger_model)
+    service.job_store.set_system_setting("router_champion_model", best_model_id)
+    logger.info("Champion switched: %s -> %s", current_champion, best_model_id)
 
     if service.notifier and getattr(service.notifier, "enabled", False):
         message = (
-            "📢 챔피언 모델 갱신\n"
-            f"• week_start: {week_start}\n"
-            f"• champion: {champion_model} ({float(champion.get('avg_quality_score', 0.0)):.1f}점)\n"
-            f"• challenger: {challenger_model or '-'}\n"
-            f"• apply_at: {apply_at}"
+            "🏆 챔피언 모델 자동 교체\n"
+            f"• 이전: {current_champion or '-'}\n"
+            f"• 신규: {best_model_id}\n"
+            f"• 품질: {float(best.get('avg_quality_score', 0.0) or 0.0):.1f}점\n"
+            f"• 비용효율: {float(best.get('avg_score_per_won', 0.0) or 0.0):.2f}"
         )
-        send_background = getattr(service.notifier, "send_message_background", None)
-        if callable(send_background):
-            send_background(message, disable_notification=False)
-
-    logger.info(
-        "Weekly competition promoted to champion_ops",
-        extra={
-            "week_start": week_start,
-            "champion_model": champion_model,
-            "challenger_model": challenger_model,
-        },
-    )
+        try:
+            await service.notifier.send_message(message)
+        except Exception:
+            logger.debug("Champion switch notification failed", exc_info=True)
 
 
 

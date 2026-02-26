@@ -98,7 +98,6 @@ class SchedulerService:
     DEFAULT_PUBLISHER_POLL_SECONDS = constants.DEFAULT_PUBLISHER_POLL_SECONDS
     DEFAULT_DAILY_TARGET = constants.DEFAULT_DAILY_TARGET
     DEFAULT_IDEA_VAULT_DAILY_QUOTA = constants.DEFAULT_IDEA_VAULT_DAILY_QUOTA
-    WEEKLY_COMPETITION_TEST_END_WEEKDAY = 3  # 목요일(월=0)
 
     def __init__(
         self,
@@ -245,10 +244,18 @@ class SchedulerService:
                 misfire_grace_time=self.MISFIRE_GRACE_TIME,
             )
             self._scheduler.add_job(
-                self._run_weekly_model_competition,
-                cron_trigger(hour=0, minute=6),
-                id="weekly_model_competition",
-                name="주간 모델 경쟁 상태 갱신",
+                self._run_daily_model_eval,
+                cron_trigger(hour=0, minute=7),
+                id="daily_model_eval",
+                name="일일 모델 평가 슬롯 선정",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+            self._scheduler.add_job(
+                self._run_auto_champion_switch,
+                cron_trigger(hour=2, minute=0),
+                id="auto_champion_switch",
+                name="챔피언 모델 자동 교체 점검",
                 replace_existing=True,
                 misfire_grace_time=self.MISFIRE_GRACE_TIME,
             )
@@ -428,17 +435,11 @@ class SchedulerService:
         """준비된 초안 1건을 즉시 발행하고 발행 결과를 반환한다."""
         return await self._publish_next_available_job()
 
-    def _week_start_local(self, *args, **kwargs):
-        return scheduler_cycles.cycle_week_start_local(self, *args, **kwargs)
+    async def _run_daily_model_eval(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_daily_model_eval(self, *args, **kwargs)
 
-    def _next_week_apply_at_local_iso(self, *args, **kwargs):
-        return scheduler_cycles.cycle_next_week_apply_at_local_iso(self, *args, **kwargs)
-
-    def _build_competition_candidates(self, *args, **kwargs):
-        return scheduler_cycles.cycle_build_competition_candidates(self, *args, **kwargs)
-
-    async def _run_weekly_model_competition(self, *args, **kwargs):
-        return await scheduler_cycles.cycle_run_weekly_model_competition(self, *args, **kwargs)
+    async def _run_auto_champion_switch(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_auto_champion_switch(self, *args, **kwargs)
 
     def _get_configured_daily_target(self, *args, **kwargs):
         return scheduler_cycles.cycle_get_configured_daily_target(self, *args, **kwargs)

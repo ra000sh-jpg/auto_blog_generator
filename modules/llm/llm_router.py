@@ -202,8 +202,6 @@ DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES = {
     "parenting": "0",
 }
 DEFAULT_TRAFFIC_FEEDBACK_STRONG_MODE = False
-DEFAULT_COMPETITION_PHASE = "idle"
-COMPETITION_PHASES = {"idle", "testing", "champion_ops", "completed"}
 
 
 def mask_secret(raw_value: str) -> str:
@@ -329,12 +327,12 @@ class LLMRouter:
         "router_images_per_post",
         "router_images_per_post_min",
         "router_images_per_post_max",
-        "router_competition_phase",
-        "router_competition_week_start",
-        "router_competition_apply_at",
-        "router_shadow_mode",
+        "router_eval_model_today",
+        "router_eval_min_samples",
+        "router_eval_last_run_date",
+        "router_champion_switch_threshold",
+        "router_registered_models",
         "router_champion_model",
-        "router_challenger_model",
         "fallback_category",
     )
 
@@ -414,13 +412,27 @@ class LLMRouter:
         if images_per_post_min > images_per_post_max:
             images_per_post_min = images_per_post_max
 
-        phase_raw = str(raw_settings.get("router_competition_phase", DEFAULT_COMPETITION_PHASE)).strip().lower()
-        competition_phase = phase_raw if phase_raw in COMPETITION_PHASES else DEFAULT_COMPETITION_PHASE
-        shadow_mode = _to_bool(raw_settings.get("router_shadow_mode", "false"), default=False)
+        eval_model_today = str(raw_settings.get("router_eval_model_today", "")).strip()
+        eval_last_run_date = str(raw_settings.get("router_eval_last_run_date", "")).strip()
+        try:
+            eval_min_samples = max(1, int(raw_settings.get("router_eval_min_samples", "5") or "5"))
+        except ValueError:
+            eval_min_samples = 5
+        try:
+            champion_switch_threshold = max(
+                0.0,
+                float(raw_settings.get("router_champion_switch_threshold", "2.0") or "2.0"),
+            )
+        except ValueError:
+            champion_switch_threshold = 2.0
+        registered_models_raw = raw_settings.get("router_registered_models", "[]")
+        try:
+            registered_models = json.loads(registered_models_raw) if registered_models_raw else []
+            if not isinstance(registered_models, list):
+                registered_models = []
+        except Exception:
+            registered_models = []
         champion_model = str(raw_settings.get("router_champion_model", "")).strip()
-        challenger_model = str(raw_settings.get("router_challenger_model", "")).strip()
-        competition_week_start = str(raw_settings.get("router_competition_week_start", "")).strip()
-        competition_apply_at = str(raw_settings.get("router_competition_apply_at", "")).strip()
         fallback_category = str(raw_settings.get("fallback_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
 
         return {
@@ -436,12 +448,12 @@ class LLMRouter:
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
             "images_per_post_max": images_per_post_max,
-            "competition_phase": competition_phase,
-            "competition_week_start": competition_week_start,
-            "competition_apply_at": competition_apply_at,
-            "shadow_mode": shadow_mode,
+            "eval_model_today": eval_model_today,
+            "eval_last_run_date": eval_last_run_date,
+            "eval_min_samples": eval_min_samples,
+            "champion_switch_threshold": champion_switch_threshold,
+            "registered_models": registered_models,
             "champion_model": champion_model,
-            "challenger_model": challenger_model,
             "fallback_category": fallback_category,
         }
 
@@ -765,10 +777,9 @@ class LLMRouter:
             base_spec=current_quality_spec,
             available_specs=available_specs,
             strategy_mode=strategy_mode,
-            fallback_category=saved.get("fallback_category", DEFAULT_FALLBACK_CATEGORY),
-            phase=saved.get("competition_phase", DEFAULT_COMPETITION_PHASE),
+            eval_model_today=saved.get("eval_model_today", ""),
+            eval_min_samples=saved.get("eval_min_samples", 5),
             champion_model=saved.get("champion_model", ""),
-            challenger_model=saved.get("challenger_model", ""),
         )
         if selected_quality_spec:
             quality_role = self._role_payload(selected_quality_spec, strategy_mode, "quality_step")
@@ -845,17 +856,20 @@ class LLMRouter:
         }
 
     def get_competition_state(self, *, slot_type: str = "default") -> Dict[str, Any]:
-        """주간 경쟁 상태를 UI/런타임 공통 포맷으로 반환한다."""
+        """경쟁 상태를 UI/런타임 공통 포맷으로 반환한다."""
         saved = self.get_saved_settings()
         return {
-            "phase": str(saved.get("competition_phase", DEFAULT_COMPETITION_PHASE)),
-            "week_start": str(saved.get("competition_week_start", "")),
-            "apply_at": str(saved.get("competition_apply_at", "")),
-            "shadow_mode": bool(saved.get("shadow_mode", False)),
             "champion_model": str(saved.get("champion_model", "")),
-            "challenger_model": str(saved.get("challenger_model", "")),
-            "fallback_category": str(saved.get("fallback_category", DEFAULT_FALLBACK_CATEGORY)),
+            "eval_model_today": str(saved.get("eval_model_today", "")),
+            "registered_models": list(saved.get("registered_models", [])),
             "slot_type": slot_type,
+            # 하위호환 필드
+            "phase": "eval_continuous",
+            "week_start": "",
+            "apply_at": "",
+            "shadow_mode": False,
+            "challenger_model": "",
+            "fallback_category": str(saved.get("fallback_category", DEFAULT_FALLBACK_CATEGORY)),
         }
 
     def _merge_preview_settings(
@@ -956,27 +970,24 @@ class LLMRouter:
         self,
         *,
         job: "Job",
-        fallback_category: str,
-        phase: str,
+        eval_model_today: str,
+        eval_min_samples: int = 1,
     ) -> str:
-        """작업이 main/shadow/challenger 중 어떤 슬롯인지 판별한다."""
-        normalized_job_category = self._normalize_category_name(getattr(job, "category", ""))
-        normalized_fallback = self._normalize_category_name(fallback_category)
-        if normalized_job_category and normalized_job_category == normalized_fallback:
-            # 하루 한 건 제한 로직 (사용자 요청: 주간 경쟁모델은 하루에 하나씩만)
-            if self.job_store and hasattr(self.job_store, "get_today_competition_job_count"):
-                try:
-                    comp_count = self.job_store.get_today_competition_job_count()
-                    if comp_count >= 1:
-                        # 이미 오늘 경쟁 모델이 작동했으므로 일반 'main'으로 처리
-                        return "main"
-                except Exception:
-                    pass
-
-            if str(phase).strip().lower() == "champion_ops":
-                return "challenger"
-            return "shadow"
-        return "main"
+        """작업이 eval 슬롯인지 main 슬롯인지 판별한다."""
+        del job, eval_min_samples
+        if not str(eval_model_today).strip():
+            return "main"
+        if not self.job_store:
+            return "main"
+        try:
+            kst = timezone(timedelta(hours=9))
+            today_key = datetime.now(kst).strftime("%Y-%m-%d")
+            today_eval_count = self.job_store.get_today_eval_job_count(today_key)
+            if int(today_eval_count) >= 1:
+                return "main"
+        except Exception:
+            return "main"
+        return "eval"
 
     def _find_text_model_by_model_id(
         self,
@@ -1012,45 +1023,41 @@ class LLMRouter:
         base_spec: Optional[TextModelSpec],
         available_specs: List[TextModelSpec],
         strategy_mode: str,
-        fallback_category: str,
-        phase: str,
+        eval_model_today: str,
+        eval_min_samples: int,
         champion_model: str,
-        challenger_model: str,
     ) -> Tuple[Optional[TextModelSpec], str]:
-        """경쟁 상태를 반영해 quality_step 모델을 결정한다."""
+        """전략 모드와 eval 슬롯을 반영해 quality_step 모델을 결정한다."""
         del strategy_mode
         slot_type = self._resolve_job_slot_type(
             job=job,
-            fallback_category=fallback_category,
-            phase=phase,
+            eval_model_today=eval_model_today,
+            eval_min_samples=eval_min_samples,
         )
+
+        if slot_type == "eval":
+            eval_spec = self._find_text_model_by_model_id(
+                model_id=eval_model_today,
+                available_specs=available_specs,
+            )
+            if eval_spec:
+                return eval_spec, "eval"
+            slot_type = "main"
+
         if slot_type == "main":
             specialist = self._find_topic_specialist_model(job=job, available_specs=available_specs)
             if specialist:
                 return specialist, "main_specialist"
 
-        selected = base_spec
-        if slot_type == "main":
-            selected = self._find_text_model_by_model_id(
+        if slot_type == "main" and champion_model:
+            champion_spec = self._find_text_model_by_model_id(
                 model_id=champion_model,
                 available_specs=available_specs,
-            ) or base_spec
-            return selected, slot_type
+            )
+            if champion_spec:
+                return champion_spec, "main"
 
-        preferred_challenger = self._find_text_model_by_model_id(
-            model_id=challenger_model,
-            available_specs=available_specs,
-        )
-        if preferred_challenger:
-            return preferred_challenger, slot_type
-
-        fallback_champion = self._find_text_model_by_model_id(
-            model_id=champion_model,
-            available_specs=available_specs,
-        )
-        if fallback_champion:
-            return fallback_champion, slot_type
-        return selected, slot_type
+        return base_spec, "main"
 
     def _resolve_topic_mode_from_job(self, job: "Job") -> str:
         """작업 텍스트 문맥에서 topic_mode를 추정한다."""
@@ -1078,7 +1085,7 @@ class LLMRouter:
         ninety_days_ago = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
         summary = self.job_store.get_model_performance_summary(
             since=ninety_days_ago,
-            slot_types=["main"],
+            slot_types=["main", "eval"],
             topic_mode=topic_mode,
         )
         eligible = [item for item in summary if int(item.get("samples", 0) or 0) >= 10]

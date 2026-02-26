@@ -1068,27 +1068,33 @@ class PipelineService:
         """카테고리 문자열 비교용 정규화."""
         return re.sub(r"\s+", "", str(value or "").lower())
 
-    def _resolve_slot_type(self, job: Job) -> str:
-        """작업의 성능 슬롯 유형(main/shadow/challenger)을 판단한다."""
-        fallback_category = str(
-            self.job_store.get_system_setting("fallback_category", "다양한 생각들")
-        ).strip() or "다양한 생각들"
-        normalized_job_category = self._normalize_category_name(job.category)
-        normalized_fallback = self._normalize_category_name(fallback_category)
-        if normalized_job_category and normalized_job_category == normalized_fallback:
-            phase = str(self.job_store.get_system_setting("router_competition_phase", "idle")).strip().lower()
-            if phase == "champion_ops":
-                return "challenger"
-            return "shadow"
+    def _resolve_slot_type(self, job: Job, payload: Optional[Dict[str, Any]] = None) -> str:
+        """작업의 성능 슬롯 유형(eval/main)을 판단한다."""
+        del job
+        eval_model_today = str(self.job_store.get_system_setting("router_eval_model_today", "")).strip()
+        if not eval_model_today:
+            return "main"
+
+        def _normalize_model_id(value: str) -> str:
+            normalized = str(value or "").strip().lower()
+            if ":" in normalized:
+                return normalized.split(":", 1)[1].strip()
+            return normalized
+
+        actual_model = ""
+        if payload and isinstance(payload, dict):
+            seo_snapshot = payload.get("seo_snapshot", {})
+            if isinstance(seo_snapshot, dict):
+                actual_model = str(seo_snapshot.get("provider_model", "")).strip()
+
+        if _normalize_model_id(actual_model) and _normalize_model_id(actual_model) == _normalize_model_id(eval_model_today):
+            return "eval"
         return "main"
 
     def _should_shadow_publish(self, *, job: Job, payload: Dict[str, Any]) -> bool:
-        """Shadow 테스트 모드에서 실제 발행을 건너뛸지 판단한다."""
-        del payload
-        shadow_mode = str(self.job_store.get_system_setting("router_shadow_mode", "false")).strip().lower()
-        phase = str(self.job_store.get_system_setting("router_competition_phase", "idle")).strip().lower()
-        slot_type = self._resolve_slot_type(job)
-        return shadow_mode in {"1", "true", "yes", "on"} and phase == "testing" and slot_type == "shadow"
+        """신규 구조에서는 eval 슬롯도 실제 발행한다."""
+        del job, payload
+        return False
 
     def _estimate_text_cost_won(self, provider: str, token_usage: Dict[str, Any]) -> float:
         """토큰 사용량 기반 텍스트 비용을 KRW로 추정한다."""
@@ -1128,7 +1134,7 @@ class PipelineService:
         topic_mode = str(seo_snapshot.get("topic_mode", "cafe")).strip().lower() or "cafe"
         quality_score = float(quality_snapshot.get("score", 0.0) or 0.0)
         cost_won = self._estimate_text_cost_won(provider, token_usage)
-        slot_type = self._resolve_slot_type(job)
+        slot_type = self._resolve_slot_type(job, payload)
         is_free_model = provider in self.FREE_MODEL_PROVIDERS
 
         try:

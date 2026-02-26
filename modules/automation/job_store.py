@@ -19,7 +19,7 @@ import socket
 import os
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -163,6 +163,10 @@ class JobStore:
         self.config = config or JobConfig()
         self._worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self._ensure_directory()
+        self._init_tables()
+
+    def ensure_schema(self) -> None:
+        """테이블/인덱스/기본 설정을 재검증한다."""
         self._init_tables()
 
     def _ensure_directory(self):
@@ -523,6 +527,91 @@ class JobStore:
                     "Backfilled completed_at from updated_at",
                     extra={"count": completed_backfill},
                 )
+        self._migrate_competition_settings()
+
+    def _migrate_competition_settings(self) -> None:
+        """경쟁 모델 설정을 신규 구조로 백필한다."""
+        now = now_utc()
+        defaults = [
+            ("router_eval_min_samples", "5"),
+            ("router_champion_switch_threshold", "2.0"),
+            ("router_eval_model_today", ""),
+            ("router_eval_last_run_date", ""),
+        ]
+        with self.connection() as conn:
+            for setting_key, setting_value in defaults:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (setting_key, setting_value, now),
+                )
+
+            row = conn.execute(
+                """
+                SELECT setting_value
+                FROM system_settings
+                WHERE setting_key = 'router_registered_models'
+                """
+            ).fetchone()
+            existing_value = str(row["setting_value"] or "").strip() if row else ""
+            if existing_value:
+                return
+
+            champion_row = conn.execute(
+                """
+                SELECT setting_value
+                FROM system_settings
+                WHERE setting_key = 'router_champion_model'
+                """
+            ).fetchone()
+            challenger_row = conn.execute(
+                """
+                SELECT setting_value
+                FROM system_settings
+                WHERE setting_key = 'router_challenger_model'
+                """
+            ).fetchone()
+            champion_raw = str(champion_row["setting_value"] or "").strip() if champion_row else ""
+            challenger_raw = str(challenger_row["setting_value"] or "").strip() if challenger_row else ""
+
+            def _split_provider_model(model_raw: str) -> Dict[str, str]:
+                value = str(model_raw or "").strip()
+                if not value:
+                    return {"provider": "", "model_id": ""}
+                if ":" in value:
+                    provider, model_id = value.split(":", 1)
+                    return {"provider": provider.strip(), "model_id": model_id.strip()}
+                return {"provider": "", "model_id": value}
+
+            registered: List[Dict[str, Any]] = []
+            champion = _split_provider_model(champion_raw)
+            if champion["model_id"]:
+                registered.append(
+                    {
+                        "model_id": champion["model_id"],
+                        "provider": champion["provider"],
+                        "active": True,
+                    }
+                )
+            challenger = _split_provider_model(challenger_raw)
+            if challenger["model_id"] and challenger["model_id"] != champion["model_id"]:
+                registered.append(
+                    {
+                        "model_id": challenger["model_id"],
+                        "provider": challenger["provider"],
+                        "active": True,
+                    }
+                )
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO system_settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                ("router_registered_models", json.dumps(registered, ensure_ascii=False), now),
+            )
 
     def _generate_idempotency_key(
         self,
@@ -2642,13 +2731,40 @@ class JobStore:
             for row in rows
         ]
 
+    def get_today_eval_job_count(self, today_key: Optional[str] = None) -> int:
+        """오늘(KST 기준) eval 슬롯 작업 수를 반환한다."""
+        kst = timezone(timedelta(hours=9))
+        if today_key:
+            try:
+                local_day = datetime.strptime(today_key, "%Y-%m-%d").date()
+            except ValueError:
+                local_day = datetime.now(kst).date()
+        else:
+            local_day = datetime.now(kst).date()
+
+        start_local = datetime.combine(local_day, datetime.min.time(), tzinfo=kst)
+        end_local = start_local + timedelta(days=1)
+        start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        query = """
+            SELECT COUNT(*) AS total
+            FROM model_performance_log
+            WHERE slot_type = 'eval'
+              AND measured_at >= ?
+              AND measured_at < ?
+        """
+        with self.connection() as conn:
+            row = conn.execute(query, (start_utc, end_utc)).fetchone()
+        return int(row["total"] or 0) if row else 0
+
     def get_today_competition_job_count(self) -> int:
-        """오늘 현재까지 수행된 경쟁 모델(shadow/challenger) 작업 수를 반환한다."""
+        """오늘 현재까지 수행된 eval/shadow/challenger 슬롯 작업 수를 반환한다."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         query = """
             SELECT COUNT(*) AS total
             FROM model_performance_log
-            WHERE slot_type IN ('shadow', 'challenger')
+            WHERE slot_type IN ('eval', 'shadow', 'challenger')
               AND measured_at LIKE ?
         """
         with self.connection() as conn:

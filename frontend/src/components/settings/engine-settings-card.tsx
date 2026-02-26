@@ -85,7 +85,7 @@ export default function EngineSettingsCard({
     });
     const [competitionState, setCompetitionState] = useState(
         initialRouterSettings.competition || {
-            phase: "idle",
+            phase: "eval_continuous",
             week_start: "",
             apply_at: "",
             shadow_mode: false,
@@ -93,6 +93,8 @@ export default function EngineSettingsCard({
             challenger_model: "",
             fallback_category: "다양한 생각들",
             slot_type: "default",
+            eval_model_today: "",
+            registered_models: [],
         },
     );
     const [challengerModel, setChallengerModel] = useState<string>(

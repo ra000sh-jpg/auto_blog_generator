@@ -424,6 +424,8 @@ export type RouterSettingsResponse = {
     challenger_model: string;
     fallback_category: string;
     slot_type: string;
+    eval_model_today?: string;
+    registered_models?: Array<{ model_id: string; provider: string; active: boolean }>;
   };
   matrix: {
     text_models: Array<Record<string, unknown>>;
