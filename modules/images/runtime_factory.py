@@ -15,6 +15,7 @@ from .image_generator import ImageGenerator
 from .openai_image_client import OpenAIImageClient
 from .pexels_client import PexelsImageClient
 from .pollinations_client import PollinationsImageClient
+from .styles import TOPIC_CONTENT_STYLE, TOPIC_THUMBNAIL_STYLE
 from .together_client import TogetherImageClient
 
 logger = logging.getLogger(__name__)
@@ -228,12 +229,37 @@ def build_runtime_image_generator(
             except Exception as exc:
                 logger.warning("Gemini prompt translator skipped: %s", exc)
 
+    # 토픽 모드별 스타일 자동 선택
+    # config(환경변수)에서 명시적으로 레거시 스타일이 지정된 경우 그대로 사용,
+    # 그렇지 않으면 토픽 모드에 맞는 새 스타일로 자동 매핑한다.
+    _legacy_thumb_styles = {"van_gogh_duotone", "neo_impressionist", "stylized_oil"}
+    _legacy_content_styles = {"monet_soft", "watercolor_gentle", "minimal_illustration"}
+
+    resolved_thumbnail_style = app_config.images.thumbnail_style
+    if resolved_thumbnail_style in _legacy_thumb_styles or resolved_thumbnail_style == "van_gogh_duotone":
+        resolved_thumbnail_style = TOPIC_THUMBNAIL_STYLE.get(
+            topic_mode, TOPIC_THUMBNAIL_STYLE["default"]
+        )
+
+    resolved_content_style = app_config.images.content_style
+    if resolved_content_style in _legacy_content_styles or resolved_content_style == "monet_soft":
+        resolved_content_style = TOPIC_CONTENT_STYLE.get(
+            topic_mode, TOPIC_CONTENT_STYLE["default"]
+        )
+
+    logger.info(
+        "Image styles resolved: thumbnail=%s content=%s (topic=%s)",
+        resolved_thumbnail_style,
+        resolved_content_style,
+        topic_mode,
+    )
+
     return ImageGenerator(
         client=primary_client,
         fallback_clients=fallback_clients,
         stock_client=stock_client,
-        thumbnail_style=app_config.images.thumbnail_style,
-        content_style=app_config.images.content_style,
+        thumbnail_style=resolved_thumbnail_style,
+        content_style=resolved_content_style,
         thumbnail_size=app_config.images.thumbnail_size,
         content_size=app_config.images.content_size,
         max_content_images=images_per_post,

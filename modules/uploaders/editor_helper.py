@@ -21,6 +21,29 @@ class NaverEditorHelper:
         """인간적인 딜레이 모사"""
         await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
 
+    async def _type_with_newlines(self, text: str) -> None:
+        """텍스트를 줄바꿈 구조를 보존하며 입력한다.
+
+        \n → Enter 1회, \n\n → Enter 2회(빈 줄)로 변환해
+        네이버 스마트 에디터 ONE에서 단락 간격이 실제로 보이도록 한다.
+        insert_text()는 \\n을 무시하므로 keyboard.press("Enter")로 대체한다.
+        """
+        # 앞뒤 공백 줄만 제거, 내부 줄바꿈은 그대로 보존
+        text_stripped = text.strip("\n")
+        if not text_stripped:
+            return
+
+        lines = text_stripped.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                await self.page.keyboard.insert_text(line)
+            # 마지막 줄이 아니면 Enter 키 입력 (빈 줄도 Enter로 보존)
+            if i < len(lines) - 1:
+                await self.page.keyboard.press("Enter")
+                await asyncio.sleep(0.05)
+        # 텍스트 블록 끝에 Enter 1회 추가 (다음 요소와 분리)
+        await self.page.keyboard.press("Enter")
+
     async def insert_content_with_markers(
         self,
         content: str,
@@ -55,14 +78,15 @@ class NaverEditorHelper:
                     # 마커인데 파일 매핑이 없으면 무시한다.
                     continue
                 else:
-                    part_clean = part.strip("\n")
-                    if part_clean:
-                        await self.page.keyboard.insert_text(part_clean + "\n")
+                    # \n → Enter, \n\n → 빈 줄(Enter 2회) 보존하며 입력
+                    if part.strip("\n"):
+                        await self._type_with_newlines(part)
                         await self.human_delay(500, 1000)
         else:
             # 예전 로직 fallback (마커 기반 포인트가 없을 때 전체 텍스트 후 이미지 일괄 첨부)
-            clean_content = re.sub(r"\[IMG_\d+\]\n?", "", content)
-            await self.page.keyboard.insert_text(clean_content)
+            clean_content = re.sub(r"\[IMG_\d+\]\n*", "", content).strip("\n")
+            if clean_content:
+                await self._type_with_newlines(clean_content)
             await self.human_delay(1000, 2000)
 
             images_to_upload = [p for p in (images or []) if Path(p).exists()]
