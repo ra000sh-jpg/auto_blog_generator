@@ -963,6 +963,16 @@ class LLMRouter:
         normalized_job_category = self._normalize_category_name(getattr(job, "category", ""))
         normalized_fallback = self._normalize_category_name(fallback_category)
         if normalized_job_category and normalized_job_category == normalized_fallback:
+            # 하루 한 건 제한 로직 (사용자 요청: 주간 경쟁모델은 하루에 하나씩만)
+            if self.job_store and hasattr(self.job_store, "get_today_competition_job_count"):
+                try:
+                    comp_count = self.job_store.get_today_competition_job_count()
+                    if comp_count >= 1:
+                        # 이미 오늘 경쟁 모델이 작동했으므로 일반 'main'으로 처리
+                        return "main"
+                except Exception:
+                    pass
+
             if str(phase).strip().lower() == "champion_ops":
                 return "challenger"
             return "shadow"
@@ -1099,7 +1109,7 @@ class LLMRouter:
 
         by_cost = sorted(candidates, key=lambda item: (item.avg_cost_per_1k_usd, -item.quality_score))
         by_quality = sorted(candidates, key=lambda item: (-item.quality_score, item.avg_cost_per_1k_usd))
-        role_min_quality = {"parser": 75, "quality_step": 84, "voice_step": 80}
+        role_min_quality = {"parser": 75, "quality_step": 82, "voice_step": 80}
         threshold = role_min_quality.get(role, 75)
 
         if strategy_mode == "quality":

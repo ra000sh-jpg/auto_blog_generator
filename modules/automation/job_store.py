@@ -2642,6 +2642,19 @@ class JobStore:
             for row in rows
         ]
 
+    def get_today_competition_job_count(self) -> int:
+        """오늘 현재까지 수행된 경쟁 모델(shadow/challenger) 작업 수를 반환한다."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        query = """
+            SELECT COUNT(*) AS total
+            FROM model_performance_log
+            WHERE slot_type IN ('shadow', 'challenger')
+              AND measured_at LIKE ?
+        """
+        with self.connection() as conn:
+            row = conn.execute(query, (f"{today}%",)).fetchone()
+        return int(row["total"] or 0) if row else 0
+
     def get_weekly_competition_state(self, week_start: str) -> Optional[Dict[str, Any]]:
         """주간 경쟁 상태를 조회한다."""
         normalized_week_start = str(week_start).strip()
