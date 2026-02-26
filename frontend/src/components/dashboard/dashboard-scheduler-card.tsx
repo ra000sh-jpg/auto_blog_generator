@@ -31,24 +31,26 @@ export function DashboardSchedulerCard({
                     <Cpu className="h-4 w-4 text-slate-500" />
                     <h2 className="text-sm font-semibold text-slate-700">스케줄러</h2>
                 </div>
-                <button
-                    type="button"
-                    onClick={onToggle}
-                    disabled={schedulerToggling || dashLoading}
-                    className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${dashboard?.scheduler.scheduler_running
-                            ? "bg-rose-500 text-white hover:bg-rose-600"
-                            : "bg-emerald-500 text-white hover:bg-emerald-600"
-                        }`}
-                >
-                    {schedulerToggling ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : dashboard?.scheduler.scheduler_running ? (
-                        <Pause className="h-3.5 w-3.5" />
-                    ) : (
-                        <Play className="h-3.5 w-3.5" />
-                    )}
-                    {dashboard?.scheduler.scheduler_running ? "중지" : "시작"}
-                </button>
+                {!s?.api_only_mode && (
+                    <button
+                        type="button"
+                        onClick={onToggle}
+                        disabled={schedulerToggling || dashLoading}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${s?.scheduler_running
+                                ? "bg-rose-500 text-white hover:bg-rose-600"
+                                : "bg-emerald-500 text-white hover:bg-emerald-600"
+                            }`}
+                    >
+                        {schedulerToggling ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : s?.scheduler_running ? (
+                            <Pause className="h-3.5 w-3.5" />
+                        ) : (
+                            <Play className="h-3.5 w-3.5" />
+                        )}
+                        {s?.scheduler_running ? "중지" : "시작"}
+                    </button>
+                )}
             </div>
             {toggleMsg && (
                 <p className="mt-2 rounded-lg bg-slate-100 px-3 py-1.5 text-xs text-slate-600">{toggleMsg}</p>

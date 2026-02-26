@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Optional
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -25,6 +26,8 @@ router = APIRouter()
 
 class SchedulerStatusResponse(BaseModel):
     scheduler_running: bool
+    daemon_alive: bool
+    api_only_mode: bool
     today_date: str
     daily_target: int
     today_completed: int
@@ -67,6 +70,22 @@ def get_scheduler_instance() -> Any:  # noqa: ANN201
 def _is_api_only_scheduler(scheduler: Any) -> bool:
     """현재 주입된 스케줄러가 API 전용 모드인지 확인한다."""
     return bool(getattr(scheduler, "api_only_mode", False))
+
+
+def _is_daemon_alive(
+    job_store: "JobStore",
+    freshness_seconds: int = 120,
+) -> bool:
+    """데몬 하트비트 신선도로 생존 여부를 판단한다."""
+    try:
+        heartbeat_raw = job_store.get_system_setting("scheduler_daemon_heartbeat_at", "")
+        if not heartbeat_raw:
+            return False
+        heartbeat_time = datetime.fromisoformat(heartbeat_raw.replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - heartbeat_time).total_seconds()
+        return age_seconds <= freshness_seconds
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +144,8 @@ async def get_scheduler_status(
     """스케줄러 실행 상태와 오늘의 발행 현황을 반환한다."""
     scheduler = get_scheduler_instance()
     scheduler_running = scheduler is not None and getattr(scheduler, "_scheduler", None) is not None
+    api_only_mode = _is_api_only_scheduler(scheduler)
+    daemon_alive = _is_daemon_alive(job_store)
     next_slot = None
     if scheduler_running and scheduler:
         next_slot = _next_publish_slot_kst(scheduler)
@@ -170,6 +191,8 @@ async def get_scheduler_status(
 
     return SchedulerStatusResponse(
         scheduler_running=scheduler_running,
+        daemon_alive=daemon_alive,
+        api_only_mode=api_only_mode,
         today_date=today_date,
         daily_target=daily_target,
         today_completed=today_completed,

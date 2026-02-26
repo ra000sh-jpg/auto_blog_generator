@@ -956,6 +956,8 @@ export async function fetchLLMMetrics(hours = 24): Promise<LLMMetricsResponse> {
 
 export type SchedulerStatusResponse = {
   scheduler_running: boolean;
+  daemon_alive: boolean;
+  api_only_mode: boolean;
   today_date: string;
   daily_target: number;
   today_completed: number;
@@ -1033,6 +1035,8 @@ export type DashboardMetrics = {
 
 export type DashboardScheduler = {
   scheduler_running: boolean;
+  daemon_alive: boolean;
+  api_only_mode: boolean;
   today_date: string;
   daily_target: number;
   today_completed: number;

@@ -63,14 +63,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cpu-start-threshold",
         type=float,
-        default=28.0,
-        help="CPU 히스테리시스 시작 임계값(%%) (기본: 28)",
+        default=40.0,
+        help="CPU 히스테리시스 시작 임계값(%%) (기본: 40)",
     )
     parser.add_argument(
         "--cpu-stop-threshold",
         type=float,
-        default=35.0,
-        help="CPU 히스테리시스 정지 임계값(%%) (기본: 35)",
+        default=55.0,
+        help="CPU 히스테리시스 정지 임계값(%%) (기본: 55)",
     )
     parser.add_argument(
         "--cpu-window-size",
@@ -81,8 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-threshold",
         type=float,
-        default=80.0,
-        help="초안 생성 허용 메모리 사용률 상한(%%) (기본: 80)",
+        default=88.0,
+        help="초안 생성 허용 메모리 사용률 상한(%%) (기본: 88)",
     )
     parser.add_argument(
         "--generator-poll-sec",

@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MULTICHANNEL_SETTING_KEY = "multichannel_enabled"
+_IMPLEMENTED_SUB_PLATFORMS = {"naver", "tistory"}
+
 async def cycle_run_startup_catchup(service: "SchedulerService") -> None:
     """시작 시점에 놓친 작업을 보정 실행한다."""
     logger.info("Running startup catch-up")
@@ -1318,10 +1321,10 @@ async def run_scheduler_forever(service_cls,
     db_path: Optional[str] = None,
     min_post_interval_minutes: int = 60,
     publish_interval_max_minutes: int = 110,
-    cpu_start_threshold_percent: float = 28.0,
-    cpu_stop_threshold_percent: float = 35.0,
+    cpu_start_threshold_percent: float = 40.0,
+    cpu_stop_threshold_percent: float = 55.0,
     cpu_avg_window: int = 5,
-    memory_threshold_percent: float = 80.0,
+    memory_threshold_percent: float = 88.0,
     generator_poll_seconds: int = constants.DEFAULT_GENERATOR_POLL_SECONDS,
     publisher_poll_seconds: int = constants.DEFAULT_PUBLISHER_POLL_SECONDS,
     random_seed: Optional[int] = None,

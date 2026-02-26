@@ -41,7 +41,7 @@ export function DashboardSystemStatus({ dashboard, dashLoading }: DashboardSyste
                     {
                         icon: <Zap className="h-3.5 w-3.5" />,
                         label: "스케줄러",
-                        ok: s?.scheduler_running === true,
+                        ok: s?.daemon_alive === true,
                         labelOk: "실행 중",
                         labelFail: "중지됨",
                         sub: s ? `활성: ${s.active_hours}` : null,

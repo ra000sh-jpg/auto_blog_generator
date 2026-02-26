@@ -17,7 +17,12 @@ from pydantic import BaseModel, Field
 from modules.automation.time_utils import now_utc
 from modules.constants import ACTIVE_HOURS_DISPLAY
 from server.dependencies import get_app_config, get_job_store, get_llm_router
-from server.routers.scheduler import get_scheduler_instance, _next_publish_slot_kst
+from server.routers.scheduler import (
+    _is_api_only_scheduler,
+    _is_daemon_alive,
+    _next_publish_slot_kst,
+    get_scheduler_instance,
+)
 
 if TYPE_CHECKING:
     from modules.automation.job_store import JobStore
@@ -105,6 +110,8 @@ class SchedulerData(BaseModel):
     """스케줄러 상태."""
 
     scheduler_running: bool = False
+    daemon_alive: bool = False
+    api_only_mode: bool = False
     today_date: str = ""
     daily_target: int = 3
     today_completed: int = 0
@@ -260,6 +267,8 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
     scheduler_running = (
         scheduler is not None and getattr(scheduler, "_scheduler", None) is not None
     )
+    daemon_alive = _is_daemon_alive(job_store)
+    api_only_mode = _is_api_only_scheduler(scheduler)
 
     today_date = _get_today_kst()
 
@@ -294,6 +303,8 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
 
     return SchedulerData(
         scheduler_running=scheduler_running,
+        daemon_alive=daemon_alive,
+        api_only_mode=api_only_mode,
         today_date=today_date,
         daily_target=daily_target,
         today_completed=today_completed,

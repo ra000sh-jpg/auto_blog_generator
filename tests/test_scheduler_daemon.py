@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json as json_mod
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +24,7 @@ from modules.automation.scheduler_service import SchedulerService
 
 # FastAPI app 을 모듈 레벨에서 한 번만 import (naver_connect.py asyncio.Lock 문제 회피)
 from server.main import app
-from server.dependencies import get_job_store
+from server.dependencies import get_app_config, get_job_store, get_llm_router
 from server.routers.scheduler import set_scheduler_instance
 
 
@@ -185,6 +186,8 @@ def test_scheduler_status_endpoint_schema(tmp_path: Path):
         data = response.json()
         required_keys = {
             "scheduler_running",
+            "daemon_alive",
+            "api_only_mode",
             "today_date",
             "daily_target",
             "today_completed",
@@ -202,11 +205,86 @@ def test_scheduler_status_endpoint_schema(tmp_path: Path):
         missing = required_keys - set(data.keys())
         assert not missing, f"Missing response keys: {missing}"
         assert isinstance(data["scheduler_running"], bool)
+        assert isinstance(data["daemon_alive"], bool)
+        assert isinstance(data["api_only_mode"], bool)
         assert isinstance(data["daily_target"], int)
         assert data["active_hours"] == "08:00~22:00"
         assert data["today_date"] == _today_kst()
     finally:
         app.dependency_overrides.clear()
+        set_scheduler_instance(None)
+
+
+def test_dashboard_stats_scheduler_fields(tmp_path: Path):
+    """GET /api/stats/dashboard 의 scheduler 필드에 데몬 상태 키가 포함되어야 한다."""
+    from fastapi.testclient import TestClient
+    from server.routers import stats as stats_router
+
+    store = build_store(tmp_path, "api_dashboard_test.db")
+    store.set_system_setting(
+        "scheduler_daemon_heartbeat_at",
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    scheduler = build_scheduler(store)
+    scheduler.setup_scheduler()
+    set_scheduler_instance(scheduler)
+
+    # 외부 의존을 줄이기 위해 텔레그램/헬스 요약 빌더를 스텁 처리한다.
+    async def _telegram_stub(_job_store):
+        return stats_router.TelegramStatusData(
+            configured=False,
+            live_ok=False,
+            bot_username=None,
+            error="stub",
+        )
+
+    async def _health_stub(_app_config, _llm_router):
+        return stats_router.HealthSummaryData(status="ok", ok=1, fail=0, total=1)
+
+    original_telegram = stats_router._fetch_telegram_status
+    original_health = stats_router._build_health_summary
+    stats_router._fetch_telegram_status = _telegram_stub
+    stats_router._build_health_summary = _health_stub
+
+    app.dependency_overrides[get_job_store] = lambda: store
+    app.dependency_overrides[get_app_config] = lambda: object()
+    app.dependency_overrides[get_llm_router] = lambda: object()
+    try:
+        client = TestClient(app, raise_server_exceptions=True)
+        response = client.get("/api/stats/dashboard")
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+
+        data = response.json()
+        scheduler_data = data["scheduler"]
+        required_keys = {
+            "scheduler_running",
+            "daemon_alive",
+            "api_only_mode",
+            "today_date",
+            "daily_target",
+            "today_completed",
+            "today_failed",
+            "ready_to_publish",
+            "queued",
+            "ready_master",
+            "ready_sub",
+            "queued_master",
+            "queued_sub",
+            "active_hours",
+            "last_seed_date",
+            "last_seed_count",
+        }
+        missing = required_keys - set(scheduler_data.keys())
+        assert not missing, f"Missing scheduler keys: {missing}"
+        assert isinstance(scheduler_data["scheduler_running"], bool)
+        assert isinstance(scheduler_data["daemon_alive"], bool)
+        assert isinstance(scheduler_data["api_only_mode"], bool)
+        assert scheduler_data["daemon_alive"] is True
+    finally:
+        app.dependency_overrides.clear()
+        stats_router._fetch_telegram_status = original_telegram
+        stats_router._build_health_summary = original_health
         set_scheduler_instance(None)
 
 

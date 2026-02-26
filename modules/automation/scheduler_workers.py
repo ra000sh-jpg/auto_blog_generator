@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,16 @@ async def generator_worker_loop(service: "SchedulerService") -> None:
     consecutive_failures = 0
     try:
         while True:
+            if service.job_store:
+                try:
+                    # 데몬 생존 여부 판단을 위해 최신 하트비트를 기록한다.
+                    service.job_store.set_system_setting(
+                        "scheduler_daemon_heartbeat_at",
+                        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                except Exception:
+                    # 하트비트 실패는 워커 실행을 막지 않는다.
+                    pass
             try:
                 await service._run_sub_job_catchup()
                 await service._run_draft_prefetch()
