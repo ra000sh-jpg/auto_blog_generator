@@ -570,3 +570,65 @@ def test_jobstore_counts_and_claims_support_job_kind_filter(tmp_path: Path):
     assert store.get_today_completed_count() >= 2
     assert store.get_today_completed_count(job_kind=store.JOB_KIND_MASTER) == 1
     assert store.get_today_completed_count(job_kind=store.JOB_KIND_SUB) == 1
+
+
+def test_scheduler_setup_registers_cost_efficiency_alert_job(tmp_path: Path):
+    """notifier+job_store가 있으면 발행 효율 경보 잡이 등록되어야 한다."""
+    store = build_store(tmp_path, "scheduler_cost_job.db")
+
+    class NotifierStub:
+        enabled = True
+
+        async def send_message(self, message: str) -> bool:
+            del message
+            return True
+
+    scheduler = SchedulerService(
+        job_store=store,
+        notifier=NotifierStub(),  # type: ignore[arg-type]
+    )
+    scheduler.setup_scheduler()
+    assert scheduler._scheduler is not None
+
+    if hasattr(scheduler._scheduler, "get_job"):
+        assert scheduler._scheduler.get_job("cost_efficiency_alert") is not None
+    else:
+        assert "cost_efficiency_alert" in scheduler._scheduler.jobs
+
+
+def test_cost_efficiency_alert_sends_once_per_day(tmp_path: Path):
+    """오늘 호출량 임계치 이상 + 발행 0건이면 하루 1회만 경보를 전송해야 한다."""
+    store = build_store(tmp_path, "scheduler_cost_alert_once.db")
+    sent_messages: List[str] = []
+
+    class NotifierStub:
+        enabled = True
+
+        async def send_message(self, message: str) -> bool:
+            sent_messages.append(message)
+            return True
+
+    scheduler = SchedulerService(
+        job_store=store,
+        notifier=NotifierStub(),  # type: ignore[arg-type]
+    )
+
+    def _snapshot_stub(today: Optional[str] = None) -> Dict[str, Any]:
+        del today
+        return {
+            "today_published": 0,
+            "total_published": 0,
+            "idea_vault_pending": 0,
+            "idea_vault_total": 0,
+            "llm_rows": [{"total_calls": 12}],
+            "trend_rows": [],
+        }
+
+    store.get_dashboard_metrics_snapshot = _snapshot_stub  # type: ignore[method-assign]
+
+    asyncio.run(scheduler._run_cost_efficiency_alert())
+    asyncio.run(scheduler._run_cost_efficiency_alert())
+
+    assert len(sent_messages) == 1
+    assert "발행 효율 경보" in sent_messages[0]
+    assert store.get_system_setting("scheduler_last_cost_alert_date", "") == scheduler._today_key()

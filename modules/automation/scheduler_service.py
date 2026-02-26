@@ -220,6 +220,15 @@ class SchedulerService:
                 replace_existing=True,
                 misfire_grace_time=3600,
             )
+            if self.job_store:
+                self._scheduler.add_job(
+                    self._run_cost_efficiency_alert,
+                    cron_trigger(hour="10,12,14,16,18,20", minute=30),
+                    id="cost_efficiency_alert",
+                    name="발행 효율 경보",
+                    replace_existing=True,
+                    misfire_grace_time=600,
+                )
 
         if self.job_store:
             self._scheduler.add_job(
@@ -354,6 +363,9 @@ class SchedulerService:
 
     async def _run_daily_summary_notification(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_daily_summary_notification(self, *args, **kwargs)
+
+    async def _run_cost_efficiency_alert(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_cost_efficiency_alert(self, *args, **kwargs)
 
     async def _run_daily_target_check(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_daily_target_check(self, *args, **kwargs)

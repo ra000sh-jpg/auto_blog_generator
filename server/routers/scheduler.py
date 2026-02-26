@@ -28,6 +28,7 @@ class SchedulerStatusResponse(BaseModel):
     scheduler_running: bool
     daemon_alive: bool
     api_only_mode: bool
+    paused: bool
     today_date: str
     daily_target: int
     today_completed: int
@@ -174,6 +175,7 @@ async def get_scheduler_status(
         last_seed_count = int(last_seed_count_raw)
     except (ValueError, TypeError):
         last_seed_count = 0
+    paused = job_store.get_system_setting("scheduler_paused", "") == "1"
 
     # 오늘 완료/실패 건수
     today_completed = job_store.get_today_completed_count()
@@ -193,6 +195,7 @@ async def get_scheduler_status(
         scheduler_running=scheduler_running,
         daemon_alive=daemon_alive,
         api_only_mode=api_only_mode,
+        paused=paused,
         today_date=today_date,
         daily_target=daily_target,
         today_completed=today_completed,
@@ -266,6 +269,34 @@ async def stop_scheduler() -> TriggerResponse:
     except Exception as exc:
         logger.error("Scheduler stop failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/scheduler/pause",
+    response_model=TriggerResponse,
+    summary="스케줄러 일시정지",
+)
+async def pause_scheduler(
+    job_store: "JobStore" = Depends(get_job_store),
+) -> TriggerResponse:
+    """스케줄러 워커 루프를 일시정지한다."""
+    job_store.set_system_setting("scheduler_paused", "1")
+    logger.info("Scheduler paused via API")
+    return TriggerResponse(ok=True, message="스케줄러가 일시정지되었습니다.")
+
+
+@router.post(
+    "/scheduler/resume",
+    response_model=TriggerResponse,
+    summary="스케줄러 재개",
+)
+async def resume_scheduler(
+    job_store: "JobStore" = Depends(get_job_store),
+) -> TriggerResponse:
+    """일시정지된 스케줄러 워커 루프를 재개한다."""
+    job_store.set_system_setting("scheduler_paused", "")
+    logger.info("Scheduler resumed via API")
+    return TriggerResponse(ok=True, message="스케줄러가 재개되었습니다.")
 
 
 @router.post(

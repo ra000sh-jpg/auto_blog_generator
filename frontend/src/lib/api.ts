@@ -958,6 +958,7 @@ export type SchedulerStatusResponse = {
   scheduler_running: boolean;
   daemon_alive: boolean;
   api_only_mode: boolean;
+  paused: boolean;
   today_date: string;
   daily_target: number;
   today_completed: number;
@@ -1004,6 +1005,14 @@ export async function stopScheduler(): Promise<TriggerResponse> {
   return requestJSON<TriggerResponse>("/scheduler/stop", { method: "POST" });
 }
 
+export async function pauseScheduler(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/pause", { method: "POST" });
+}
+
+export async function resumeScheduler(): Promise<TriggerResponse> {
+  return requestJSON<TriggerResponse>("/scheduler/resume", { method: "POST" });
+}
+
 // ---------------------------------------------------------------------------
 // 통합 대시보드 API
 // ---------------------------------------------------------------------------
@@ -1037,6 +1046,7 @@ export type DashboardScheduler = {
   scheduler_running: boolean;
   daemon_alive: boolean;
   api_only_mode: boolean;
+  paused: boolean;
   today_date: string;
   daily_target: number;
   today_completed: number;

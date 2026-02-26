@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from ..automation.job_store import JobStore
 from ..automation.job_store import Job
 from ..config import LLMConfig, SEOConfig
+from .circuit_breaker import ProviderCircuitBreaker
 from ..seo.tag_generator import TagGenerator
 from .content_generator import ContentGenerator, ContentResult
 from .llm_router import LLMRouter
@@ -120,6 +121,14 @@ def _build_generator(
         if callable(send_background):
             send_background(message, disable_notification=False)
 
+    circuit_breaker = ProviderCircuitBreaker(
+        job_store=job_store,
+        notifier=notifier,
+    )
+    circuit_breaker.load_all_from_db(
+        ["qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras"]
+    )
+
     return ContentGenerator(
         primary_client=primary_client,
         secondary_client=secondary_client,
@@ -137,6 +146,7 @@ def _build_generator(
         enable_voice_rewrite=config.enable_voice_rewrite,
         db_path=os.getenv("AUTOBLOG_DB_PATH", "data/automation.db"),
         fallback_alert_fn=_fallback_alert,
+        circuit_breaker=circuit_breaker,
     )
 
 

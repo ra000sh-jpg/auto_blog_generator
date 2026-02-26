@@ -319,6 +319,49 @@ async def cycle_run_daily_summary_notification(service: "SchedulerService") -> N
 
 
 
+async def cycle_run_cost_efficiency_alert(service: "SchedulerService") -> None:
+    """LLM 호출 대비 발행이 0건일 때 비용 효율 경보를 전송한다."""
+    if not service.notifier or not service.notifier.enabled or not service.job_store:
+        return
+
+    today_key = service._today_key()
+    last_alert_date = service.job_store.get_system_setting("scheduler_last_cost_alert_date", "")
+    if last_alert_date == today_key:
+        return
+
+    today_completed = service._get_today_post_count()
+    if today_completed > 0:
+        return
+
+    try:
+        snapshot = service.job_store.get_dashboard_metrics_snapshot(today=today_key)
+        llm_rows = list(snapshot.get("llm_rows", []))
+        total_calls = sum(int(row.get("total_calls", 0) or 0) for row in llm_rows)
+    except Exception as exc:
+        logger.warning("Cost efficiency alert stats read failed: %s", exc)
+        return
+
+    call_threshold = 10
+    if total_calls < call_threshold:
+        return
+
+    message = (
+        f"⚠️ [발행 효율 경보]\n"
+        f"- 날짜: {today_key}\n"
+        f"- LLM 호출: {total_calls}건\n"
+        f"- 발행 완료: 0건\n\n"
+        f"API 비용이 발생하는데 발행이 없습니다.\n"
+        f"Playwright·LLM 오류 또는 잡 stuck 여부를 확인하세요."
+    )
+    try:
+        sent = await service.notifier.send_message(message)
+        if sent:
+            service.job_store.set_system_setting("scheduler_last_cost_alert_date", today_key)
+            logger.info("Cost efficiency alert sent (llm_calls=%d)", total_calls)
+    except Exception as exc:
+        logger.warning("Cost efficiency alert send failed: %s", exc)
+
+
 async def cycle_run_daily_target_check(service: "SchedulerService") -> None:
     """일일 목표 기반으로 준비된 초안을 1건씩 천천히 발행한다."""
     now_local = service._get_now_local()

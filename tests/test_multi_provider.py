@@ -6,6 +6,7 @@ import pytest
 
 from modules.automation.job_store import Job
 from modules.exceptions import RateLimitError
+from modules.llm.circuit_breaker import ProviderCircuitBreaker
 from modules.llm.content_generator import ContentGenerator
 from modules.llm.deepseek_client import DeepSeekClient
 from modules.llm.provider_factory import create_client
@@ -93,6 +94,64 @@ class FakeLLMClient:
                 self.stop_reason = "stop"
 
         return Response(self.outputs.pop(0), model=f"{self.name}-model")
+
+
+class AlwaysRateLimitClient:
+    """항상 RateLimitError를 반환하는 테스트용 클라이언트."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.calls: List[Dict[str, Any]] = []
+
+    @property
+    def provider_name(self) -> str:
+        return self.name
+
+    async def generate_with_retry(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_retries: int = 3,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ):
+        del max_retries, temperature, max_tokens
+        self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+        raise RateLimitError(f"{self.name} rate limited (429)")
+
+
+class StaticSuccessClient:
+    """항상 동일한 성공 응답을 반환하는 테스트용 클라이언트."""
+
+    def __init__(self, name: str, content: str = "# 제목\n\n정상 본문"):
+        self.name = name
+        self.content = content
+        self.calls: List[Dict[str, Any]] = []
+
+    @property
+    def provider_name(self) -> str:
+        return self.name
+
+    async def generate_with_retry(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_retries: int = 3,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ):
+        del max_retries, temperature, max_tokens
+        self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+
+        class Response:
+            def __init__(self, content: str, model: str):
+                self.content = content
+                self.model = model
+                self.input_tokens = 120
+                self.output_tokens = 180
+                self.stop_reason = "stop"
+
+        return Response(self.content, model=f"{self.name}-model")
 
 
 def test_qwen_client_requires_api_key(monkeypatch: pytest.MonkeyPatch):
@@ -246,3 +305,63 @@ def test_openai_compat_raises_rate_limit_error_on_429(monkeypatch: pytest.Monkey
                 max_retries=1,
             )
         )
+
+
+def test_circuit_breaker_skips_open_provider():
+    """회로가 열린 프로바이더는 즉시 건너뛰고 다음 프로바이더를 사용해야 한다."""
+    primary = FakeLLMClient("groq", outputs=["unused"])
+    secondary = FakeLLMClient(
+        "qwen",
+        [
+            "# 제목\n\nfallback 초안",
+            "# 제목\n\nfallback SEO",
+            '{"score": 88, "issues": [], "summary": "ok"}',
+            "# 제목\n\nfallback SEO",
+            '{"thumbnail": {"prompt": "test"}, "content_images": []}',
+        ],
+    )
+    circuit_breaker = ProviderCircuitBreaker(job_store=None, notifier=None, fail_threshold=3, open_ttl_seconds=1800)
+    circuit_breaker.record_failure("groq")
+    circuit_breaker.record_failure("groq")
+    circuit_breaker.record_failure("groq")
+    assert circuit_breaker.is_open("groq") is True
+
+    generator = ContentGenerator(
+        primary_client=primary,
+        secondary_client=secondary,
+        enable_quality_check=True,
+        enable_seo_optimization=True,
+        fallback_to_secondary=True,
+        circuit_breaker=circuit_breaker,
+    )
+    result = asyncio.run(generator.generate(build_job("circuit-open-skip")))
+
+    assert result.provider_used == "qwen"
+    assert result.provider_fallback_from == "groq"
+    assert len(primary.calls) == 0
+    assert len(secondary.calls) == 5
+
+
+def test_circuit_breaker_opens_after_rate_limit_threshold():
+    """연속 429 실패 임계값 도달 후 다음 호출부터 primary를 스킵해야 한다."""
+    primary = AlwaysRateLimitClient("groq")
+    secondary = StaticSuccessClient("qwen")
+    circuit_breaker = ProviderCircuitBreaker(job_store=None, notifier=None, fail_threshold=3, open_ttl_seconds=1800)
+
+    generator = ContentGenerator(
+        primary_client=primary,
+        secondary_client=secondary,
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+        fallback_to_secondary=True,
+        circuit_breaker=circuit_breaker,
+    )
+
+    for index in range(4):
+        result = asyncio.run(generator.generate(build_job(f"circuit-threshold-{index}")))
+        assert result.provider_used == "qwen"
+
+    assert circuit_breaker.is_open("groq") is True
+    # 첫 3회는 실패를 기록하고, 4회차부터는 호출 전 스킵되어야 한다.
+    assert len(primary.calls) == 3

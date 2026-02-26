@@ -112,6 +112,7 @@ class SchedulerData(BaseModel):
     scheduler_running: bool = False
     daemon_alive: bool = False
     api_only_mode: bool = False
+    paused: bool = False
     today_date: str = ""
     daily_target: int = 3
     today_completed: int = 0
@@ -269,6 +270,7 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
     )
     daemon_alive = _is_daemon_alive(job_store)
     api_only_mode = _is_api_only_scheduler(scheduler)
+    paused = job_store.get_system_setting("scheduler_paused", "") == "1"
 
     today_date = _get_today_kst()
 
@@ -305,6 +307,7 @@ def _build_scheduler_data(job_store: "JobStore") -> SchedulerData:
         scheduler_running=scheduler_running,
         daemon_alive=daemon_alive,
         api_only_mode=api_only_mode,
+        paused=paused,
         today_date=today_date,
         daily_target=daily_target,
         today_completed=today_completed,

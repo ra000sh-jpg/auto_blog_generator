@@ -10,6 +10,10 @@ interface DashboardSchedulerCardProps {
     schedulerToggling: boolean;
     toggleMsg: string;
     onToggle: () => void;
+    onPause: () => void;
+    onResume: () => void;
+    pauseToggling?: boolean;
+    pauseMsg?: string;
     ideaVaultDailyQuota?: number | null;
 }
 
@@ -19,6 +23,10 @@ export function DashboardSchedulerCard({
     schedulerToggling,
     toggleMsg,
     onToggle,
+    onPause,
+    onResume,
+    pauseToggling = false,
+    pauseMsg = "",
     ideaVaultDailyQuota,
 }: DashboardSchedulerCardProps) {
     const s = dashboard?.scheduler;
@@ -31,29 +39,52 @@ export function DashboardSchedulerCard({
                     <Cpu className="h-4 w-4 text-slate-500" />
                     <h2 className="text-sm font-semibold text-slate-700">스케줄러</h2>
                 </div>
-                {!s?.api_only_mode && (
+                <div className="flex items-center gap-2">
+                    {!s?.api_only_mode && (
+                        <button
+                            type="button"
+                            onClick={onToggle}
+                            disabled={schedulerToggling || dashLoading}
+                            className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${s?.scheduler_running
+                                    ? "bg-rose-500 text-white hover:bg-rose-600"
+                                    : "bg-emerald-500 text-white hover:bg-emerald-600"
+                                }`}
+                        >
+                            {schedulerToggling ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : s?.scheduler_running ? (
+                                <Pause className="h-3.5 w-3.5" />
+                            ) : (
+                                <Play className="h-3.5 w-3.5" />
+                            )}
+                            {s?.scheduler_running ? "중지" : "시작"}
+                        </button>
+                    )}
                     <button
                         type="button"
-                        onClick={onToggle}
-                        disabled={schedulerToggling || dashLoading}
-                        className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${s?.scheduler_running
-                                ? "bg-rose-500 text-white hover:bg-rose-600"
-                                : "bg-emerald-500 text-white hover:bg-emerald-600"
+                        onClick={s?.paused ? onResume : onPause}
+                        disabled={pauseToggling || dashLoading}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${s?.paused
+                                ? "bg-emerald-500 text-white hover:bg-emerald-600"
+                                : "bg-amber-500 text-white hover:bg-amber-600"
                             }`}
                     >
-                        {schedulerToggling ? (
+                        {pauseToggling ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : s?.scheduler_running ? (
-                            <Pause className="h-3.5 w-3.5" />
-                        ) : (
+                        ) : s?.paused ? (
                             <Play className="h-3.5 w-3.5" />
+                        ) : (
+                            <Pause className="h-3.5 w-3.5" />
                         )}
-                        {s?.scheduler_running ? "중지" : "시작"}
+                        {s?.paused ? "재개" : "일시정지"}
                     </button>
-                )}
+                </div>
             </div>
             {toggleMsg && (
                 <p className="mt-2 rounded-lg bg-slate-100 px-3 py-1.5 text-xs text-slate-600">{toggleMsg}</p>
+            )}
+            {pauseMsg && (
+                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-700">{pauseMsg}</p>
             )}
 
             <div className="mt-4 space-y-3">

@@ -6,6 +6,8 @@ import {
   fetchDashboard,
   fetchIdeaVaultStats,
   fetchOnboardingStatus,
+  pauseScheduler,
+  resumeScheduler,
   startScheduler,
   stopScheduler,
   type DashboardResponse,
@@ -26,6 +28,8 @@ export function DashboardRenewal() {
   const [dashError, setDashError] = useState("");
   const [schedulerToggling, setSchedulerToggling] = useState(false);
   const [toggleMsg, setToggleMsg] = useState("");
+  const [pauseToggling, setPauseToggling] = useState(false);
+  const [pauseMsg, setPauseMsg] = useState("");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [ideaVaultStats, setIdeaVaultStats] = useState<IdeaVaultStatsResponse | null>(null);
   const [ideaVaultDailyQuota, setIdeaVaultDailyQuota] = useState<number | null>(null);
@@ -73,6 +77,34 @@ export function DashboardRenewal() {
       setToggleMsg(e instanceof Error ? e.message : "토글 실패");
     } finally {
       setSchedulerToggling(false);
+    }
+  }
+
+  async function handlePause() {
+    setPauseToggling(true);
+    setPauseMsg("");
+    try {
+      const res = await pauseScheduler();
+      setPauseMsg(res.message);
+      await loadDashboard();
+    } catch (e) {
+      setPauseMsg(e instanceof Error ? e.message : "일시정지 실패");
+    } finally {
+      setPauseToggling(false);
+    }
+  }
+
+  async function handleResume() {
+    setPauseToggling(true);
+    setPauseMsg("");
+    try {
+      const res = await resumeScheduler();
+      setPauseMsg(res.message);
+      await loadDashboard();
+    } catch (e) {
+      setPauseMsg(e instanceof Error ? e.message : "재개 실패");
+    } finally {
+      setPauseToggling(false);
     }
   }
 
@@ -161,6 +193,10 @@ export function DashboardRenewal() {
           schedulerToggling={schedulerToggling}
           toggleMsg={toggleMsg}
           onToggle={handleSchedulerToggle}
+          onPause={handlePause}
+          onResume={handleResume}
+          pauseToggling={pauseToggling}
+          pauseMsg={pauseMsg}
           ideaVaultDailyQuota={ideaVaultDailyQuota}
         />
         <DashboardSystemStatus dashboard={dashboard} dashLoading={dashLoading} />

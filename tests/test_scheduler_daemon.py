@@ -188,6 +188,7 @@ def test_scheduler_status_endpoint_schema(tmp_path: Path):
             "scheduler_running",
             "daemon_alive",
             "api_only_mode",
+            "paused",
             "today_date",
             "daily_target",
             "today_completed",
@@ -207,6 +208,8 @@ def test_scheduler_status_endpoint_schema(tmp_path: Path):
         assert isinstance(data["scheduler_running"], bool)
         assert isinstance(data["daemon_alive"], bool)
         assert isinstance(data["api_only_mode"], bool)
+        assert isinstance(data["paused"], bool)
+        assert data["paused"] is False
         assert isinstance(data["daily_target"], int)
         assert data["active_hours"] == "08:00~22:00"
         assert data["today_date"] == _today_kst()
@@ -225,6 +228,7 @@ def test_dashboard_stats_scheduler_fields(tmp_path: Path):
         "scheduler_daemon_heartbeat_at",
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+    store.set_system_setting("scheduler_paused", "1")
 
     scheduler = build_scheduler(store)
     scheduler.setup_scheduler()
@@ -261,6 +265,7 @@ def test_dashboard_stats_scheduler_fields(tmp_path: Path):
             "scheduler_running",
             "daemon_alive",
             "api_only_mode",
+            "paused",
             "today_date",
             "daily_target",
             "today_completed",
@@ -280,11 +285,50 @@ def test_dashboard_stats_scheduler_fields(tmp_path: Path):
         assert isinstance(scheduler_data["scheduler_running"], bool)
         assert isinstance(scheduler_data["daemon_alive"], bool)
         assert isinstance(scheduler_data["api_only_mode"], bool)
+        assert isinstance(scheduler_data["paused"], bool)
         assert scheduler_data["daemon_alive"] is True
+        assert scheduler_data["paused"] is True
     finally:
         app.dependency_overrides.clear()
         stats_router._fetch_telegram_status = original_telegram
         stats_router._build_health_summary = original_health
+        set_scheduler_instance(None)
+
+
+def test_scheduler_pause_resume_endpoints(tmp_path: Path):
+    """POST /api/scheduler/pause,resume 가 paused 상태를 토글해야 한다."""
+    from fastapi.testclient import TestClient
+
+    store = build_store(tmp_path, "api_pause_resume_test.db")
+    scheduler = build_scheduler(store)
+    scheduler.setup_scheduler()
+    set_scheduler_instance(scheduler)
+
+    app.dependency_overrides[get_job_store] = lambda: store
+    try:
+        client = TestClient(app, raise_server_exceptions=True)
+
+        pause_response = client.post("/api/scheduler/pause")
+        assert pause_response.status_code == 200
+        pause_data = pause_response.json()
+        assert pause_data["ok"] is True
+        assert store.get_system_setting("scheduler_paused", "") == "1"
+
+        status_after_pause = client.get("/api/scheduler/status")
+        assert status_after_pause.status_code == 200
+        assert status_after_pause.json()["paused"] is True
+
+        resume_response = client.post("/api/scheduler/resume")
+        assert resume_response.status_code == 200
+        resume_data = resume_response.json()
+        assert resume_data["ok"] is True
+        assert store.get_system_setting("scheduler_paused", "") == ""
+
+        status_after_resume = client.get("/api/scheduler/status")
+        assert status_after_resume.status_code == 200
+        assert status_after_resume.json()["paused"] is False
+    finally:
+        app.dependency_overrides.clear()
         set_scheduler_instance(None)
 
 

@@ -28,6 +28,11 @@ async def generator_worker_loop(service: "SchedulerService") -> None:
                 except Exception:
                     # 하트비트 실패는 워커 실행을 막지 않는다.
                     pass
+                paused_flag = service.job_store.get_system_setting("scheduler_paused", "")
+                if paused_flag == "1":
+                    logger.debug("Scheduler paused — skipping generator cycle")
+                    await asyncio.sleep(service.generator_poll_seconds)
+                    continue
             try:
                 await service._run_sub_job_catchup()
                 await service._run_draft_prefetch()
@@ -50,6 +55,12 @@ async def publisher_worker_loop(service: "SchedulerService") -> None:
     consecutive_failures = 0
     try:
         while True:
+            if service.job_store:
+                paused_flag = service.job_store.get_system_setting("scheduler_paused", "")
+                if paused_flag == "1":
+                    logger.debug("Scheduler paused — skipping publisher cycle")
+                    await asyncio.sleep(service.publisher_poll_seconds)
+                    continue
             try:
                 await service._run_sub_job_publish_catchup()
                 await service._run_daily_target_check()

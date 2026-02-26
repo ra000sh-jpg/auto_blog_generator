@@ -25,6 +25,7 @@ from ..exceptions import ContentGenerationError, RateLimitError
 from ..rag import CrossEncoderRagSearchEngine
 from ..seo.platform_strategy import get_platform_strategy
 from .base_client import BaseLLMClient, LLMResponse
+from .circuit_breaker import ProviderCircuitBreaker, ProviderCircuitOpenError
 from .claude_client import ClaudeClient
 from .llm_router import provider_label
 from .prompts import (
@@ -131,6 +132,7 @@ class ContentGenerator:
         enable_voice_rewrite: bool = True,
         db_path: str = "data/automation.db",
         fallback_alert_fn: Optional[Any] = None,
+        circuit_breaker: Optional[ProviderCircuitBreaker] = None,
     ):
         resolved_primary = primary_client or client or ClaudeClient()
         self.primary = resolved_primary
@@ -161,6 +163,7 @@ class ContentGenerator:
         self.enable_voice_rewrite = enable_voice_rewrite
         self.db_path = db_path
         self.fallback_alert_fn = fallback_alert_fn
+        self.circuit_breaker = circuit_breaker
 
     async def generate(
         self,
@@ -417,13 +420,29 @@ class ContentGenerator:
         max_retries: int = 3,
     ) -> LLMResponse:
         """LLM 호출 후 토큰 사용량을 자동 누적한다."""
-        response = await client.generate_with_retry(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-        )
+        provider_name = str(client.provider_name or "").strip().lower()
+        if self.circuit_breaker and self.circuit_breaker.is_open(provider_name):
+            logger.warning("Circuit open on %s, skipping provider", provider_name)
+            raise ProviderCircuitOpenError(provider_name)
+        try:
+            response = await client.generate_with_retry(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+            )
+            if self.circuit_breaker:
+                self.circuit_breaker.record_success(provider_name)
+        except RateLimitError:
+            if self.circuit_breaker:
+                self.circuit_breaker.record_failure(provider_name)
+            raise
+        except Exception as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if self.circuit_breaker and status_code in (401, 403):
+                self.circuit_breaker.record_failure(provider_name)
+            raise
         self._accumulate_token_usage(
             token_usage=token_usage,
             role=role,
@@ -777,6 +796,18 @@ class ContentGenerator:
                         title=job.title,
                     )
                 return draft, provider_model, provider_used, provider_fallback_from
+            except ProviderCircuitOpenError as exc:
+                next_client = fallback_chain[idx + 1] if idx + 1 < len(fallback_chain) else None
+                if next_client:
+                    logger.warning(
+                        "Circuit open detected on %s. Switching to %s",
+                        exc.provider,
+                        next_client.provider_name,
+                    )
+                    continue
+                raise ContentGenerationError(
+                    f"All providers blocked by circuit breaker. Last provider: {exc.provider}"
+                ) from exc
             except RateLimitError as exc:
                 next_client = fallback_chain[idx + 1] if idx + 1 < len(fallback_chain) else None
                 if next_client:
