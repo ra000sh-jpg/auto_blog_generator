@@ -71,16 +71,38 @@ class ImageModelSpec:
 #   Claude: https://docs.anthropic.com/en/docs/about-claude/models
 #   Groq/Cerebras: 무료 Tier (rate limit 적용)
 TEXT_MODEL_MATRIX: List[TextModelSpec] = [
+    # Qwen (DashScope)
+    TextModelSpec(
+        provider="qwen",
+        model="qwen-turbo",
+        label="Qwen Turbo",
+        key_id="qwen",
+        input_cost_per_1m_usd=0.05,
+        output_cost_per_1m_usd=0.20,
+        quality_score=78,
+        speed_score=94,
+    ),
     TextModelSpec(
         provider="qwen",
         model="qwen-plus",
         label="Qwen Plus",
         key_id="qwen",
-        input_cost_per_1m_usd=0.28,
-        output_cost_per_1m_usd=0.84,
+        input_cost_per_1m_usd=0.40,
+        output_cost_per_1m_usd=1.20,
         quality_score=84,
         speed_score=90,
     ),
+    TextModelSpec(
+        provider="qwen",
+        model="qwen-max",
+        label="Qwen Max",
+        key_id="qwen",
+        input_cost_per_1m_usd=1.60,
+        output_cost_per_1m_usd=6.40,
+        quality_score=91,
+        speed_score=82,
+    ),
+    # DeepSeek
     TextModelSpec(
         provider="deepseek",
         model="deepseek-chat",
@@ -90,6 +112,27 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         output_cost_per_1m_usd=0.42,
         quality_score=86,
         speed_score=88,
+    ),
+    TextModelSpec(
+        provider="deepseek",
+        model="deepseek-reasoner",
+        label="DeepSeek Reasoner",
+        key_id="deepseek",
+        input_cost_per_1m_usd=0.28,
+        output_cost_per_1m_usd=0.42,
+        quality_score=92,
+        speed_score=75,
+    ),
+    # Gemini
+    TextModelSpec(
+        provider="gemini",
+        model="gemini-2.0-flash-lite",
+        label="Gemini 2.0 Flash Lite",
+        key_id="gemini",
+        input_cost_per_1m_usd=0.075,
+        output_cost_per_1m_usd=0.30,
+        quality_score=82,
+        speed_score=96,
     ),
     TextModelSpec(
         provider="gemini",
@@ -102,6 +145,27 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         speed_score=93,
     ),
     TextModelSpec(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        label="Gemini 2.5 Flash",
+        key_id="gemini",
+        input_cost_per_1m_usd=0.30,
+        output_cost_per_1m_usd=2.50,
+        quality_score=94,
+        speed_score=90,
+    ),
+    # OpenAI
+    TextModelSpec(
+        provider="openai",
+        model="gpt-4.1-nano",
+        label="OpenAI GPT-4.1 Nano",
+        key_id="openai",
+        input_cost_per_1m_usd=0.10,
+        output_cost_per_1m_usd=0.40,
+        quality_score=85,
+        speed_score=95,
+    ),
+    TextModelSpec(
         provider="openai",
         model="gpt-4.1-mini",
         label="OpenAI GPT-4.1 mini",
@@ -110,6 +174,27 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         output_cost_per_1m_usd=1.60,
         quality_score=92,
         speed_score=89,
+    ),
+    TextModelSpec(
+        provider="openai",
+        model="gpt-4.1",
+        label="OpenAI GPT-4.1",
+        key_id="openai",
+        input_cost_per_1m_usd=2.00,
+        output_cost_per_1m_usd=8.00,
+        quality_score=96,
+        speed_score=84,
+    ),
+    # Anthropic Claude
+    TextModelSpec(
+        provider="claude",
+        model="claude-3-5-haiku-20241022",
+        label="Claude Haiku 3.5",
+        key_id="claude",
+        input_cost_per_1m_usd=0.80,
+        output_cost_per_1m_usd=4.00,
+        quality_score=88,
+        speed_score=93,
     ),
     TextModelSpec(
         provider="claude",
@@ -121,7 +206,7 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         quality_score=97,
         speed_score=83,
     ),
-    # 무료 프로바이더: parser·태그 생성 등 단순 역할에 우선 라우팅
+    # 무료 프로바이더: parser/태그 생성 등 단순 역할에 우선 라우팅
     TextModelSpec(
         provider="groq",
         model="llama-3.3-70b-versatile",
@@ -131,6 +216,16 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         output_cost_per_1m_usd=0.0,
         quality_score=80,
         speed_score=95,
+    ),
+    TextModelSpec(
+        provider="groq",
+        model="llama-4-scout-17b-16e-instruct",
+        label="Groq Llama-4 Scout (무료)",
+        key_id="groq",
+        input_cost_per_1m_usd=0.0,
+        output_cost_per_1m_usd=0.0,
+        quality_score=83,
+        speed_score=94,
     ),
     TextModelSpec(
         provider="cerebras",
@@ -612,8 +707,71 @@ class LLMRouter:
             self.job_store.set_system_setting("router_images_per_post_max", str(images_per_post_max))
             if challenger_model_raw:
                 self.job_store.set_system_setting("router_challenger_model", challenger_model_raw)
+            # TEXT_MODEL_MATRIX에서 사용 가능한 모델을 registered 목록에 병합한다.
+            self._sync_registered_models(text_keys)
 
         return normalized
+
+    def _sync_registered_models(self, text_api_keys: Dict[str, str]) -> None:
+        """TEXT_MODEL_MATRIX + 설정 키 기준으로 registered_models를 병합 동기화한다.
+
+        규칙:
+        - 키가 있는 provider의 모델만 자동 추가
+        - 기존 active 상태는 유지 (운영자 제어 우선)
+        - 키가 없어진 모델은 자동 제거하지 않음 (이력 보존)
+        """
+        if not self.job_store:
+            return
+
+        raw = self.job_store.get_system_setting("router_registered_models", "[]")
+        try:
+            existing = json.loads(raw) if raw else []
+            if not isinstance(existing, list):
+                existing = []
+        except Exception:
+            existing = []
+
+        # 기존 등록값을 정규화하여 index를 만든다.
+        by_normalized_id: Dict[str, Dict[str, Any]] = {}
+        ordered: List[Dict[str, Any]] = []
+        for item in existing:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("model_id", "")).strip()
+            if not model_id:
+                continue
+            normalized_id = model_id.split(":", 1)[1].strip().lower() if ":" in model_id else model_id.lower()
+            if not normalized_id or normalized_id in by_normalized_id:
+                continue
+            entry = {
+                "model_id": model_id,
+                "provider": str(item.get("provider", "")).strip().lower(),
+                "active": bool(item.get("active", True)),
+            }
+            by_normalized_id[normalized_id] = entry
+            ordered.append(entry)
+
+        changed = False
+        for spec in TEXT_MODEL_MATRIX:
+            if not str(text_api_keys.get(spec.key_id, "")).strip():
+                continue
+            normalized_id = spec.model.strip().lower()
+            if not normalized_id or normalized_id in by_normalized_id:
+                continue
+            entry = {
+                "model_id": spec.model,
+                "provider": spec.provider,
+                "active": True,
+            }
+            by_normalized_id[normalized_id] = entry
+            ordered.append(entry)
+            changed = True
+
+        if changed:
+            self.job_store.set_system_setting(
+                "router_registered_models",
+                json.dumps(ordered, ensure_ascii=False),
+            )
 
     def build_plan(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """설정 기반 역할별 모델 배정과 견적 결과를 생성한다."""
