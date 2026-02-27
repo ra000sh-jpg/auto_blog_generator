@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 from ..automation.job_store import JobStore
 from ..automation.job_store import Job
-from ..config import LLMConfig, SEOConfig
+from ..config import LLMConfig, SEOConfig, load_config
 from .circuit_breaker import ProviderCircuitBreaker
 from ..seo.tag_generator import TagGenerator
 from .content_generator import ContentGenerator, ContentResult
@@ -131,6 +131,31 @@ def _build_generator(
         ["qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras"]
     )
 
+    web_search_client = None
+    web_fetch_client = None
+    web_search_max_results = 5
+    try:
+        web_search_config = load_config().web_search
+        web_search_max_results = int(web_search_config.max_results or 5)
+        if web_search_config.enabled:
+            from ..web_search.provider_factory import create_web_search_client
+            from ..web_search.web_fetch_client import WebFetchClient
+
+            api_key = str(web_search_config.api_key or os.getenv("BRAVE_API_KEY", "")).strip()
+            if api_key:
+                web_search_client = create_web_search_client(
+                    provider=web_search_config.provider,
+                    api_key=api_key,
+                    timeout_sec=web_search_config.timeout_sec,
+                )
+                if web_search_client is not None:
+                    web_fetch_client = WebFetchClient(
+                        timeout_sec=web_search_config.fetch_timeout_sec,
+                        max_chars=web_search_config.fetch_max_chars,
+                    )
+    except Exception as exc:
+        logger.warning("Web search client init failed: %s", exc)
+
     return ContentGenerator(
         primary_client=primary_client,
         secondary_client=secondary_client,
@@ -150,6 +175,9 @@ def _build_generator(
         db_path=os.getenv("AUTOBLOG_DB_PATH", "data/automation.db"),
         fallback_alert_fn=_fallback_alert,
         circuit_breaker=circuit_breaker,
+        web_search_client=web_search_client,
+        web_fetch_client=web_fetch_client,
+        web_search_max_results=web_search_max_results,
     )
 
 
@@ -234,32 +262,42 @@ def get_tag_generator(config: Optional[SEOConfig] = None) -> TagGenerator:
 
 async def llm_generate_fn(job: Job) -> Dict[str, Any]:
     """PipelineService.generate_fn과 호환되는 LLM 생성 함수."""
+    generator: Optional[ContentGenerator] = None
+    should_close = False
     try:
         generator = get_generator(job=job)
+        should_close = True
     except TypeError:
         # 테스트에서 get_generator를 단순 람다로 대체한 기존 패턴과 호환
         generator = get_generator()
-    result: ContentResult = await generator.generate(job)
-    return {
-        "final_content": result.final_content,
-        "quality_gate": result.quality_gate,
-        "quality_snapshot": result.quality_snapshot,
-        "seo_snapshot": result.seo_snapshot,
-        "image_prompts": result.image_prompts,
-        "image_placements": result.image_placements,
-        "image_slots": result.image_slots,
-        "raw_content": result.raw_content,
-        "voice_rewrite_applied": result.voice_rewrite_applied,
-        "llm_calls_used": result.llm_calls_used,
-        "provider_used": result.provider_used,
-        "provider_model": result.provider_model,
-        "provider_fallback_from": result.provider_fallback_from,
-        "generation_method": result.generation_method,
-        "rewrite_count": result.rewrite_count,
-        "fact_check_applied": result.fact_check_applied,
-        "rag_context": result.rag_context,
-        "llm_token_usage": result.llm_token_usage,
-    }
+    try:
+        result: ContentResult = await generator.generate(job)
+        return {
+            "final_content": result.final_content,
+            "quality_gate": result.quality_gate,
+            "quality_snapshot": result.quality_snapshot,
+            "seo_snapshot": result.seo_snapshot,
+            "image_prompts": result.image_prompts,
+            "image_placements": result.image_placements,
+            "image_slots": result.image_slots,
+            "raw_content": result.raw_content,
+            "voice_rewrite_applied": result.voice_rewrite_applied,
+            "llm_calls_used": result.llm_calls_used,
+            "provider_used": result.provider_used,
+            "provider_model": result.provider_model,
+            "provider_fallback_from": result.provider_fallback_from,
+            "generation_method": result.generation_method,
+            "rewrite_count": result.rewrite_count,
+            "fact_check_applied": result.fact_check_applied,
+            "rag_context": result.rag_context,
+            "llm_token_usage": result.llm_token_usage,
+        }
+    finally:
+        if should_close and generator is not None:
+            try:
+                await generator.aclose()
+            except Exception:
+                logger.debug("Generator close skipped")
 
 
 __all__ = ["get_generator", "get_tag_generator", "llm_generate_fn", "reset_generator"]

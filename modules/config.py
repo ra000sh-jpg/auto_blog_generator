@@ -97,6 +97,19 @@ class SEOConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """웹 검색 및 본문 추출 설정."""
+
+    enabled: bool = False
+    provider: str = "brave"
+    api_key: str = ""
+    timeout_sec: float = 10.0
+    fetch_timeout_sec: float = 15.0
+    max_results: int = 5
+    fetch_max_chars: int = 3000
+
+
+@dataclass
 class AppConfig:
     logging: LoggingConfig
     publisher: PublisherConfig
@@ -105,10 +118,13 @@ class AppConfig:
     llm: LLMConfig
     images: ImageConfig
     seo: SEOConfig = None  # type: ignore[assignment]
+    web_search: WebSearchConfig = None  # type: ignore[assignment]
 
     def __post_init__(self):
         if self.seo is None:
             self.seo = SEOConfig()
+        if self.web_search is None:
+            self.web_search = WebSearchConfig()
 
 
 def load_config(config_dir: str = "config") -> AppConfig:
@@ -128,6 +144,7 @@ def load_config(config_dir: str = "config") -> AppConfig:
         llm=LLMConfig(**merged.get("llm", {})),
         images=ImageConfig(**merged.get("images", {})),
         seo=SEOConfig(**merged.get("seo", {})),
+        web_search=WebSearchConfig(**merged.get("web_search", {})),
     )
 
 
@@ -208,6 +225,14 @@ def _apply_env_overrides(config_data: Dict[str, Any]) -> Dict[str, Any]:
         "SEO_FEEDBACK_MIN_POSTS": ("seo", "feedback_min_posts", int),
         "SEO_FEEDBACK_ANALYSIS_DAYS": ("seo", "feedback_analysis_days", int),
         "SEO_NAVER_DEFAULT_CATEGORY": ("seo", "naver_default_category", str),
+        # 웹 검색
+        "WEB_SEARCH_ENABLED": ("web_search", "enabled", _parse_bool),
+        "WEB_SEARCH_PROVIDER": ("web_search", "provider", str),
+        "BRAVE_API_KEY": ("web_search", "api_key", str),
+        "WEB_SEARCH_TIMEOUT_SEC": ("web_search", "timeout_sec", float),
+        "WEB_SEARCH_FETCH_TIMEOUT_SEC": ("web_search", "fetch_timeout_sec", float),
+        "WEB_SEARCH_MAX_RESULTS": ("web_search", "max_results", int),
+        "WEB_SEARCH_FETCH_MAX_CHARS": ("web_search", "fetch_max_chars", int),
     }
 
     for env_name, (section, key, caster) in env_map.items():

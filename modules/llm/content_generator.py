@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -140,6 +141,9 @@ class ContentGenerator:
         db_path: str = "data/automation.db",
         fallback_alert_fn: Optional[Any] = None,
         circuit_breaker: Optional[ProviderCircuitBreaker] = None,
+        web_search_client: Optional[Any] = None,
+        web_fetch_client: Optional[Any] = None,
+        web_search_max_results: int = 5,
     ):
         resolved_primary = primary_client or client or ClaudeClient()
         self.primary = resolved_primary
@@ -172,6 +176,24 @@ class ContentGenerator:
         self.db_path = db_path
         self.fallback_alert_fn = fallback_alert_fn
         self.circuit_breaker = circuit_breaker
+        self.web_search_client = web_search_client
+        self.web_fetch_client = web_fetch_client
+        self.web_search_max_results = max(1, int(web_search_max_results))
+
+    async def aclose(self) -> None:
+        """생성기 내부의 비동기 클라이언트를 정리한다."""
+        for client in (self.web_search_client, self.web_fetch_client):
+            if client is None:
+                continue
+            close_fn = getattr(client, "close", None)
+            if not callable(close_fn):
+                continue
+            try:
+                maybe_coro = close_fn()
+                if asyncio.iscoroutine(maybe_coro):
+                    await maybe_coro
+            except Exception as exc:
+                logger.debug("Client close skipped: %s", exc)
 
     async def generate(
         self,
@@ -198,9 +220,27 @@ class ContentGenerator:
         news_context: List[Dict[str, str]] = []
         if self._is_economy_topic(topic_mode):
             news_context = self._collect_news_context(job.seed_keywords, max_items=3)
+            if not news_context:
+                news_context = await self._collect_web_context(
+                    keywords=job.seed_keywords,
+                    fallback_text=job.title,
+                    max_items=3,
+                )
         elif is_idea_vault_job:
             idea_query = [job.title] + list(job.seed_keywords)
             news_context = self._collect_news_context(idea_query, max_items=1)
+            if not news_context:
+                news_context = await self._collect_web_context(
+                    keywords=idea_query,
+                    fallback_text=job.title,
+                    max_items=1,
+                )
+        else:
+            news_context = await self._collect_web_context(
+                keywords=job.seed_keywords,
+                fallback_text=job.title,
+                max_items=2,
+            )
 
         # 폴백 체인 구성
         fallback_chain = self._build_fallback_chain()
@@ -681,6 +721,94 @@ class ContentGenerator:
                 exc,
             )
             return []
+
+    async def _collect_web_context(
+        self,
+        keywords: List[str],
+        fallback_text: str = "",
+        max_items: int = 2,
+    ) -> List[Dict[str, str]]:
+        """웹 검색 기반 외부 컨텍스트를 수집한다."""
+        if self.web_search_client is None:
+            return []
+
+        query_parts: List[str] = [
+            str(keyword).strip()
+            for keyword in keywords
+            if str(keyword).strip()
+        ]
+        if not query_parts and str(fallback_text).strip():
+            # 키워드가 비어도 제목으로 검색 폴백한다.
+            query_parts.append(str(fallback_text).strip())
+        if not query_parts:
+            return []
+
+        query = " ".join(query_parts)
+        search_limit = min(max(self.web_search_max_results, max_items + 2), 20)
+        try:
+            search_results = await self.web_search_client.search(
+                query,
+                max_results=search_limit,
+            )
+        except Exception as exc:
+            logger.warning("Web search failed: %s", exc)
+            return []
+
+        if not search_results:
+            return []
+
+        selected_results = search_results[: max(max_items + 2, max_items)]
+
+        async def _fetch_candidate(sr: Any) -> str:
+            base_content = str(getattr(sr, "snippet", "")).strip()
+            if self.web_fetch_client is None:
+                return base_content
+            try:
+                # 전체 지연을 줄이기 위해 개별 URL fetch에 타임아웃을 건다.
+                fetched = await asyncio.wait_for(
+                    self.web_fetch_client.fetch_content(str(getattr(sr, "url", ""))),
+                    timeout=8.0,
+                )
+            except Exception:
+                return base_content
+            if isinstance(fetched, dict):
+                text = str(fetched.get("content", "")).strip()
+                if text:
+                    return text
+            return base_content
+
+        # fetch는 병렬로 수행해 토픽당 지연 시간을 줄인다.
+        fetched_contents = await asyncio.gather(
+            *[_fetch_candidate(sr) for sr in selected_results],
+            return_exceptions=False,
+        )
+
+        contexts: List[Dict[str, str]] = []
+        for sr, fetched_text in zip(selected_results, fetched_contents):
+            title = str(getattr(sr, "title", "")).strip()
+            link = str(getattr(sr, "url", "")).strip()
+            content = str(fetched_text).strip()
+            if not title or not link or not content:
+                continue
+            contexts.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "content": content,
+                }
+            )
+            if len(contexts) >= max_items:
+                break
+
+        if contexts:
+            logger.info(
+                "Web context collected",
+                extra={
+                    "query": query[:80],
+                    "result_count": len(contexts),
+                },
+            )
+        return contexts
 
     def _build_news_data_text(self, news_context: List[Dict[str, str]]) -> str:
         """뉴스 컨텍스트를 프롬프트 텍스트로 변환한다."""
