@@ -162,6 +162,9 @@ export type OnboardingStatusResponse = {
     category: string;
     topic_mode: string;
     count: number;
+    percentage?: number;
+    images_per_post?: number;
+    ai_images?: number;
   }>;
   category_mapping: Record<string, string>;
   telegram_configured: boolean;

@@ -124,6 +124,7 @@ export default function SettingsPage() {
           <EngineSettingsCard
             initialRouterSettings={routerData}
             initialNaverStatus={naverStatus}
+            categoryAllocations={onboardingData.category_allocations || []}
           />
 
           <TelegramSettingsCard

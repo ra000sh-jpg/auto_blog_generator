@@ -3,11 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
     fetchDashboard,
+    fetchRouterSettings,
     quoteRouterSettings,
     saveRouterSettings,
     startNaverConnect,
     fetchNaverConnectStatus,
     type NaverConnectStatusResponse,
+    type OnboardingStatusResponse,
     type RouterSettingsResponse,
     type RouterQuoteResponse,
 } from "@/lib/api";
@@ -16,6 +18,7 @@ import { compactKeys, formatKrw } from "@/lib/utils/formatters";
 type EngineSettingsCardProps = {
     initialRouterSettings: RouterSettingsResponse;
     initialNaverStatus: NaverConnectStatusResponse | null;
+    categoryAllocations?: OnboardingStatusResponse["category_allocations"];
 };
 
 type StrategyMode = "cost" | "balanced" | "quality";
@@ -27,9 +30,26 @@ function normalizeStrategyMode(raw: unknown): StrategyMode {
     return "cost";
 }
 
+const TOPIC_MODE_LABELS: Array<{ value: string; label: string }> = [
+    { value: "cafe", label: "카페/일상" },
+    { value: "it", label: "IT" },
+    { value: "finance", label: "경제" },
+    { value: "parenting", label: "육아" },
+];
+
+const AI_QUOTA_OPTIONS = [
+    { value: "0", label: "없음" },
+    { value: "1", label: "1장" },
+    { value: "2", label: "2장" },
+    { value: "3", label: "3장" },
+    { value: "4", label: "4장" },
+    { value: "all", label: "전부 AI" },
+] as const;
+
 export default function EngineSettingsCard({
     initialRouterSettings,
     initialNaverStatus,
+    categoryAllocations = [],
 }: EngineSettingsCardProps) {
     const [routerSaving, setRouterSaving] = useState(false);
     const [routerLoading, setRouterLoading] = useState(false);
@@ -56,6 +76,7 @@ export default function EngineSettingsCard({
     const [imageTopicQuotaOverrides, setImageTopicQuotaOverrides] = useState<Record<string, string>>(
         (initialRouterSettings.settings.image_topic_quota_overrides as Record<string, string>) || {}
     );
+    const [dirtyTopicKeys, setDirtyTopicKeys] = useState<Set<string>>(new Set());
     const [trafficFeedbackStrongMode, setTrafficFeedbackStrongMode] = useState(
         Boolean(initialRouterSettings.settings.traffic_feedback_strong_mode)
     );
@@ -145,6 +166,18 @@ export default function EngineSettingsCard({
 
     const [naverStatus, setNaverStatus] = useState<NaverConnectStatusResponse | null>(initialNaverStatus);
     const [naverConnecting, setNaverConnecting] = useState(false);
+
+    const topicImagesMap = useMemo(() => {
+        const map: Record<string, number> = {};
+        for (const item of categoryAllocations || []) {
+            const topicMode = String(item?.topic_mode || "cafe").trim().toLowerCase();
+            if (!topicMode) continue;
+            const current = map[topicMode] ?? 0;
+            const itemImages = Math.max(0, Math.min(4, Number(item?.images_per_post ?? 2)));
+            map[topicMode] = Math.max(current, itemImages);
+        }
+        return map;
+    }, [categoryAllocations]);
 
     const parserModelLabel = useMemo(() => {
         const role = routerQuote?.roles?.parser;
@@ -245,10 +278,35 @@ export default function EngineSettingsCard({
         setImageApiKeys((prev) => ({ ...prev, [keyId]: value }));
     }
 
+    function handleTopicQuotaChange(topicMode: string, newQuota: string) {
+        setImageTopicQuotaOverrides((prev) => ({
+            ...prev,
+            [topicMode]: newQuota,
+        }));
+        setDirtyTopicKeys((prev) => {
+            const next = new Set(prev);
+            next.add(topicMode);
+            return next;
+        });
+    }
+
     async function handleSaveRouterSettings() {
         setRouterSaving(true);
         setRouterMessage("");
         try {
+            let finalOverrides = imageTopicQuotaOverrides;
+            try {
+                const latestSettings = await fetchRouterSettings();
+                const serverOverrides = (latestSettings.settings.image_topic_quota_overrides as Record<string, string>) || {};
+                finalOverrides = { ...serverOverrides };
+                if (dirtyTopicKeys.size > 0) {
+                    for (const key of dirtyTopicKeys) {
+                        finalOverrides[key] = imageTopicQuotaOverrides[key] ?? serverOverrides[key] ?? "0";
+                    }
+                }
+            } catch {
+                finalOverrides = imageTopicQuotaOverrides;
+            }
             const saved = await saveRouterSettings({
                 strategy_mode: strategyMode,
                 text_api_keys: compactKeys(textApiKeys),
@@ -256,7 +314,7 @@ export default function EngineSettingsCard({
                 image_engine: imageEngine,
                 image_ai_engine: imageAiEngine,
                 image_ai_quota: imageAiQuota,
-                image_topic_quota_overrides: imageTopicQuotaOverrides,
+                image_topic_quota_overrides: finalOverrides,
                 traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                 image_enabled: imageEnabled,
                 images_per_post: imagesPerPostMax,
@@ -271,6 +329,7 @@ export default function EngineSettingsCard({
             setImageEnabled(Boolean(saved.settings.image_enabled));
             setImageAiEngine(saved.settings.image_ai_engine || "together_flux");
             setImageTopicQuotaOverrides((saved.settings.image_topic_quota_overrides as Record<string, string>) || {});
+            setDirtyTopicKeys(new Set());
             setTrafficFeedbackStrongMode(Boolean(saved.settings.traffic_feedback_strong_mode));
             setImagesPerPostMin(Math.max(0, Math.min(4, Number(saved.settings.images_per_post_min || 0))));
             setImagesPerPostMax(Math.max(0, Math.min(4, Number(
@@ -475,6 +534,88 @@ export default function EngineSettingsCard({
                                         </label>
                                     ))}
                                 </div>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-200 bg-white p-4">
+                                <p className="mb-3 text-sm font-semibold text-slate-800">토픽별 AI 이미지 배분</p>
+                                <div className="space-y-2">
+                                    {TOPIC_MODE_LABELS.map(({ value: topicMode, label }) => {
+                                        const imagesPerPost = topicImagesMap[topicMode] ?? imagesPerPostMax;
+                                        const maxAiNum = Math.max(0, Math.min(4, Number(imagesPerPost)));
+                                        const rawQuota = String(imageTopicQuotaOverrides[topicMode] || "0").trim().toLowerCase();
+                                        const currentQuota = rawQuota === "all"
+                                            ? "all"
+                                            : String(Math.max(0, Math.min(maxAiNum, Number(rawQuota) || 0)));
+                                        const filteredOptions = AI_QUOTA_OPTIONS.filter(
+                                            (opt) => opt.value === "0" || opt.value === "all" || Number(opt.value) <= maxAiNum
+                                        );
+                                        return (
+                                            <div
+                                                key={topicMode}
+                                                className="flex items-center gap-4 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
+                                            >
+                                                <span className="w-20 text-sm font-medium text-slate-700">{label}</span>
+                                                <span className="text-xs text-slate-500">📷 {imagesPerPost}장/포스트</span>
+                                                <select
+                                                    value={currentQuota}
+                                                    onChange={(event) => handleTopicQuotaChange(topicMode, event.target.value)}
+                                                    className="ml-auto rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                                >
+                                                    {filteredOptions.map((opt) => (
+                                                        <option key={opt.value} value={opt.value}>
+                                                            AI {opt.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                <p className="mt-2 text-xs text-slate-400">
+                                    이미지/포스트 수는 <strong>카테고리 배분</strong> 탭에서 편집하세요
+                                </p>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-200 bg-white p-4">
+                                <p className="mb-3 text-sm font-semibold text-slate-800">포스트당 이미지 범위</p>
+                                <div className="flex items-center gap-3">
+                                    <label className="flex items-center gap-2 text-xs text-slate-600">
+                                        최소
+                                        <select
+                                            value={imagesPerPostMin}
+                                            onChange={(event) => {
+                                                const value = Number(event.target.value);
+                                                setImagesPerPostMin(value);
+                                                if (value > imagesPerPostMax) setImagesPerPostMax(value);
+                                            }}
+                                            className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                        >
+                                            {[0, 1, 2, 3, 4].map((n) => (
+                                                <option key={n} value={n}>{n}장</option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    <span className="text-slate-400">~</span>
+                                    <label className="flex items-center gap-2 text-xs text-slate-600">
+                                        최대
+                                        <select
+                                            value={imagesPerPostMax}
+                                            onChange={(event) => {
+                                                const value = Number(event.target.value);
+                                                setImagesPerPostMax(value);
+                                                if (value < imagesPerPostMin) setImagesPerPostMin(value);
+                                            }}
+                                            className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                        >
+                                            {[0, 1, 2, 3, 4].map((n) => (
+                                                <option key={n} value={n}>{n}장</option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                </div>
+                                <p className="mt-2 text-xs text-slate-400">
+                                    견적 비용 계산 시 사용됩니다. 실제 이미지 수는 <strong>카테고리 배분</strong> 탭의 설정을 따릅니다
+                                </p>
                             </div>
 
                             {/* 이미지 API 키 */}
