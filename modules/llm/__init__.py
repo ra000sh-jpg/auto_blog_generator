@@ -58,6 +58,7 @@ def _build_generator(
 
     quality_step = dict(generation_plan.get("quality_step", {}))
     voice_step = dict(generation_plan.get("voice_step", {}))
+    parser_step = dict(generation_plan.get("parser_step", {}))
 
     primary_client = _build_client_from_spec(quality_step)
     if primary_client is None:
@@ -110,6 +111,7 @@ def _build_generator(
             logger.warning("Tertiary provider %s skipped: %s", provider, exc)
 
     voice_client = _build_client_from_spec(voice_step) or secondary_client
+    parser_client = _build_client_from_spec(parser_step) or secondary_client
 
     def _fallback_alert(payload: Dict[str, Any]) -> None:
         if not notifier:
@@ -133,6 +135,7 @@ def _build_generator(
         primary_client=primary_client,
         secondary_client=secondary_client,
         voice_client=voice_client,
+        parser_client=parser_client,
         additional_clients=additional_clients,
         enable_quality_check=config.enable_quality_check,
         enable_seo_optimization=config.enable_seo_optimization,

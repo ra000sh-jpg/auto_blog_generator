@@ -29,17 +29,23 @@ from .circuit_breaker import ProviderCircuitBreaker, ProviderCircuitOpenError
 from .claude_client import ClaudeClient
 from .llm_router import provider_label
 from .prompts import (
+    ANTI_AI_PATTERN_RULES,
+    COGNITIVE_DEPTH_BY_TOPIC,
+    COGNITIVE_DEPTH_COMMON,
     ECONOMY_SYSTEM_PROMPT,
     ECONOMY_TOPIC_PROMPT,
+    EMOTIONAL_ARCHITECTURE_PROMPT,
     FACT_CHECK_REQUEST,
     FACT_CHECK_REVISION,
     IMAGE_PROMPT_GENERATION,
     OUTLINE_GENERATION,
+    PRE_WRITING_ANALYSIS_PROMPT,
     QUALITY_LAYER_CONTENT_REQUEST,
     QUALITY_LAYER_ECONOMY_PROMPT,
     QUALITY_LAYER_SYSTEM_PROMPT,
     QUALITY_CHECK,
     REWRITE_REQUEST,
+    SENTENCE_CRAFT_CHECKLIST,
     SECTION_DRAFT,
     SECTION_INTEGRATION,
     SEO_OPTIMIZATION,
@@ -116,6 +122,7 @@ class ContentGenerator:
         primary_client: Optional[BaseLLMClient] = None,
         secondary_client: Optional[BaseLLMClient] = None,
         voice_client: Optional[BaseLLMClient] = None,
+        parser_client: Optional[BaseLLMClient] = None,
         client: Optional[BaseLLMClient] = None,
         additional_clients: Optional[List[BaseLLMClient]] = None,
         enable_quality_check: bool = True,
@@ -138,6 +145,7 @@ class ContentGenerator:
         self.primary = resolved_primary
         self.secondary = secondary_client or resolved_primary
         self.voice_client = voice_client or self.secondary
+        self.parser_client = parser_client or self.secondary
         self.additional_clients: List[BaseLLMClient] = additional_clients or []
 
         # 기존 설정
@@ -197,6 +205,14 @@ class ContentGenerator:
         # 폴백 체인 구성
         fallback_chain = self._build_fallback_chain()
 
+        # Step 0: 사전 분석(Call A, 저가 모델)
+        pre_analysis = await self._run_pre_writing_analysis(
+            job=job,
+            topic_mode=topic_mode,
+            token_usage=token_usage,
+        )
+        llm_calls += 1
+
         # Step 1: 품질 레이어 원문 생성 (Voice 간섭 없음)
         if self.use_multistep:
             draft, provider_model, calls = await self._generate_multistep(
@@ -208,6 +224,7 @@ class ContentGenerator:
                 news_context=news_context,
                 quality_only=True,
                 token_usage=token_usage,
+                pre_analysis=pre_analysis,
             )
             llm_calls += calls
             generation_method = "multistep"
@@ -221,6 +238,7 @@ class ContentGenerator:
                 news_context=news_context,
                 quality_only=True,
                 token_usage=token_usage,
+                pre_analysis=pre_analysis,
             )
             llm_calls += 1
             generation_method = "single"
@@ -307,7 +325,15 @@ class ContentGenerator:
             llm_calls += 1
             voice_rewrite_applied = content != raw_content
 
-        # Step 6: 이미지 프롬프트 생성
+        # Step 6: 최종 문장 다듬기(Call D, 저가 모델)
+        if content and len(content) > 100:
+            content = await self._run_sentence_polish(
+                content=content,
+                token_usage=token_usage,
+            )
+            llm_calls += 1
+
+        # Step 7: 이미지 프롬프트 생성
         image_prompts, image_placements, image_slots = await self._generate_image_prompts(
             content,
             job.title,
@@ -374,8 +400,10 @@ class ContentGenerator:
         """단계별 토큰 집계 버킷을 초기화한다."""
         return {
             "parser": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "provider": "", "model": ""},
+            "pre_analysis": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "provider": "", "model": ""},
             "quality_step": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "provider": "", "model": ""},
             "voice_step": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "provider": "", "model": ""},
+            "sentence_polish": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "provider": "", "model": ""},
         }
 
     def _accumulate_token_usage(
@@ -458,6 +486,90 @@ class ContentGenerator:
             chain.append(self.secondary)
         chain.extend(self.additional_clients)
         return chain
+
+    async def _run_pre_writing_analysis(
+        self,
+        job: Job,
+        topic_mode: str,
+        *,
+        token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Call A: 사전 사고 분석을 수행한다."""
+        user_prompt = PRE_WRITING_ANALYSIS_PROMPT.format(
+            title=job.title,
+            keywords=", ".join(job.seed_keywords),
+            category=topic_mode,
+        )
+        system_prompt = "당신은 블로그 글의 전략 설계사입니다. 반드시 유효한 JSON으로만 응답하세요."
+        cheap_client = self.parser_client or self.secondary or self.primary
+        try:
+            response = await self._generate_with_usage(
+                client=cheap_client,
+                role="pre_analysis",
+                token_usage=token_usage,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.3,
+                max_tokens=1200,
+                max_retries=2,
+            )
+            raw = response.content.strip()
+            if "```" in raw:
+                json_match = re.search(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)
+                if json_match:
+                    raw = json_match.group(1).strip()
+            parsed = self._parse_json_response(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            logger.warning("Call A (pre_writing_analysis) 실패, 기본값으로 진행: %s", exc)
+            return {}
+
+    async def _run_sentence_polish(
+        self,
+        content: str,
+        *,
+        token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> str:
+        """Call D: 최종 문장 표현을 다듬는다."""
+        user_prompt = SENTENCE_CRAFT_CHECKLIST.format(content=content)
+        system_prompt = (
+            "당신은 한국어 편집 전문가입니다. "
+            "원문의 정보, H2 구조, 문단 수, URL, 수치는 절대 변경하지 마세요. "
+            "문장 표현과 리듬만 다듬으세요."
+        )
+        cheap_client = self.parser_client or self.secondary or self.primary
+        try:
+            response = await self._generate_with_usage(
+                client=cheap_client,
+                role="sentence_polish",
+                token_usage=token_usage,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.3,
+                max_tokens=4000,
+                max_retries=2,
+            )
+            polished = response.content.strip()
+            if not polished:
+                return content
+
+            # H2 섹션 수가 변하면 구조가 바뀌었다고 보고 원문 유지
+            if polished.count("## ") != content.count("## "):
+                logger.warning(
+                    "Call D: H2 개수 불일치 (원본 %d, 다듬기 %d) -> 원문 유지",
+                    content.count("## "),
+                    polished.count("## "),
+                )
+                return content
+
+            # 길이 변동이 과도하면 의미 훼손 위험이 있어 원문 유지
+            if abs(len(polished) - len(content)) / max(len(content), 1) > 0.15:
+                logger.warning("Call D: 길이 변화 15%% 초과 -> 원문 유지")
+                return content
+            return polished
+        except Exception as exc:
+            logger.warning("Call D (sentence_polish) 실패, 원문 유지: %s", exc)
+            return content
 
     def _is_economy_topic(self, topic_mode: str) -> bool:
         """경제/RAG 적용 대상 토픽인지 확인한다."""
@@ -727,7 +839,10 @@ class ContentGenerator:
                 client=client,
                 role="voice_step",
                 token_usage=token_usage,
-                system_prompt="당신은 한국어 스타일 리라이터입니다. 정보는 유지하고 표현만 조정하세요.",
+                system_prompt=(
+                    "당신은 한국어 스타일 리라이터입니다. 정보는 유지하고 표현만 조정하세요.\n\n"
+                    f"{ANTI_AI_PATTERN_RULES}"
+                ),
                 user_prompt=user_prompt,
                 temperature=max(0.2, min(0.7, style_strength / 100.0)),
                 max_tokens=self.max_tokens,
@@ -769,6 +884,7 @@ class ContentGenerator:
         news_context: Optional[List[Dict[str, str]]] = None,
         quality_only: bool = False,
         token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
+        pre_analysis: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str, str, str]:
         """단일 호출로 초안 생성."""
         provider_used = self.primary.provider_name
@@ -786,6 +902,7 @@ class ContentGenerator:
                     news_context=news_context,
                     quality_only=quality_only,
                     token_usage=token_usage,
+                    pre_analysis=pre_analysis,
                 )
                 provider_used = client.provider_name
                 if idx > 0:
@@ -873,6 +990,7 @@ class ContentGenerator:
         news_context: Optional[List[Dict[str, str]]] = None,
         quality_only: bool = False,
         token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
+        pre_analysis: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str, int]:
         """멀티스텝 생성: 아웃라인 → 섹션별 → 통합 (전략 B)."""
         llm_calls = 0
@@ -919,6 +1037,7 @@ class ContentGenerator:
                 news_context=news_context,
                 quality_only=quality_only,
                 token_usage=token_usage,
+                pre_analysis=pre_analysis,
             )
             return draft, model, 1
 
@@ -933,6 +1052,7 @@ class ContentGenerator:
                 news_context=news_context,
                 quality_only=quality_only,
                 token_usage=token_usage,
+                pre_analysis=pre_analysis,
             )
             return draft, model, llm_calls + 1
 
@@ -983,6 +1103,7 @@ class ContentGenerator:
                 news_context=news_context,
                 quality_only=quality_only,
                 token_usage=token_usage,
+                pre_analysis=pre_analysis,
             )
             return draft, model, llm_calls + 1
 
@@ -1041,6 +1162,7 @@ class ContentGenerator:
         news_context: Optional[List[Dict[str, str]]] = None,
         quality_only: bool = False,
         token_usage: Optional[Dict[str, Dict[str, Any]]] = None,
+        pre_analysis: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str]:
         """초안 생성."""
         topic_mode = normalize_topic_mode(topic_mode or "cafe")
@@ -1053,6 +1175,46 @@ class ContentGenerator:
         voice_profile_text = self._build_voice_profile_text(self._load_saved_voice_profile(job.persona_id or "P1"))
         voice_injection = f"\n\n[Voice Profile (Writing Style)]\n{voice_profile_text}"
 
+        cognitive_injection = ""
+        emotional_injection = ""
+        pre_analysis_injection = ""
+
+        if quality_only:
+            depth_common = COGNITIVE_DEPTH_COMMON
+            depth_topic = COGNITIVE_DEPTH_BY_TOPIC.get(topic_mode, "")
+            cognitive_injection = f"\n\n{depth_common}"
+            if depth_topic:
+                cognitive_injection += f"\n\n{depth_topic}"
+
+            if pre_analysis and isinstance(pre_analysis.get("emotional_curve"), dict):
+                emotional_curve = pre_analysis.get("emotional_curve", {})
+                emotional_injection = "\n\n" + EMOTIONAL_ARCHITECTURE_PROMPT.format(
+                    opening_emotion=emotional_curve.get("opening_emotion", "호기심"),
+                    turning_point=emotional_curve.get("turning_point", "본문 중반에서 핵심 발견"),
+                    closing_emotion=emotional_curve.get("closing_emotion", "실행 의지와 여운"),
+                )
+
+            if pre_analysis:
+                reader_knowledge = str(pre_analysis.get("reader_current_knowledge", "")).strip()
+                misconceptions = pre_analysis.get("reader_misconceptions", [])
+                questions = pre_analysis.get("reader_top_questions", [])
+                structure = pre_analysis.get("recommended_structure", [])
+                misconceptions_text = ", ".join(str(item) for item in misconceptions) if isinstance(misconceptions, list) else "없음"
+                questions_text = ", ".join(str(item) for item in questions) if isinstance(questions, list) else "없음"
+                structure_text = json.dumps(structure, ensure_ascii=False) if isinstance(structure, list) and structure else "자유 구성"
+                pre_analysis_injection = f"""
+
+[사전 분석 결과 - 이 내용을 글의 방향에 반영하세요]
+독자의 현재 지식: {reader_knowledge}
+흔한 오해: {misconceptions_text}
+독자의 궁금증: {questions_text}
+추천 구조: {structure_text}
+
+추가 지시:
+- 이 주제에서 대부분이 믿지만 실제로는 다른 것을 최소 1개 언급하세요.
+- 전혀 다른 분야의 원리와 연결점을 1개 이상 제시하세요.
+"""
+
         use_economy_rag = bool(news_data_text) and self._is_economy_topic(topic_mode)
         if quality_only and use_economy_rag:
             user_prompt = QUALITY_LAYER_ECONOMY_PROMPT.format(
@@ -1061,7 +1223,10 @@ class ContentGenerator:
                 category=topic_mode,
                 news_data=news_data_text,
             )
-            system_prompt = f"{QUALITY_LAYER_SYSTEM_PROMPT}\n\n{ECONOMY_SYSTEM_PROMPT}"
+            system_prompt = (
+                f"{QUALITY_LAYER_SYSTEM_PROMPT}\n\n{ECONOMY_SYSTEM_PROMPT}"
+                f"{cognitive_injection}{emotional_injection}{pre_analysis_injection}"
+            )
         elif quality_only:
             user_prompt = QUALITY_LAYER_CONTENT_REQUEST.format(
                 title=job.title,
@@ -1076,7 +1241,12 @@ class ContentGenerator:
                     "1) NewsData의 최신 사실을 본문에 최소 1회 반영\n"
                     "2) NewsData에 없는 수치/인용은 생성 금지\n"
                 )
-            system_prompt = QUALITY_LAYER_SYSTEM_PROMPT
+            system_prompt = (
+                QUALITY_LAYER_SYSTEM_PROMPT
+                + cognitive_injection
+                + emotional_injection
+                + pre_analysis_injection
+            )
         elif use_economy_rag:
             user_prompt = ECONOMY_TOPIC_PROMPT.format(
                 title=job.title,

@@ -90,11 +90,19 @@ class JobDetailResponse(BaseModel):
     tags: List[str] = Field(default_factory=list)
     category: str = ""
     prepared_payload: Dict[str, Any] = Field(default_factory=dict)
+    final_content: str = ""
+    topic_mode: str = ""
 
 
 def _serialize_job(job: Job) -> Dict[str, Any]:
     """Job dataclass를 API 응답용 dict로 변환한다."""
     payload = asdict(job)
+    # prepared_payload 안에 저장된 final_content를 최상위 필드로 추출
+    pp = payload.get("prepared_payload") or {}
+    if "final_content" not in payload or not payload.get("final_content"):
+        payload["final_content"] = str(pp.get("final_content", ""))
+    if "topic_mode" not in payload or not payload.get("topic_mode"):
+        payload["topic_mode"] = str(pp.get("topic_mode", ""))
     return payload
 
 

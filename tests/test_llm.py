@@ -110,6 +110,7 @@ def test_claude_client_init_requires_api_key(monkeypatch: pytest.MonkeyPatch):
 def test_content_generator_returns_valid_structure():
     """생성 결과 구조와 주요 필드를 검증한다."""
     outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
         "# 자동화 블로그 작성 가이드\n\n## 시작하기\n\n초안 본문",
         "# 자동화 블로그 작성 가이드\n\n## SEO 시작하기\n\n최적화 본문",
         '{"score": 88, "issues": [], "summary": "양호"}',
@@ -123,10 +124,11 @@ def test_content_generator_returns_valid_structure():
     assert result.quality_gate == "pass"
     assert result.quality_snapshot["score"] == 88
     assert "keywords" in result.seo_snapshot
-    assert result.llm_calls_used == 5  # draft + SEO + quality + voice rewrite + image prompts
+    assert result.llm_calls_used == 6  # pre-analysis + draft + SEO + quality + voice rewrite + image prompts
     assert result.provider_used in {"qwen", "deepseek", "claude"}
     assert len(result.image_prompts) >= 1
     assert result.voice_rewrite_applied is True
+    assert result.llm_token_usage["pre_analysis"]["calls"] >= 1
     assert result.llm_token_usage["quality_step"]["calls"] >= 4
     assert result.llm_token_usage["voice_step"]["calls"] >= 1
     assert result.llm_token_usage["quality_step"]["input_tokens"] > 0
@@ -135,6 +137,7 @@ def test_content_generator_returns_valid_structure():
 def test_content_generator_supports_image_slots_schema():
     """image_slots 응답 스키마를 파싱하고 최대 4개까지 유지해야 한다."""
     outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
         "# 자동화 블로그 작성 가이드\n\n## 시작하기\n\n초안 본문",
         "# 자동화 블로그 작성 가이드\n\n## SEO 시작하기\n\n최적화 본문",
         '{"score": 88, "issues": [], "summary": "양호"}',
@@ -165,6 +168,7 @@ def test_content_generator_supports_image_slots_schema():
 def test_voice_rewrite_falls_back_when_numeric_fact_changes():
     """Voice 리라이트가 숫자 사실을 바꾸면 원문으로 폴백해야 한다."""
     outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
         "# 테스트\n\n## 핵심 지표\n\n이번 달 전환율은 42% 입니다.\n",
         "# 테스트\n\n## 핵심 지표\n\n이번 달 전환율은 42% 입니다.\n",
         '{"score": 92, "issues": [], "summary": "좋음"}',
@@ -182,6 +186,7 @@ def test_voice_rewrite_falls_back_when_numeric_fact_changes():
 def test_quality_threshold_main_slot_requires_80(tmp_path: Path):
     """메인 슬롯은 80점 기준으로 품질 통과 여부를 판단해야 한다."""
     outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
         "# 테스트\n\n## 본문\n\n메인 슬롯 초안",
         "# 테스트\n\n## 본문\n\n메인 슬롯 초안",
         '{"score": 75, "issues": ["depth"], "summary": "보완 필요"}',
@@ -207,6 +212,7 @@ def test_quality_threshold_test_slot_uses_fallback_category(tmp_path: Path):
     store.set_system_setting("fallback_category", "다양한 생각")
 
     outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
         "# 테스트\n\n## 본문\n\n테스트 슬롯 초안",
         "# 테스트\n\n## 본문\n\n테스트 슬롯 초안",
         '{"score": 75, "issues": [], "summary": "통과"}',

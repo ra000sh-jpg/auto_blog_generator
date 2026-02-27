@@ -374,7 +374,7 @@ export type RouterSettingsPayload = {
   image_api_keys: Record<string, string>;
   image_engine: string;
   image_ai_engine?: string;
-  image_ai_quota?: "0" | "1" | "all";
+  image_ai_quota?: "0" | "1" | "2" | "3" | "4" | "all";
   image_topic_quota_overrides?: Record<string, string>;
   traffic_feedback_strong_mode?: boolean;
   image_enabled: boolean;
@@ -395,6 +395,10 @@ export type RouterQuoteResponse = {
     cost_min_krw: number;
     cost_max_krw: number;
     quality_score: number;
+    daily_posts: number;
+    monthly_cost_krw: number;
+    monthly_cost_min_krw: number;
+    monthly_cost_max_krw: number;
   };
   image: Record<string, unknown>;
   available_text_models: Array<Record<string, unknown>>;

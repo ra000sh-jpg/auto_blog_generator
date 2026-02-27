@@ -20,12 +20,14 @@ USD_TO_KRW = 1350.0
 # 토큰 사용량은 역할별 평균치(보수적 추정)
 TOKEN_BUDGET = {
     "parser": {"input": 450, "output": 180},
-    "quality_step": {"input": 3600, "output": 2400},
-    "voice_step": {"input": 2900, "output": 2200},
+    "pre_analysis": {"input": 600, "output": 1000},
+    "quality_step": {"input": 5500, "output": 2800},
+    "voice_step": {"input": 4200, "output": 2500},
     # 추가 파이프라인 단계 (quality_step 역할로 호출, UI 원가에 반영)
     "self_critique": {"input": 2400, "output": 800},   # 품질 자기검증 1회
     "seo_step": {"input": 1200, "output": 600},        # SEO 제목/메타 최적화
     "image_prompt": {"input": 800, "output": 400},     # image_slots 생성
+    "sentence_polish": {"input": 4500, "output": 3000},
 }
 
 
@@ -60,6 +62,14 @@ class ImageModelSpec:
     category: str
 
 
+# 가격 기준일: 2026-02-27
+# 출처:
+#   DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
+#   Gemini: https://ai.google.dev/gemini-api/docs/pricing
+#   OpenAI: https://openai.com/api/pricing
+#   Qwen: https://help.aliyun.com/zh/model-studio/getting-started/models
+#   Claude: https://docs.anthropic.com/en/docs/about-claude/models
+#   Groq/Cerebras: 무료 Tier (rate limit 적용)
 TEXT_MODEL_MATRIX: List[TextModelSpec] = [
     TextModelSpec(
         provider="qwen",
@@ -76,8 +86,8 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         model="deepseek-chat",
         label="DeepSeek Chat",
         key_id="deepseek",
-        input_cost_per_1m_usd=0.27,
-        output_cost_per_1m_usd=1.10,
+        input_cost_per_1m_usd=0.28,
+        output_cost_per_1m_usd=0.42,
         quality_score=86,
         speed_score=88,
     ),
@@ -86,8 +96,8 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         model="gemini-2.0-flash",
         label="Gemini 2.0 Flash",
         key_id="gemini",
-        input_cost_per_1m_usd=0.35,
-        output_cost_per_1m_usd=1.05,
+        input_cost_per_1m_usd=0.10,
+        output_cost_per_1m_usd=0.40,
         quality_score=90,
         speed_score=93,
     ),
@@ -220,6 +230,8 @@ def mask_secret(raw_value: str) -> str:
 def normalize_strategy_mode(raw_value: str) -> str:
     """전략 모드를 정규화한다."""
     value = str(raw_value or "").strip().lower()
+    if value in {"balanced", "balance", "standard"}:
+        return "balanced"
     if value in {"quality", "best_quality", "hq"}:
         return "quality"
     return "cost"
@@ -313,11 +325,31 @@ def _role_temperature(strategy_mode: str, role: str) -> float:
     """역할별 기본 temperature를 반환한다."""
     if role == "parser":
         return 0.1
+    if role in {"pre_analysis", "sentence_polish"}:
+        return 0.3 if strategy_mode == "cost" else 0.35
     if role == "quality_step":
-        return 0.55 if strategy_mode == "cost" else 0.65
+        if strategy_mode == "quality":
+            return 0.65
+        if strategy_mode == "balanced":
+            return 0.6
+        return 0.55
     if role == "voice_step":
-        return 0.35 if strategy_mode == "cost" else 0.45
+        if strategy_mode == "quality":
+            return 0.45
+        if strategy_mode == "balanced":
+            return 0.4
+        return 0.35
     return 0.6
+
+
+_CHEAP_ROLES = {"parser", "pre_analysis", "sentence_polish"}
+_ROLE_MIN_QUALITY = {
+    "parser": 75,
+    "pre_analysis": 75,
+    "quality_step": 82,
+    "voice_step": 80,
+    "sentence_polish": 78,
+}
 
 
 class LLMRouter:
@@ -632,10 +664,14 @@ class LLMRouter:
             max_size=2,
         )
 
+        parser_role_payload = self._role_payload(parser_spec, strategy_mode, "parser")
         role_payload = {
-            "parser": self._role_payload(parser_spec, strategy_mode, "parser"),
+            "parser": parser_role_payload,
+            # 저가 역할은 parser와 같은 모델을 사용한다.
+            "pre_analysis": self._role_payload(parser_spec, strategy_mode, "pre_analysis"),
             "quality_step": self._role_payload(quality_spec, strategy_mode, "quality_step"),
             "voice_step": self._role_payload(voice_spec, strategy_mode, "voice_step"),
+            "sentence_polish": self._role_payload(parser_spec, strategy_mode, "sentence_polish"),
         }
         role_payload["quality_step"]["fallback_chain"] = [
             self._model_payload(spec) for spec in quality_fallbacks
@@ -643,6 +679,8 @@ class LLMRouter:
         role_payload["voice_step"]["fallback_chain"] = [
             self._model_payload(spec) for spec in voice_fallbacks
         ]
+        role_payload["pre_analysis"]["fallback_chain"] = list(parser_role_payload.get("fallback_chain", []))
+        role_payload["sentence_polish"]["fallback_chain"] = list(parser_role_payload.get("fallback_chain", []))
 
         image_spec = _find_image_model(image_engine) or _find_image_model(DEFAULT_IMAGE_ENGINE)
         image_ai_spec = _find_image_model(image_ai_engine) or _find_image_model(DEFAULT_IMAGE_AI_ENGINE)
@@ -731,6 +769,7 @@ class LLMRouter:
         planned = self.build_plan(overrides=overrides)
         saved = self.get_saved_settings()
         text_keys = saved["text_api_keys"]
+        parser = planned["roles"]["parser"]
         quality = planned["roles"]["quality_step"]
         voice = planned["roles"]["voice_step"]
         selected_slot_type = "default"
@@ -757,6 +796,7 @@ class LLMRouter:
 
         return {
             "strategy_mode": planned["strategy_mode"],
+            "parser_step": role_to_runtime(parser),
             "quality_step": role_to_runtime(quality),
             "voice_step": role_to_runtime(voice),
             "estimate": planned["estimate"],
@@ -776,6 +816,7 @@ class LLMRouter:
         available_specs = self._available_text_specs(text_keys)
         strategy_mode = str(planned["strategy_mode"]).strip().lower()
 
+        parser_role = planned["roles"]["parser"]
         quality_role = dict(planned["roles"]["quality_step"])
         current_quality_spec = _find_text_model(
             str(quality_role.get("provider", "")),
@@ -824,6 +865,7 @@ class LLMRouter:
 
         return {
             "strategy_mode": planned["strategy_mode"],
+            "parser_step": role_to_runtime(parser_role),
             "quality_step": role_to_runtime(quality_role),
             "voice_step": role_to_runtime(voice_role),
             "estimate": planned["estimate"],
@@ -1123,27 +1165,39 @@ class LLMRouter:
         if not candidates:
             return None
 
+        threshold = _ROLE_MIN_QUALITY.get(role, 75)
+        is_cheap_role = role in _CHEAP_ROLES
         by_cost = sorted(candidates, key=lambda item: (item.avg_cost_per_1k_usd, -item.quality_score))
         by_quality = sorted(candidates, key=lambda item: (-item.quality_score, item.avg_cost_per_1k_usd))
-        role_min_quality = {"parser": 75, "quality_step": 82, "voice_step": 80}
-        threshold = role_min_quality.get(role, 75)
 
-        if strategy_mode == "quality":
-            if role == "parser":
-                # 파서는 품질 모드에서도 지연을 줄이기 위해 속도 우선 선택한다.
-                by_speed = sorted(candidates, key=lambda item: (-item.speed_score, item.avg_cost_per_1k_usd))
-                return by_speed[0]
-            return by_quality[0]
-
-        # cost 전략: parser 역할은 무료 프로바이더(Groq/Cerebras)를 1순위로 선택
-        if role == "parser":
+        if is_cheap_role:
             free_candidates = [
-                item for item in candidates
-                if item.input_cost_per_1m_usd == 0.0 and item.output_cost_per_1m_usd == 0.0
+                item
+                for item in candidates
+                if item.input_cost_per_1m_usd == 0.0
+                and item.output_cost_per_1m_usd == 0.0
                 and item.quality_score >= threshold
             ]
             if free_candidates:
-                return sorted(free_candidates, key=lambda item: -item.speed_score)[0]
+                return sorted(free_candidates, key=lambda item: (-item.speed_score, item.avg_cost_per_1k_usd))[0]
+            for item in by_cost:
+                if item.quality_score >= threshold:
+                    return item
+            return by_cost[0]
+
+        if strategy_mode == "quality":
+            return by_quality[0]
+
+        if strategy_mode == "balanced":
+            quality_values = sorted([item.quality_score for item in candidates])
+            percentile_index = max(0, int(len(quality_values) * 0.8) - 1)
+            quality_p80 = quality_values[percentile_index] if quality_values else 0
+            balanced_candidates = [
+                item for item in candidates if item.quality_score >= quality_p80 and item.quality_score >= threshold
+            ]
+            if balanced_candidates:
+                return sorted(balanced_candidates, key=lambda item: item.avg_cost_per_1k_usd)[0]
+            return by_quality[0]
 
         for item in by_cost:
             if item.quality_score >= threshold:
@@ -1225,8 +1279,31 @@ class LLMRouter:
         self_critique_cost = extra_step_cost("self_critique")
         seo_cost = extra_step_cost("seo_step")
         image_prompt_cost = extra_step_cost("image_prompt")
+        
+        def extra_cheap_cost(role: str) -> float:
+            """저가 역할 비용을 parser 모델 기준으로 계산한다."""
+            if not parser_spec:
+                return 0.0
+            budget = TOKEN_BUDGET.get(role)
+            if not budget:
+                return 0.0
+            input_cost = (budget["input"] / 1_000_000.0) * parser_spec.input_cost_per_1m_usd
+            output_cost = (budget["output"] / 1_000_000.0) * parser_spec.output_cost_per_1m_usd
+            return (input_cost + output_cost) * USD_TO_KRW
 
-        text_cost = parser_cost + quality_cost + voice_cost + self_critique_cost + seo_cost + image_prompt_cost
+        pre_analysis_cost = extra_cheap_cost("pre_analysis")
+        sentence_polish_cost = extra_cheap_cost("sentence_polish")
+
+        text_cost = (
+            parser_cost
+            + quality_cost
+            + voice_cost
+            + self_critique_cost
+            + seo_cost
+            + image_prompt_cost
+            + pre_analysis_cost
+            + sentence_polish_cost
+        )
 
         def resolve_ai_count(total_images: int) -> int:
             safe_total = max(0, int(total_images))
@@ -1261,6 +1338,27 @@ class LLMRouter:
         cost_min = text_cost + image_cost_min
         cost_max = text_cost + image_cost_max
 
+        daily_posts = 8
+        if self.job_store:
+            try:
+                raw_alloc = self.job_store.get_system_setting("scheduler_category_allocations", "[]")
+                alloc_list = json.loads(raw_alloc) if raw_alloc else []
+                alloc_count = 0
+                if isinstance(alloc_list, list):
+                    alloc_count = sum(int(item.get("count", 0)) for item in alloc_list if isinstance(item, dict))
+                idea_vault_quota = int(
+                    self.job_store.get_system_setting("scheduler_idea_vault_daily_quota", "0") or 0
+                )
+                computed = alloc_count + idea_vault_quota
+                if computed > 0:
+                    daily_posts = computed
+            except Exception:
+                pass
+
+        monthly_cost = total_cost * daily_posts * 30
+        monthly_cost_min = cost_min * daily_posts * 30
+        monthly_cost_max = cost_max * daily_posts * 30
+
         return {
             "currency": "KRW",
             "text_cost_krw": int(round(text_cost)),
@@ -1277,6 +1375,10 @@ class LLMRouter:
             "stock_image_count_min": stock_count_min,
             "stock_image_count_max": stock_count_max,
             "quality_score": max(0, min(100, quality_score)),
+            "daily_posts": int(daily_posts),
+            "monthly_cost_krw": int(round(monthly_cost)),
+            "monthly_cost_min_krw": int(round(monthly_cost_min)),
+            "monthly_cost_max_krw": int(round(monthly_cost_max)),
         }
 
     def _provider_to_key_id(self, provider: str) -> str:

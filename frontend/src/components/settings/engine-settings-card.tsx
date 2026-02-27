@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
     fetchDashboard,
     quoteRouterSettings,
@@ -18,6 +18,15 @@ type EngineSettingsCardProps = {
     initialNaverStatus: NaverConnectStatusResponse | null;
 };
 
+type StrategyMode = "cost" | "balanced" | "quality";
+
+function normalizeStrategyMode(raw: unknown): StrategyMode {
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "quality") return "quality";
+    if (value === "balanced") return "balanced";
+    return "cost";
+}
+
 export default function EngineSettingsCard({
     initialRouterSettings,
     initialNaverStatus,
@@ -26,8 +35,8 @@ export default function EngineSettingsCard({
     const [routerLoading, setRouterLoading] = useState(false);
     const [routerMessage, setRouterMessage] = useState("");
 
-    const [strategyMode, setStrategyMode] = useState<"cost" | "quality">(
-        initialRouterSettings.settings.strategy_mode === "quality" ? "quality" : "cost"
+    const [strategyMode, setStrategyMode] = useState<StrategyMode>(
+        normalizeStrategyMode(initialRouterSettings.settings.strategy_mode)
     );
     const [textApiKeys, setTextApiKeys] = useState<Record<string, string>>({});
     const [imageApiKeys, setImageApiKeys] = useState<Record<string, string>>({});
@@ -67,7 +76,7 @@ export default function EngineSettingsCard({
     );
 
     const [routerQuote, setRouterQuote] = useState<RouterQuoteResponse | null>({
-        strategy_mode: initialRouterSettings.settings.strategy_mode === "quality" ? "quality" : "cost",
+        strategy_mode: normalizeStrategyMode(initialRouterSettings.settings.strategy_mode),
         roles: initialRouterSettings.roles || {},
         estimate: {
             currency: "KRW",
@@ -77,10 +86,26 @@ export default function EngineSettingsCard({
             cost_min_krw: Number(initialRouterSettings.quote.cost_min_krw ?? initialRouterSettings.quote.total_cost_krw ?? 0),
             cost_max_krw: Number(initialRouterSettings.quote.cost_max_krw ?? initialRouterSettings.quote.total_cost_krw ?? 0),
             quality_score: Number(initialRouterSettings.quote.quality_score || 0),
+            daily_posts: Number(initialRouterSettings.quote.daily_posts || 0),
+            monthly_cost_krw: Number(initialRouterSettings.quote.monthly_cost_krw || 0),
+            monthly_cost_min_krw: Number(initialRouterSettings.quote.monthly_cost_min_krw || 0),
+            monthly_cost_max_krw: Number(initialRouterSettings.quote.monthly_cost_max_krw || 0),
         },
         image: {},
         available_text_models: [],
     });
+    const [strategyPreviews, setStrategyPreviews] = useState<Record<StrategyMode, {
+        total_cost_krw: number;
+        monthly_cost_krw: number;
+        quality_score: number;
+        main_model_label: string;
+        cheap_model_label: string;
+    } | null>>({
+        cost: null,
+        balanced: null,
+        quality: null,
+    });
+    const quoteGenerationRef = useRef(0);
     const [competitionState, setCompetitionState] = useState(
         initialRouterSettings.competition || {
             phase: "eval_continuous",
@@ -128,6 +153,13 @@ export default function EngineSettingsCard({
         return typeof label === "string" ? label : "-";
     }, [routerQuote]);
 
+    const preAnalysisModelLabel = useMemo(() => {
+        const role = routerQuote?.roles?.pre_analysis;
+        if (!role || typeof role !== "object") return parserModelLabel;
+        const label = (role as Record<string, unknown>).label;
+        return typeof label === "string" ? label : parserModelLabel;
+    }, [routerQuote, parserModelLabel]);
+
     const qualityModelLabel = useMemo(() => {
         const role = routerQuote?.roles?.quality_step;
         if (!role || typeof role !== "object") return "-";
@@ -142,12 +174,19 @@ export default function EngineSettingsCard({
         return typeof label === "string" ? label : "-";
     }, [routerQuote]);
 
+    const sentencePolishModelLabel = useMemo(() => {
+        const role = routerQuote?.roles?.sentence_polish;
+        if (!role || typeof role !== "object") return parserModelLabel;
+        const label = (role as Record<string, unknown>).label;
+        return typeof label === "string" ? label : parserModelLabel;
+    }, [routerQuote, parserModelLabel]);
+
     useEffect(() => {
         const timer = setTimeout(async () => {
+            const generation = ++quoteGenerationRef.current;
             setRouterLoading(true);
             try {
-                const quoted = await quoteRouterSettings({
-                    strategy_mode: strategyMode,
+                const basePayload = {
                     text_api_keys: compactKeys(textApiKeys),
                     image_api_keys: compactKeys(imageApiKeys),
                     image_engine: imageEngine,
@@ -159,12 +198,40 @@ export default function EngineSettingsCard({
                     images_per_post: imagesPerPostMax,
                     images_per_post_min: imagesPerPostMin,
                     images_per_post_max: imagesPerPostMax,
+                };
+                const [costQuote, balancedQuote, qualityQuote] = await Promise.all([
+                    quoteRouterSettings({ ...basePayload, strategy_mode: "cost" }),
+                    quoteRouterSettings({ ...basePayload, strategy_mode: "balanced" }),
+                    quoteRouterSettings({ ...basePayload, strategy_mode: "quality" }),
+                ]);
+                if (generation !== quoteGenerationRef.current) {
+                    return;
+                }
+                const extractPreview = (quote: RouterQuoteResponse) => ({
+                    total_cost_krw: quote.estimate.total_cost_krw,
+                    monthly_cost_krw: quote.estimate.monthly_cost_krw
+                        || quote.estimate.total_cost_krw * (quote.estimate.daily_posts || 8) * 30,
+                    quality_score: quote.estimate.quality_score,
+                    main_model_label: String((quote.roles?.quality_step as Record<string, unknown>)?.label || "-"),
+                    cheap_model_label: String((quote.roles?.pre_analysis as Record<string, unknown>)?.label || "-"),
                 });
-                setRouterQuote(quoted);
+                setStrategyPreviews({
+                    cost: extractPreview(costQuote),
+                    balanced: extractPreview(balancedQuote),
+                    quality: extractPreview(qualityQuote),
+                });
+                const currentQuote = strategyMode === "quality"
+                    ? qualityQuote
+                    : strategyMode === "balanced"
+                        ? balancedQuote
+                        : costQuote;
+                setRouterQuote(currentQuote);
             } catch {
                 // 미리보기 실패는 저장 동작을 막지 않는다.
             } finally {
-                setRouterLoading(false);
+                if (generation === quoteGenerationRef.current) {
+                    setRouterLoading(false);
+                }
             }
         }, 350);
         return () => clearTimeout(timer);
@@ -197,7 +264,7 @@ export default function EngineSettingsCard({
                 images_per_post_max: imagesPerPostMax,
                 challenger_model: challengerModel,
             });
-            setStrategyMode(saved.settings.strategy_mode === "quality" ? "quality" : "cost");
+            setStrategyMode(normalizeStrategyMode(saved.settings.strategy_mode));
             setTextApiMasks(saved.settings.text_api_keys_masked || {});
             setImageApiMasks(saved.settings.image_api_keys_masked || {});
             setImageEngine(saved.settings.image_engine || "pexels");
@@ -214,7 +281,7 @@ export default function EngineSettingsCard({
             setCompetitionState(saved.competition || competitionState);
             setChallengerModel(String(saved.competition?.challenger_model || challengerModel));
             setRouterQuote((prev) => ({
-                strategy_mode: saved.settings.strategy_mode === "quality" ? "quality" : "cost",
+                strategy_mode: normalizeStrategyMode(saved.settings.strategy_mode),
                 roles: saved.roles || prev?.roles || {},
                 estimate: {
                     currency: "KRW",
@@ -224,6 +291,10 @@ export default function EngineSettingsCard({
                     cost_min_krw: Number(saved.quote.cost_min_krw ?? saved.quote.total_cost_krw ?? 0),
                     cost_max_krw: Number(saved.quote.cost_max_krw ?? saved.quote.total_cost_krw ?? 0),
                     quality_score: Number(saved.quote.quality_score || 0),
+                    daily_posts: Number(saved.quote.daily_posts || 0),
+                    monthly_cost_krw: Number(saved.quote.monthly_cost_krw || 0),
+                    monthly_cost_min_krw: Number(saved.quote.monthly_cost_min_krw || 0),
+                    monthly_cost_max_krw: Number(saved.quote.monthly_cost_max_krw || 0),
                 },
                 image: prev?.image || {},
                 available_text_models: prev?.available_text_models || [],
@@ -272,27 +343,56 @@ export default function EngineSettingsCard({
                         글쓰기 AI 모델
                     </h3>
 
-                    <div className="mb-4 inline-flex rounded-full border border-slate-300 p-1">
-                        <button
-                            type="button"
-                            onClick={() => setStrategyMode("cost")}
-                            className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "cost"
-                                ? "bg-slate-900 text-white"
-                                : "text-slate-700 hover:bg-slate-100"
-                                }`}
-                        >
-                            ⚖️ 가성비 우선
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setStrategyMode("quality")}
-                            className={`rounded-full px-4 py-1 text-sm font-medium transition ${strategyMode === "quality"
-                                ? "bg-slate-900 text-white"
-                                : "text-slate-700 hover:bg-slate-100"
-                                }`}
-                        >
-                            💎 품질 우선
-                        </button>
+                    <div className="mb-4">
+                        <p className="mb-2 text-sm font-semibold text-slate-700">전략 선택</p>
+                        <div className="grid grid-cols-3 gap-3">
+                            {([
+                                { key: "cost" as const, icon: "💰", label: "가성비", desc: "최저 비용" },
+                                { key: "balanced" as const, icon: "⚖️", label: "균형", desc: "비용·품질 밸런스" },
+                                { key: "quality" as const, icon: "💎", label: "품질우선", desc: "최고 품질" },
+                            ]).map(({ key, icon, label, desc }) => {
+                                const preview = strategyPreviews[key];
+                                const selected = strategyMode === key;
+                                return (
+                                    <button
+                                        key={key}
+                                        type="button"
+                                        onClick={() => setStrategyMode(key)}
+                                        className={`relative rounded-xl border-2 p-4 text-left transition ${selected
+                                            ? "border-indigo-500 bg-indigo-50 shadow-md"
+                                            : "border-slate-200 hover:border-slate-300"
+                                            }`}
+                                    >
+                                        {selected && (
+                                            <span className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-indigo-500 text-[10px] text-white">✓</span>
+                                        )}
+                                        <div className="text-lg">{icon}</div>
+                                        <p className={`mt-1 text-sm font-bold ${selected ? "text-indigo-700" : "text-slate-800"}`}>
+                                            {label}
+                                        </p>
+                                        <p className="text-[11px] text-slate-500">{desc}</p>
+                                        {preview ? (
+                                            <div className="mt-3 space-y-1 border-t border-slate-100 pt-2">
+                                                <p className="text-xs text-slate-600">
+                                                    ~{formatKrw(preview.total_cost_krw)}원<span className="text-slate-400">/편</span>
+                                                </p>
+                                                <p className="text-xs font-semibold text-slate-800">
+                                                    월 {formatKrw(preview.monthly_cost_krw)}원
+                                                </p>
+                                                <p className="text-[11px] text-slate-500">품질 {preview.quality_score}점</p>
+                                                <p className="mt-1 text-[10px] text-slate-400">본문: {preview.main_model_label}</p>
+                                                <p className="text-[10px] text-slate-400">보조: {preview.cheap_model_label}</p>
+                                            </div>
+                                        ) : routerLoading ? (
+                                            <p className="mt-3 text-[11px] text-slate-400">계산 중...</p>
+                                        ) : null}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <p className="mt-2 text-[11px] text-slate-400">
+                            설계/분석/다듬기 단계는 자동으로 저가 모델을 우선 사용하며, 월 비용은 일일 편수 기준으로 계산됩니다.
+                        </p>
                     </div>
 
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -419,7 +519,7 @@ export default function EngineSettingsCard({
                     <h3 className="text-sm font-semibold text-slate-800">실시간 견적서</h3>
                     {routerLoading && <span className="text-xs text-slate-500">계산 중...</span>}
                 </div>
-                <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 text-sm lg:grid-cols-3">
                     <div className="rounded-lg bg-slate-50 p-3">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">예상 원가 (포스팅당)</p>
                         <p className="mt-1 text-lg font-bold text-slate-900">
@@ -428,6 +528,23 @@ export default function EngineSettingsCard({
                             {formatKrw(routerQuote?.estimate.cost_max_krw || 0)}원
                         </p>
                         <p className="mt-0.5 text-xs text-slate-500">글 길이·사진 수에 따라 변동</p>
+                    </div>
+                    <div className="rounded-lg bg-slate-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">월 예상 원가</p>
+                        <p className="mt-1 text-lg font-bold text-slate-900">
+                            {formatKrw(
+                                routerQuote?.estimate.monthly_cost_min_krw
+                                || ((routerQuote?.estimate.cost_min_krw || 0) * (routerQuote?.estimate.daily_posts || 0) * 30)
+                            )}원
+                            {" ~ "}
+                            {formatKrw(
+                                routerQuote?.estimate.monthly_cost_max_krw
+                                || ((routerQuote?.estimate.cost_max_krw || 0) * (routerQuote?.estimate.daily_posts || 0) * 30)
+                            )}원
+                        </p>
+                        <p className="mt-0.5 text-xs text-slate-500">
+                            기준: 일 {routerQuote?.estimate.daily_posts || 0}편 × 30일
+                        </p>
                     </div>
                     <div className="rounded-lg bg-slate-50 p-3">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">예상 품질</p>
@@ -443,24 +560,26 @@ export default function EngineSettingsCard({
                     <p className="mb-2 text-xs font-semibold text-slate-500">전체 파이프라인 배정</p>
                     <div className="flex flex-wrap gap-1.5 text-xs">
                         {[
-                            { step: "① 문맥분석", label: parserModelLabel, color: "bg-blue-50 text-blue-700 border-blue-200" },
-                            { step: "② 품질작성", label: qualityModelLabel, color: "bg-violet-50 text-violet-700 border-violet-200" },
-                            { step: "③ 자기검증", label: qualityModelLabel, color: "bg-violet-50 text-violet-700 border-violet-200" },
-                            { step: "④ SEO최적화", label: qualityModelLabel, color: "bg-violet-50 text-violet-700 border-violet-200" },
-                            { step: "⑤ 이미지슬롯", label: qualityModelLabel, color: "bg-violet-50 text-violet-700 border-violet-200" },
-                            { step: "⑥ 교정", label: voiceModelLabel, color: "bg-emerald-50 text-emerald-700 border-emerald-200" },
-                        ].map(({ step, label }) => (
+                            { step: "① 사전분석", label: preAnalysisModelLabel, color: "border-blue-200 bg-blue-50 text-blue-700" },
+                            { step: "② 문맥파싱", label: parserModelLabel, color: "border-blue-200 bg-blue-50 text-blue-700" },
+                            { step: "③ 품질작성", label: qualityModelLabel, color: "border-violet-200 bg-violet-50 text-violet-700" },
+                            { step: "④ 자기검증", label: qualityModelLabel, color: "border-violet-200 bg-violet-50 text-violet-700" },
+                            { step: "⑤ SEO최적화", label: qualityModelLabel, color: "border-violet-200 bg-violet-50 text-violet-700" },
+                            { step: "⑥ 이미지슬롯", label: qualityModelLabel, color: "border-violet-200 bg-violet-50 text-violet-700" },
+                            { step: "⑦ 보이스리라이트", label: voiceModelLabel, color: "border-emerald-200 bg-emerald-50 text-emerald-700" },
+                            { step: "⑧ 문장폴리시", label: sentencePolishModelLabel, color: "border-blue-200 bg-blue-50 text-blue-700" },
+                        ].map(({ step, label, color }) => (
                             <span
                                 key={step}
-                                className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600"
+                                className={`rounded-full border px-2 py-0.5 ${color}`}
                             >
                                 <span className="font-medium">{step}</span>
-                                <span className="ml-1 text-slate-400">→ {label}</span>
+                                <span className="ml-1 text-slate-500">→ {label}</span>
                             </span>
                         ))}
                     </div>
                     <p className="mt-2 text-[11px] text-slate-400">
-                        ③④⑤ 단계는 ② 품질작성 모델을 재사용합니다. 원가에 모두 반영됩니다.
+                        ④⑤⑥ 단계는 ③ 품질작성 모델을 재사용하며, ①②⑧ 단계는 저비용 보조 모델을 우선 사용합니다.
                     </p>
                 </div>
             </div>

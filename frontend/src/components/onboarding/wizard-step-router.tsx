@@ -13,6 +13,13 @@ type WizardStepRouterProps = {
     onNext: () => void;
 };
 
+function normalizeStrategyMode(raw: unknown): "cost" | "balanced" | "quality" {
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "quality") return "quality";
+    if (value === "balanced") return "balanced";
+    return "cost";
+}
+
 export default function WizardStepRouter({
     initialRouterSettings,
     onNext,
@@ -36,8 +43,8 @@ export default function WizardStepRouter({
         return "together_flux";
     })();
 
-    const [strategyMode] = useState<"cost" | "quality">(
-        initialRouterSettings.settings.strategy_mode === "quality" ? "quality" : "cost"
+    const [strategyMode] = useState<"cost" | "balanced" | "quality">(
+        normalizeStrategyMode(initialRouterSettings.settings.strategy_mode)
     );
     const [textApiKeys, setTextApiKeys] = useState<Record<string, string>>({});
     const [imageApiKeys, setImageApiKeys] = useState<Record<string, string>>({});
