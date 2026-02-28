@@ -41,3 +41,8 @@ IMPLEMENTATION_PLAN_*.md
 PROJECT_STATUS.md
 RFC_PERSONA_COGNITIVE_QUESTIONS.md
 auto_blog_integration_design.md
+
+# 로컬 개발 아티팩트
+.claude/
+auto_blog.db
+server_restart.log
