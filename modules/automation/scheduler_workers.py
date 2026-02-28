@@ -5,12 +5,78 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
     from .scheduler_service import SchedulerService
 
 logger = logging.getLogger(__name__)
+
+
+async def memory_worker_loop(service: "SchedulerService") -> None:
+    """메모리 이벤트 큐를 소비해 백그라운드 작업을 처리한다."""
+    logger.info("Memory worker loop started")
+    try:
+        while True:
+            try:
+                queue = getattr(service, "_memory_event_queue", None)
+                memory_store = getattr(service, "memory_store", None)
+                if queue is None or memory_store is None:
+                    await asyncio.sleep(1)
+                    continue
+
+                event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                attempts = int(event.get("attempts", 0) or 0) if isinstance(event, dict) else 0
+                event_type = str(event.get("type", "")) if isinstance(event, dict) else "unknown"
+
+                try:
+                    process_fn = getattr(memory_store, "process_memory_event", None)
+                    if callable(process_fn):
+                        processed = process_fn(event)
+                        if not processed:
+                            logger.debug("Memory event skipped: %s", event_type)
+                    else:
+                        logger.debug("Memory store has no process_memory_event; skip")
+                except Exception as exc:
+                    memory_config = getattr(memory_store, "_config", None)
+                    retry_limit = int(getattr(memory_config, "async_retry_limit", 3) or 3)
+                    backoff = float(getattr(memory_config, "async_retry_backoff_sec", 2.0) or 2.0)
+                    if attempts < retry_limit:
+                        retry_event: Dict[str, Any] = dict(event) if isinstance(event, dict) else {}
+                        retry_event["attempts"] = attempts + 1
+                        delay = max(0.2, backoff * (attempts + 1))
+                        logger.warning(
+                            "Memory event failed; retry scheduled",
+                            extra={
+                                "event_type": event_type,
+                                "attempts": attempts,
+                                "retry_in_sec": round(delay, 2),
+                                "error": str(exc),
+                            },
+                        )
+                        await asyncio.sleep(delay)
+                        try:
+                            queue.put_nowait(retry_event)
+                        except asyncio.QueueFull:
+                            logger.error("Memory queue full; retry dropped for %s", event_type)
+                    else:
+                        logger.error(
+                            "Memory event failed permanently",
+                            extra={
+                                "event_type": event_type,
+                                "attempts": attempts,
+                                "error": str(exc),
+                            },
+                        )
+                finally:
+                    queue.task_done()
+            except asyncio.TimeoutError:
+                continue
+            except Exception as exc:
+                logger.error("Memory worker error: %s", exc, exc_info=True)
+                await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        logger.info("Memory worker stopped")
 
 
 async def generator_worker_loop(service: "SchedulerService") -> None:

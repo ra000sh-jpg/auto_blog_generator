@@ -845,10 +845,14 @@ class ContentGenerator:
             from ..memory.similarity import find_similar_posts
             from ..memory.context_builder import build_memory_context_text
 
-            # 백필 보장 (최초 1회만 실행)
-            ensure_fn = getattr(self.memory_store, "ensure_backfilled", None)
-            if callable(ensure_fn):
-                ensure_fn()
+            # Phase B-1: 백필은 비동기 요청(큐) 우선, 미지원 시 기존 동기 함수 폴백
+            request_backfill_fn = getattr(self.memory_store, "request_backfill", None)
+            if callable(request_backfill_fn):
+                request_backfill_fn(limit=300)
+            else:
+                ensure_fn = getattr(self.memory_store, "ensure_backfilled", None)
+                if callable(ensure_fn):
+                    ensure_fn()
 
             # 같은 토픽 최근 글
             recent = self.memory_store.get_recent_by_topic(

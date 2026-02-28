@@ -482,6 +482,17 @@ class JobStore:
 
                 CREATE INDEX IF NOT EXISTS idx_tm_topic_platform_recorded
                 ON topic_memory(topic_mode, platform, recorded_at DESC);
+
+                CREATE TABLE IF NOT EXISTS topic_memory_embeddings (
+                    job_id TEXT PRIMARY KEY,
+                    embedding_json TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tme_model_updated
+                ON topic_memory_embeddings(model_name, updated_at DESC);
             """)
 
             existing_metric_columns = {
@@ -3101,6 +3112,126 @@ class JobStore:
             for row in rows
             if row["topic_mode"]
         }
+
+    def upsert_topic_embedding(
+        self,
+        job_id: str,
+        embedding: List[float],
+        model_name: str,
+    ) -> None:
+        """topic_memory 임베딩을 저장/갱신한다."""
+        normalized_job_id = str(job_id).strip()
+        normalized_model = str(model_name).strip() or "unknown"
+        vector = [float(value) for value in list(embedding or [])]
+        if not normalized_job_id or not vector:
+            return
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO topic_memory_embeddings (job_id, embedding_json, model_name, dim, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    embedding_json = excluded.embedding_json,
+                    model_name = excluded.model_name,
+                    dim = excluded.dim,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_job_id,
+                    json.dumps(vector, ensure_ascii=False),
+                    normalized_model,
+                    len(vector),
+                    now_iso,
+                ),
+            )
+
+    def get_topic_embeddings(
+        self,
+        job_ids: List[str],
+        model_name: str = "",
+    ) -> Dict[str, List[float]]:
+        """job_id 목록의 임베딩을 조회한다."""
+        normalized_ids = [str(job_id).strip() for job_id in job_ids if str(job_id).strip()]
+        if not normalized_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in normalized_ids)
+        params: List[Any] = list(normalized_ids)
+        where_clauses = [f"job_id IN ({placeholders})"]
+        normalized_model = str(model_name).strip()
+        if normalized_model:
+            where_clauses.append("model_name = ?")
+            params.append(normalized_model)
+
+        sql = f"""
+            SELECT job_id, embedding_json
+            FROM topic_memory_embeddings
+            WHERE {' AND '.join(where_clauses)}
+        """
+        with self.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        result: Dict[str, List[float]] = {}
+        for row in rows:
+            try:
+                parsed = json.loads(row["embedding_json"]) if row["embedding_json"] else []
+                vector = [float(value) for value in parsed]
+            except Exception:
+                vector = []
+            if vector:
+                result[str(row["job_id"])] = vector
+        return result
+
+    def list_topic_embedding_candidates(
+        self,
+        topic_mode: str = "",
+        platform: str = "",
+        lookback_days: int = 56,
+        limit: int = 80,
+    ) -> List[Dict[str, Any]]:
+        """임베딩 계산 대상 topic_memory 후보를 조회한다."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(lookback_days)))
+        ).isoformat()
+        params: List[Any] = [cutoff]
+        where_clauses = ["recorded_at >= ?"]
+        if topic_mode:
+            where_clauses.append("topic_mode = ?")
+            params.append(str(topic_mode))
+        if platform:
+            where_clauses.append("platform = ?")
+            params.append(str(platform))
+        params.append(max(1, min(int(limit), 500)))
+
+        sql = f"""
+            SELECT job_id, title, keywords, topic_mode, platform, recorded_at
+            FROM topic_memory
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY recorded_at DESC
+            LIMIT ?
+        """
+        with self.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        payload: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                keywords = json.loads(row["keywords"]) if row["keywords"] else []
+            except Exception:
+                keywords = []
+            payload.append(
+                {
+                    "job_id": str(row["job_id"]),
+                    "title": str(row["title"] or ""),
+                    "keywords": list(keywords) if isinstance(keywords, list) else [],
+                    "topic_mode": str(row["topic_mode"] or ""),
+                    "platform": str(row["platform"] or ""),
+                    "recorded_at": str(row["recorded_at"] or ""),
+                }
+            )
+        return payload
 
     def get_keyword_frequencies(
         self,

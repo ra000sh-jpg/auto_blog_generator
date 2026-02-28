@@ -30,6 +30,7 @@ from .scheduler_seed import run_daily_quota_seed
 from .scheduler_workers import (
     generator_worker_loop,
     image_collector_worker_loop,
+    memory_worker_loop,
     publisher_worker_loop,
 )
 from .time_utils import parse_iso
@@ -157,6 +158,8 @@ class SchedulerService:
         self._generator_task: Optional[asyncio.Task[None]] = None
         self._publisher_task: Optional[asyncio.Task[None]] = None
         self._image_collector_task: Optional[asyncio.Task[None]] = None
+        self._memory_worker_task: Optional[asyncio.Task[None]] = None
+        self._memory_event_queue: Optional[asyncio.Queue[Any]] = None
         self._daily_publish_slots: List[datetime] = []
         self._publish_slot_date: Optional[date] = None
         self._publish_wait_until_utc: Optional[datetime] = None
@@ -296,6 +299,7 @@ class SchedulerService:
 
         # 생성/발행은 APScheduler와 분리된 비차단 워커 루프로 동작한다.
         if self.pipeline_service:
+            self._setup_memory_pipeline()
             self._generator_task = asyncio.create_task(
                 self._generator_worker_loop(),
                 name="scheduler-generator-worker",
@@ -308,6 +312,11 @@ class SchedulerService:
                 self._image_collector_worker_loop(),
                 name="scheduler-image-collector-worker",
             )
+            if self._memory_event_queue is not None and self.memory_store is not None:
+                self._memory_worker_task = asyncio.create_task(
+                    self._memory_worker_loop(),
+                    name="scheduler-memory-worker",
+                )
             logger.info(
                 "Worker loops started",
                 extra={
@@ -324,9 +333,15 @@ class SchedulerService:
             await self._cancel_task(self._generator_task)
             await self._cancel_task(self._publisher_task)
             await self._cancel_task(self._image_collector_task)
+            await self._cancel_task(self._memory_worker_task)
             self._generator_task = None
             self._publisher_task = None
             self._image_collector_task = None
+            self._memory_worker_task = None
+            self._memory_event_queue = None
+            bind_fn = getattr(self.memory_store, "bind_event_queue", None)
+            if callable(bind_fn):
+                bind_fn(None)
             if self._scheduler is not None:
                 self._scheduler.shutdown(wait=False)
             self._scheduler = None
@@ -336,9 +351,15 @@ class SchedulerService:
         await self._cancel_task(self._generator_task)
         await self._cancel_task(self._publisher_task)
         await self._cancel_task(self._image_collector_task)
+        await self._cancel_task(self._memory_worker_task)
         self._generator_task = None
         self._publisher_task = None
         self._image_collector_task = None
+        self._memory_worker_task = None
+        self._memory_event_queue = None
+        bind_fn = getattr(self.memory_store, "bind_event_queue", None)
+        if callable(bind_fn):
+            bind_fn(None)
 
         if self._scheduler is not None:
             self._scheduler.shutdown(wait=False)
@@ -365,6 +386,31 @@ class SchedulerService:
     async def _image_collector_worker_loop(self) -> None:
         """텔레그램 반자동 이미지 수집 워커 루프."""
         await image_collector_worker_loop(self)
+
+    async def _memory_worker_loop(self) -> None:
+        """메모리 비동기 이벤트 처리 워커 루프."""
+        await memory_worker_loop(self)
+
+    def _setup_memory_pipeline(self) -> None:
+        """메모리 비동기 파이프라인 큐를 초기화한다."""
+        if self.memory_store is None:
+            return
+        is_async_enabled_fn = getattr(self.memory_store, "is_async_pipeline_enabled", None)
+        if callable(is_async_enabled_fn):
+            async_enabled = bool(is_async_enabled_fn())
+        else:
+            async_enabled = bool(getattr(getattr(self.memory_store, "_config", None), "async_pipeline_enabled", False))
+        if not async_enabled:
+            return
+
+        maxsize = int(getattr(getattr(self.memory_store, "_config", None), "async_queue_maxsize", 500) or 500)
+        self._memory_event_queue = asyncio.Queue(maxsize=max(50, maxsize))
+        bind_fn = getattr(self.memory_store, "bind_event_queue", None)
+        if callable(bind_fn):
+            bind_fn(self._memory_event_queue)
+        request_backfill_fn = getattr(self.memory_store, "request_backfill", None)
+        if callable(request_backfill_fn):
+            request_backfill_fn(limit=300)
 
     async def _run_startup_catchup(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_startup_catchup(self, *args, **kwargs)

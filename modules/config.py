@@ -125,6 +125,22 @@ class MemoryConfig:
     backfill_on_init: bool = True    # 첫 실행 시 기존 jobs에서 백필
     min_quality_score: int = 0       # 이 점수 이상 글만 메모리에 등록 (0=전체)
     idea_vault_duplicate_cooldown_days: int = 7  # 아이디어 중복 재시도 쿨다운
+    # Phase A: 하이브리드 시맨틱 중복 검사
+    semantic_enabled: bool = False
+    semantic_provider: str = "local"  # local | openai
+    semantic_model: str = "bge-small-ko"
+    semantic_weight: float = 0.55
+    lexical_weight: float = 0.45
+    semantic_threshold: float = 0.62
+    hybrid_threshold: float = 0.58
+    embedding_max_candidates: int = 80
+    embedding_timeout_sec: float = 4.0
+    semantic_canary_topic: str = "it"
+    # Phase B-1: 인프로세스 메모리 비동기 파이프라인
+    async_pipeline_enabled: bool = False
+    async_queue_maxsize: int = 500
+    async_retry_limit: int = 3
+    async_retry_backoff_sec: float = 2.0
 
 
 @dataclass
@@ -268,6 +284,20 @@ def _apply_env_overrides(config_data: Dict[str, Any]) -> Dict[str, Any]:
         "MEMORY_BACKFILL_ON_INIT": ("memory", "backfill_on_init", _parse_bool),
         "MEMORY_MIN_QUALITY_SCORE": ("memory", "min_quality_score", int),
         "MEMORY_IDEA_VAULT_DUP_COOLDOWN_DAYS": ("memory", "idea_vault_duplicate_cooldown_days", int),
+        "MEMORY_SEMANTIC_ENABLED": ("memory", "semantic_enabled", _parse_bool),
+        "MEMORY_SEMANTIC_PROVIDER": ("memory", "semantic_provider", str),
+        "MEMORY_SEMANTIC_MODEL": ("memory", "semantic_model", str),
+        "MEMORY_SEMANTIC_WEIGHT": ("memory", "semantic_weight", float),
+        "MEMORY_LEXICAL_WEIGHT": ("memory", "lexical_weight", float),
+        "MEMORY_SEMANTIC_THRESHOLD": ("memory", "semantic_threshold", float),
+        "MEMORY_HYBRID_THRESHOLD": ("memory", "hybrid_threshold", float),
+        "MEMORY_EMBEDDING_MAX_CANDIDATES": ("memory", "embedding_max_candidates", int),
+        "MEMORY_EMBEDDING_TIMEOUT_SEC": ("memory", "embedding_timeout_sec", float),
+        "MEMORY_SEMANTIC_CANARY_TOPIC": ("memory", "semantic_canary_topic", str),
+        "MEMORY_ASYNC_PIPELINE_ENABLED": ("memory", "async_pipeline_enabled", _parse_bool),
+        "MEMORY_ASYNC_QUEUE_MAXSIZE": ("memory", "async_queue_maxsize", int),
+        "MEMORY_ASYNC_RETRY_LIMIT": ("memory", "async_retry_limit", int),
+        "MEMORY_ASYNC_RETRY_BACKOFF_SEC": ("memory", "async_retry_backoff_sec", float),
     }
 
     for env_name, (section, key, caster) in env_map.items():
