@@ -144,6 +144,7 @@ class ContentGenerator:
         web_search_client: Optional[Any] = None,
         web_fetch_client: Optional[Any] = None,
         web_search_max_results: int = 5,
+        memory_store: Optional[Any] = None,
     ):
         resolved_primary = primary_client or client or ClaudeClient()
         self.primary = resolved_primary
@@ -179,6 +180,8 @@ class ContentGenerator:
         self.web_search_client = web_search_client
         self.web_fetch_client = web_fetch_client
         self.web_search_max_results = max(1, int(web_search_max_results))
+        self.memory_store = memory_store
+        self._active_memory_context: str = ""  # generate() 실행 중 임시 저장
 
     async def aclose(self) -> None:
         """생성기 내부의 비동기 클라이언트를 정리한다."""
@@ -241,6 +244,12 @@ class ContentGenerator:
                 fallback_text=job.title,
                 max_items=2,
             )
+
+        # ── 메모리 컨텍스트 수집 (발행 이력 기반, non-critical) ──
+        self._active_memory_context = self._collect_memory_context(
+            job=job,
+            topic_mode=topic_mode,
+        )
 
         # 폴백 체인 구성
         fallback_chain = self._build_fallback_chain()
@@ -757,19 +766,23 @@ class ContentGenerator:
         if not search_results:
             return []
 
-        selected_results = search_results[: max(max_items + 2, max_items)]
+        # score 필드가 있는 경우 점수순으로 정렬 (BraveSearchClient 응답에서 이미 처리되지만 안전장치로 추가)
+        scored_results = sorted(search_results, key=lambda x: getattr(x, "score", 0.0), reverse=True)
+        selected_results = scored_results[: max_items + 2]
 
         async def _fetch_candidate(sr: Any) -> str:
             base_content = str(getattr(sr, "snippet", "")).strip()
-            if self.web_fetch_client is None:
+            url = str(getattr(sr, "url", "")).strip()
+            if self.web_fetch_client is None or not url:
                 return base_content
             try:
                 # 전체 지연을 줄이기 위해 개별 URL fetch에 타임아웃을 건다.
                 fetched = await asyncio.wait_for(
-                    self.web_fetch_client.fetch_content(str(getattr(sr, "url", ""))),
+                    self.web_fetch_client.fetch_content(url),
                     timeout=8.0,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug("Web fetch failed for %s: %s", url, exc)
                 return base_content
             if isinstance(fetched, dict):
                 text = str(fetched.get("content", "")).strip()
@@ -788,6 +801,8 @@ class ContentGenerator:
             title = str(getattr(sr, "title", "")).strip()
             link = str(getattr(sr, "url", "")).strip()
             content = str(fetched_text).strip()
+            score = getattr(sr, "score", 0.0)
+            
             if not title or not link or not content:
                 continue
             contexts.append(
@@ -795,20 +810,80 @@ class ContentGenerator:
                     "title": title,
                     "link": link,
                     "content": content,
+                    "score": score,
                 }
             )
             if len(contexts) >= max_items:
                 break
 
         if contexts:
+            avg_score = sum(c["score"] for c in contexts) / len(contexts)
             logger.info(
-                "Web context collected",
+                "Web context collected (Scoring applied)",
                 extra={
                     "query": query[:80],
                     "result_count": len(contexts),
+                    "avg_score": round(avg_score, 2),
                 },
             )
         return contexts
+
+    def _collect_memory_context(
+        self,
+        job: "Job",
+        topic_mode: str,
+    ) -> str:
+        """발행 이력 기반 메모리 컨텍스트 텍스트를 생성한다.
+
+        TopicMemoryStore가 None이거나 실패해도 빈 문자열을 반환 (non-critical).
+        generate()에서 호출되어 _active_memory_context에 저장된다.
+        """
+        if self.memory_store is None:
+            return ""
+
+        try:
+            from ..memory.similarity import find_similar_posts
+            from ..memory.context_builder import build_memory_context_text
+
+            # 백필 보장 (최초 1회만 실행)
+            ensure_fn = getattr(self.memory_store, "ensure_backfilled", None)
+            if callable(ensure_fn):
+                ensure_fn()
+
+            # 같은 토픽 최근 글
+            recent = self.memory_store.get_recent_by_topic(
+                topic_mode=topic_mode,
+                persona_id=str(job.persona_id or "P1"),
+            )
+
+            # 유사 키워드 글 (전 토픽 대상)
+            cross_recent = self.memory_store.get_cross_topic_recent(limit=50)
+            similar = find_similar_posts(
+                title=str(job.title),
+                keywords=list(job.seed_keywords),
+                candidates=cross_recent,
+                threshold=0.25,
+                top_k=5,
+            )
+
+            text = build_memory_context_text(
+                recent_posts=recent,
+                similar_posts=similar,
+            )
+            if text:
+                logger.info(
+                    "Memory context injected",
+                    extra={
+                        "topic_mode": topic_mode,
+                        "recent_count": len(recent),
+                        "similar_count": len(similar),
+                    },
+                )
+            return text
+
+        except Exception as exc:
+            logger.debug("Memory context collection failed (non-critical): %s", exc)
+            return ""
 
     def _build_news_data_text(self, news_context: List[Dict[str, str]]) -> str:
         """뉴스 컨텍스트를 프롬프트 텍스트로 변환한다."""
@@ -1343,6 +1418,11 @@ class ContentGenerator:
 - 전혀 다른 분야의 원리와 연결점을 1개 이상 제시하세요.
 """
 
+        # ── 메모리 컨텍스트 주입 (발행 이력 기반) ──
+        memory_injection = (
+            f"\n\n{self._active_memory_context}" if self._active_memory_context else ""
+        )
+
         use_economy_rag = bool(news_data_text) and self._is_economy_topic(topic_mode)
         if quality_only and use_economy_rag:
             user_prompt = QUALITY_LAYER_ECONOMY_PROMPT.format(
@@ -1354,6 +1434,7 @@ class ContentGenerator:
             system_prompt = (
                 f"{QUALITY_LAYER_SYSTEM_PROMPT}\n\n{ECONOMY_SYSTEM_PROMPT}"
                 f"{cognitive_injection}{emotional_injection}{pre_analysis_injection}"
+                f"{memory_injection}"
             )
         elif quality_only:
             user_prompt = QUALITY_LAYER_CONTENT_REQUEST.format(
@@ -1374,6 +1455,7 @@ class ContentGenerator:
                 + cognitive_injection
                 + emotional_injection
                 + pre_analysis_injection
+                + memory_injection
             )
         elif use_economy_rag:
             user_prompt = ECONOMY_TOPIC_PROMPT.format(
@@ -1384,7 +1466,7 @@ class ContentGenerator:
                 persona_prefix=persona.prompt_prefix,
                 tone_suffix=tone_profile.prompt_suffix,
             )
-            system_prompt = f"{SYSTEM_BLOG_WRITER}{voice_injection}\n\n{ECONOMY_SYSTEM_PROMPT}"
+            system_prompt = f"{SYSTEM_BLOG_WRITER}{voice_injection}\n\n{ECONOMY_SYSTEM_PROMPT}{memory_injection}"
         else:
             user_prompt = USER_CONTENT_REQUEST.format(
                 title=job.title,
@@ -1393,7 +1475,7 @@ class ContentGenerator:
                 persona_prefix=persona.prompt_prefix,
                 tone_suffix=tone_profile.prompt_suffix,
             )
-            system_prompt = f"{SYSTEM_BLOG_WRITER}{voice_injection}"
+            system_prompt = f"{SYSTEM_BLOG_WRITER}{voice_injection}{memory_injection}"
 
         # SEO 전략 지침 삽입
         user_prompt = f"{user_prompt}\n\n{seo_snippet}"

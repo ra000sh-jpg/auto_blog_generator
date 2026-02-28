@@ -127,6 +127,7 @@ class PipelineService:
         internal_retry_attempts: int = 1,
         queue_retry_limit: int = 1,
         quality_evaluator: Optional[Any] = None,  # Phase 25: QualityEvaluator (optional)
+        memory_store: Optional[Any] = None,  # Phase 2: TopicMemoryStore
     ):
         self.job_store = job_store
         self.publisher = publisher
@@ -143,6 +144,7 @@ class PipelineService:
         self.internal_retry_attempts = max(0, internal_retry_attempts)
         self.queue_retry_limit = max(0, queue_retry_limit)
         self.quality_evaluator = quality_evaluator  # Phase 25
+        self.memory_store = memory_store  # Phase 2
         self._channel_publishers: Dict[str, PublisherLike] = {}
         self._image_output_dir = "data/images"
         if self.image_generator is not None:
@@ -690,6 +692,8 @@ class PipelineService:
                 seo_snapshot=payload.get("seo_snapshot", {}),
             )
             self._record_model_performance(job=job, payload=payload, post_id=result.url)
+            # ── 메모리 저장 (발행 성공 시, non-critical) ──
+            self._record_topic_memory(job=job, payload=payload, result_url=result.url)
             mark_consumed = getattr(self.job_store, "mark_idea_vault_consumed_by_job", None)
             if mark_consumed and callable(mark_consumed):
                 try:
@@ -1105,7 +1109,7 @@ class PipelineService:
         )
         total_input_tokens = 0
         total_output_tokens = 0
-        for stage in ("parser", "quality_step", "voice_step"):
+        for stage in ("parser", "pre_analysis", "quality_step", "voice_step", "sentence_polish"):
             stage_data = token_usage.get(stage, {})
             if not isinstance(stage_data, dict):
                 continue
@@ -1391,6 +1395,56 @@ class PipelineService:
             *lines[insert_index:],
         ]
         return "\n".join(merged_lines).strip()
+
+    def _record_topic_memory(
+        self,
+        job: "Job",
+        payload: Dict[str, Any],
+        result_url: str,
+    ) -> None:
+        """발행 완료 후 topic_memory에 이력을 기록한다.
+
+        실패해도 예외를 전파하지 않는다 (non-critical).
+        """
+        if self.memory_store is None:
+            return
+
+        try:
+            import json as _json
+
+            seo_snap = payload.get("seo_snapshot") or {}
+            if isinstance(seo_snap, str):
+                try:
+                    seo_snap = _json.loads(seo_snap)
+                except Exception:
+                    seo_snap = {}
+
+            quality_snap = payload.get("quality_snapshot") or {}
+            if isinstance(quality_snap, str):
+                try:
+                    quality_snap = _json.loads(quality_snap)
+                except Exception:
+                    quality_snap = {}
+
+            topic_mode = str(seo_snap.get("topic_mode", "cafe")).strip() or "cafe"
+            quality_score = int(quality_snap.get("score", 0))
+
+            self.memory_store.record_post(
+                job_id=str(job.job_id),
+                title=str(job.title),
+                keywords=list(job.seed_keywords),
+                topic_mode=topic_mode,
+                platform=str(job.platform),
+                persona_id=str(job.persona_id or "P1"),
+                result_url=str(result_url),
+                quality_score=quality_score,
+            )
+        except Exception as exc:
+            logger.debug(
+                "topic_memory record failed (non-critical): %s",
+                exc,
+                extra={"job_id": job.job_id},
+            )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stub generate_fn (Phase 1 로컬 테스트용)

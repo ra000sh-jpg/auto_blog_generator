@@ -16,6 +16,7 @@ class SearchResult:
     snippet: str
     source: str = ""
     rank: int = 0
+    score: float = 0.0  # Phase 1.5: 품질 점수 (0.0 ~ 1.0)
 
 
 class BaseWebSearchClient(ABC):

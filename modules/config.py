@@ -107,6 +107,24 @@ class WebSearchConfig:
     fetch_timeout_sec: float = 15.0
     max_results: int = 5
     fetch_max_chars: int = 3000
+    # Phase 1.5 가드레일 설정
+    allowed_domains: str = ""  # 쉼표 구분 (예: "naver.com,tistory.com")
+    blocked_domains: str = ""  # 쉼표 구분
+    max_age_days: int = 365    # 검색 결과의 최대 허용 기간 (일)
+
+
+@dataclass
+class MemoryConfig:
+    """장기 기억 시스템 설정."""
+    enabled: bool = True
+    lookback_weeks: int = 8          # 최근 N주 이력 참조
+    max_recent_posts: int = 5        # 프롬프트에 넣을 최근글 수
+    max_similar_posts: int = 3       # 유사글 최대 수 (내부 링크 후보)
+    duplicate_threshold: float = 0.65  # 이 이상이면 중복 경고 주입
+    precheck_duplicate_threshold: float = 0.50  # 큐잉 전 사전 차단 임계치
+    backfill_on_init: bool = True    # 첫 실행 시 기존 jobs에서 백필
+    min_quality_score: int = 0       # 이 점수 이상 글만 메모리에 등록 (0=전체)
+    idea_vault_duplicate_cooldown_days: int = 7  # 아이디어 중복 재시도 쿨다운
 
 
 @dataclass
@@ -119,12 +137,15 @@ class AppConfig:
     images: ImageConfig
     seo: SEOConfig = None  # type: ignore[assignment]
     web_search: WebSearchConfig = None  # type: ignore[assignment]
+    memory: MemoryConfig = None  # type: ignore[assignment]
 
     def __post_init__(self):
         if self.seo is None:
             self.seo = SEOConfig()
         if self.web_search is None:
             self.web_search = WebSearchConfig()
+        if self.memory is None:
+            self.memory = MemoryConfig()
 
 
 def load_config(config_dir: str = "config") -> AppConfig:
@@ -145,6 +166,7 @@ def load_config(config_dir: str = "config") -> AppConfig:
         images=ImageConfig(**merged.get("images", {})),
         seo=SEOConfig(**merged.get("seo", {})),
         web_search=WebSearchConfig(**merged.get("web_search", {})),
+        memory=MemoryConfig(**merged.get("memory", {})),
     )
 
 
@@ -233,6 +255,19 @@ def _apply_env_overrides(config_data: Dict[str, Any]) -> Dict[str, Any]:
         "WEB_SEARCH_FETCH_TIMEOUT_SEC": ("web_search", "fetch_timeout_sec", float),
         "WEB_SEARCH_MAX_RESULTS": ("web_search", "max_results", int),
         "WEB_SEARCH_FETCH_MAX_CHARS": ("web_search", "fetch_max_chars", int),
+        "WEB_SEARCH_ALLOWED_DOMAINS": ("web_search", "allowed_domains", str),
+        "WEB_SEARCH_BLOCKED_DOMAINS": ("web_search", "blocked_domains", str),
+        "WEB_SEARCH_MAX_AGE_DAYS": ("web_search", "max_age_days", int),
+        # 장기 기억
+        "MEMORY_ENABLED": ("memory", "enabled", _parse_bool),
+        "MEMORY_LOOKBACK_WEEKS": ("memory", "lookback_weeks", int),
+        "MEMORY_MAX_RECENT_POSTS": ("memory", "max_recent_posts", int),
+        "MEMORY_MAX_SIMILAR_POSTS": ("memory", "max_similar_posts", int),
+        "MEMORY_DUPLICATE_THRESHOLD": ("memory", "duplicate_threshold", float),
+        "MEMORY_PRECHECK_DUPLICATE_THRESHOLD": ("memory", "precheck_duplicate_threshold", float),
+        "MEMORY_BACKFILL_ON_INIT": ("memory", "backfill_on_init", _parse_bool),
+        "MEMORY_MIN_QUALITY_SCORE": ("memory", "min_quality_score", int),
+        "MEMORY_IDEA_VAULT_DUP_COOLDOWN_DAYS": ("memory", "idea_vault_duplicate_cooldown_days", int),
     }
 
     for env_name, (section, key, caster) in env_map.items():

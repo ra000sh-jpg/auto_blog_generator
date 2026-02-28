@@ -812,8 +812,8 @@ async def cycle_auto_champion_switch(service: "SchedulerService") -> None:
     except ValueError:
         threshold = 2.0
 
-    strategy_mode = str(service.job_store.get_system_setting("router_strategy_mode", "cost")).strip().lower()
-    strategy_mode = "quality" if strategy_mode == "quality" else "cost"
+    _raw_strategy = str(service.job_store.get_system_setting("router_strategy_mode", "cost")).strip().lower()
+    strategy_mode = _raw_strategy if _raw_strategy in ("quality", "balanced", "cost") else "cost"
     current_champion = str(service.job_store.get_system_setting("router_champion_model", "")).strip()
     normalized_current = _normalize_model_id(current_champion)
 
@@ -835,7 +835,15 @@ async def cycle_auto_champion_switch(service: "SchedulerService") -> None:
 
     if strategy_mode == "quality":
         eligible.sort(key=lambda item: -float(item.get("avg_quality_score", 0.0) or 0.0))
-    else:
+    elif strategy_mode == "balanced":
+        # quality 60% + score_per_won 40% 가중 복합 지표
+        eligible.sort(
+            key=lambda item: -(
+                float(item.get("avg_quality_score", 0.0) or 0.0) * 0.6
+                + float(item.get("avg_score_per_won", 0.0) or 0.0) * 0.4
+            )
+        )
+    else:  # cost
         eligible.sort(key=lambda item: -(float(item.get("avg_score_per_won", 0.0) or 0.0)))
 
     best = eligible[0]
@@ -857,7 +865,17 @@ async def cycle_auto_champion_switch(service: "SchedulerService") -> None:
         champion_quality = float(champion_data.get("avg_quality_score", 0.0) or 0.0) if champion_data else 0.0
         best_quality = float(best.get("avg_quality_score", 0.0) or 0.0)
         should_switch = champion_data is None or best_quality > champion_quality + threshold
-    else:
+    elif strategy_mode == "balanced":
+        champion_quality = float(champion_data.get("avg_quality_score", 0.0) or 0.0) if champion_data else 0.0
+        champion_spr = float(champion_data.get("avg_score_per_won", 0.0) or 0.0) if champion_data else 0.0
+        best_quality = float(best.get("avg_quality_score", 0.0) or 0.0)
+        best_spr = float(best.get("avg_score_per_won", 0.0) or 0.0)
+        # 품질 threshold 충족 OR (비용효율 threshold 충족 + 품질 1점 이내 허용)
+        should_switch = champion_data is None or (
+            best_quality > champion_quality + threshold
+            or (best_spr > champion_spr + threshold and best_quality >= champion_quality - 1.0)
+        )
+    else:  # cost
         champion_spr = float(champion_data.get("avg_score_per_won", 0.0) or 0.0) if champion_data else 0.0
         champion_quality = float(champion_data.get("avg_quality_score", 0.0) or 0.0) if champion_data else 0.0
         best_spr = float(best.get("avg_score_per_won", 0.0) or 0.0)
@@ -872,6 +890,40 @@ async def cycle_auto_champion_switch(service: "SchedulerService") -> None:
 
     service.job_store.set_system_setting("router_champion_model", best_model_id)
     logger.info("Champion switched: %s -> %s", current_champion, best_model_id)
+
+    # champion_history 기록
+    try:
+        week_start = (
+            datetime.now(timezone.utc) - timedelta(days=datetime.now(timezone.utc).weekday())
+        ).strftime("%Y-%m-%d")
+        topic_mode_scores: Dict[str, float] = {}
+        for topic in ("cafe", "it", "finance", "parenting"):
+            topic_summary = service.job_store.get_model_performance_summary(
+                since=since_90d,
+                slot_types=["eval", "main"],
+                topic_mode=topic,
+            )
+            for row in topic_summary:
+                if _normalize_model_id(str(row.get("model_id", ""))) == normalized_best:
+                    score = row.get("avg_quality_score")
+                    if score is not None:
+                        topic_mode_scores[topic] = float(score)
+                    break
+        record_fn = getattr(service.job_store, "record_champion_history", None)
+        if callable(record_fn):
+            record_fn(
+                week_start=week_start,
+                champion_model=best_model_id,
+                challenger_model=current_champion or "",
+                avg_champion_score=float(best.get("avg_quality_score", 0.0) or 0.0),
+                topic_mode_scores=topic_mode_scores,
+                cost_won=float(best.get("avg_cost_won", 0.0) or 0.0),
+                early_terminated=False,
+                shadow_only=False,
+            )
+            logger.info("Champion history recorded for week %s: %s", week_start, best_model_id)
+    except Exception:
+        logger.debug("Champion history recording failed", exc_info=True)
 
     if service.notifier and getattr(service.notifier, "enabled", False):
         message = (
@@ -1404,7 +1456,6 @@ async def run_scheduler_forever(service_cls,
         resolved_daily_posts_target = service_cls.DEFAULT_DAILY_TARGET
 
     job_store = JobStore(db_path=resolved_db_path)
-    trend_service = TrendJobService(job_store=job_store)
     metrics_collector = MetricsCollector(db_path=job_store.db_path)
 
     dry_run = False
@@ -1478,6 +1529,24 @@ async def run_scheduler_forever(service_cls,
     except Exception as exc:
         logger.warning("Scheduler feedback analyzer init failed: %s", exc)
 
+    # ── 메모리 스토어 초기화 (Phase 2) ──
+    _scheduler_memory_store = None
+    try:
+        if config.memory.enabled:
+            from ..memory.topic_store import TopicMemoryStore
+            _scheduler_memory_store = TopicMemoryStore(
+                job_store=job_store,
+                config=config.memory,
+            )
+    except Exception as _mem_exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Scheduler memory store init failed: %s", _mem_exc)
+
+    trend_service = TrendJobService(
+        job_store=job_store,
+        memory_store=_scheduler_memory_store,
+    )
+
     pipeline_service = PipelineService(
         job_store=job_store,
         publisher=publisher,
@@ -1490,6 +1559,7 @@ async def run_scheduler_forever(service_cls,
         retry_backoff_max_sec=config.retry.backoff_max_sec,
         image_generator=image_generator,
         quality_evaluator=quality_evaluator,
+        memory_store=_scheduler_memory_store,
     )
 
     scheduler = service_cls(
@@ -1511,6 +1581,7 @@ async def run_scheduler_forever(service_cls,
         publisher_poll_seconds=publisher_poll_seconds,
         random_seed=random_seed,
         notifier=notifier,
+        memory_store=_scheduler_memory_store,
     )
     await scheduler.start()
 

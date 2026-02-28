@@ -94,6 +94,7 @@ async def run_daily_quota_seed(service: "SchedulerService") -> None:
     if idea_vault_quota > 0:
         claim_fn = getattr(service.job_store, "claim_random_idea_vault_items", None)
         release_fn = getattr(service.job_store, "release_idea_vault_job_lock", None)
+        seen_duplicate_idea_ids: set[int] = set()
         if claim_fn and callable(claim_fn):
             idea_job_ids = [str(uuid.uuid4()) for _ in range(idea_vault_quota)]
             claimed_items = claim_fn(idea_job_ids)
@@ -106,6 +107,14 @@ async def run_daily_quota_seed(service: "SchedulerService") -> None:
                     },
                 )
             for claimed in claimed_items:
+                idea_row_id = 0
+                try:
+                    idea_row_id = int(claimed.get("id", 0) or 0)
+                except Exception:
+                    idea_row_id = 0
+                if idea_row_id and idea_row_id in seen_duplicate_idea_ids:
+                    continue
+
                 idea_job_id = str(claimed.get("queued_job_id", "")).strip()
                 raw_text = str(claimed.get("raw_text", "")).strip()
                 category_name = str(claimed.get("mapped_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
@@ -126,6 +135,45 @@ async def run_daily_quota_seed(service: "SchedulerService") -> None:
                     category=category_name,
                     topic_mode=topic_mode,
                 )
+
+                # 중복으로 판단되면 아이디어 잠금을 즉시 해제하고 이번 배치에서 재선점하지 않는다.
+                _memory_store = getattr(service, "memory_store", None)
+                if _memory_store is not None:
+                    try:
+                        _memory_config = getattr(_memory_store, "_config", None)
+                        _threshold = 0.50
+                        if _memory_config is not None:
+                            _threshold = float(
+                                getattr(
+                                    _memory_config,
+                                    "precheck_duplicate_threshold",
+                                    getattr(_memory_config, "duplicate_threshold", 0.50),
+                                )
+                            )
+                        _is_duplicate = bool(
+                            _memory_store.is_duplicate_before_job(
+                                title=title,
+                                keywords=seed_keywords,
+                                topic_mode=topic_mode,
+                                similarity_threshold=_threshold,
+                                lookback_weeks=None,
+                                platform="naver",
+                            )
+                        )
+                        if _is_duplicate:
+                            logger.info(
+                                "Idea vault job skipped (duplicate in topic_memory): %s",
+                                title[:60],
+                                extra={"topic_mode": topic_mode},
+                            )
+                            if idea_row_id:
+                                seen_duplicate_idea_ids.add(idea_row_id)
+                            if release_fn and callable(release_fn):
+                                release_fn(idea_job_id)
+                            continue
+                    except Exception as dup_exc:
+                        logger.debug("Idea vault duplicate check failed (non-critical): %s", dup_exc)
+
                 persona_id = service._persona_id_for_topic(topic_mode)
                 success = service.job_store.schedule_job(
                     job_id=idea_job_id,

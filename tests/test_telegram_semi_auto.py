@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from modules.automation.job_store import JobConfig, JobStore
 from modules.automation.pipeline_service import PipelineService
-from modules.automation.scheduler_workers import _promote_to_ready
+from modules.automation.scheduler_workers import _promote_to_ready, image_collector_worker_loop
 from modules.automation.telegram_image_collector import TelegramImageCollector
 from modules.uploaders.playwright_publisher import PublishResult
 
@@ -251,3 +251,160 @@ def test_collector_validates_chat_id_before_collecting(tmp_path: Path):
 
     collector._fetch_updates = _updates_valid_chat  # type: ignore[method-assign]
     assert asyncio.run(collector.poll_and_collect("semi-auto-chat-filter-job")) is True
+
+
+def test_send_next_prompt_skips_when_sent_slot_exists(tmp_path: Path):
+    store = build_store(tmp_path, "semi_auto_send_guard.db")
+    notifier = CaptureNotifier(bot_token="token", chat_id="123")
+    collector = TelegramImageCollector(
+        job_store=store,
+        notifier=notifier,  # type: ignore[arg-type]
+        image_output_dir=str(tmp_path / "images"),
+    )
+    collector.init_slots(
+        "semi-auto-send-guard",
+        [
+            {"slot_id": "content_1", "slot_role": "content", "prompt": "prompt1"},
+            {"slot_id": "content_2", "slot_role": "content", "prompt": "prompt2"},
+        ],
+    )
+    assert asyncio.run(collector.send_next_prompt("semi-auto-send-guard", "Guard Job")) is True
+    assert len(notifier.messages) == 1
+
+    # sent 슬롯이 존재하면 다음 프롬프트는 전송하지 않는다.
+    assert asyncio.run(collector.send_next_prompt("semi-auto-send-guard", "Guard Job")) is False
+    assert len(notifier.messages) == 1
+
+
+def test_poll_and_collect_consumes_updates_one_by_one(tmp_path: Path):
+    store = build_store(tmp_path, "semi_auto_update_cursor.db")
+    store.set_system_setting("telegram_chat_id", "123")
+    notifier = CaptureNotifier(bot_token="token", chat_id="123")
+    collector = TelegramImageCollector(
+        job_store=store,
+        notifier=notifier,  # type: ignore[arg-type]
+        image_output_dir=str(tmp_path / "images"),
+    )
+    collector.init_slots(
+        "semi-auto-cursor-job",
+        [
+            {"slot_id": "content_1", "slot_role": "content", "prompt": "prompt1"},
+            {"slot_id": "content_2", "slot_role": "content", "prompt": "prompt2"},
+        ],
+    )
+    slots = collector.get_slots("semi-auto-cursor-job")
+    slots[0]["status"] = "sent"
+    slots[1]["status"] = "sent"
+    store.set_system_setting("img_slot_semi-auto-cursor-job", json.dumps(slots))
+
+    updates = [
+        {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": "123"},
+                "photo": [{"file_id": "f1", "file_size": 10}],
+            },
+        },
+        {
+            "update_id": 2,
+            "message": {
+                "chat": {"id": "123"},
+                "photo": [{"file_id": "f2", "file_size": 20}],
+            },
+        },
+    ]
+
+    async def _mock_fetch_updates():
+        last_raw = store.get_system_setting("telegram_last_update_id", "0")
+        last_id = int(last_raw or "0")
+        return [item for item in updates if int(item["update_id"]) > last_id]
+
+    async def _download_ok(file_id: str, job_id: str, slot_id: str):
+        del job_id
+        path = tmp_path / "images" / f"{slot_id}_{file_id}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"img")
+        return path
+
+    collector._fetch_updates = _mock_fetch_updates  # type: ignore[method-assign]
+    collector._download_file = _download_ok  # type: ignore[method-assign]
+
+    assert asyncio.run(collector.poll_and_collect("semi-auto-cursor-job")) is True
+    assert store.get_system_setting("telegram_last_update_id", "") == "1"
+
+    slots_after_first = collector.get_slots("semi-auto-cursor-job")
+    assert slots_after_first[0]["status"] == "received"
+    assert slots_after_first[1]["status"] == "sent"
+
+    assert asyncio.run(collector.poll_and_collect("semi-auto-cursor-job")) is True
+    assert store.get_system_setting("telegram_last_update_id", "") == "2"
+
+    slots_after_second = collector.get_slots("semi-auto-cursor-job")
+    assert slots_after_second[1]["status"] == "received"
+
+
+def test_image_collector_worker_runs_with_topic_only_semi_auto(
+    tmp_path: Path,
+    monkeypatch,
+):
+    store = build_store(tmp_path, "semi_auto_worker_topic_only.db")
+    store.set_system_setting("scheduler_semi_auto_topics", json.dumps(["cafe"]))
+    due_now = "2026-02-26T00:00:00Z"
+    assert store.schedule_job(
+        job_id="semi-auto-worker-job",
+        title="Semi Auto Worker Job",
+        seed_keywords=["semi", "auto", "worker"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=due_now)
+    assert len(claimed) == 1
+    assert store.update_job_status("semi-auto-worker-job", store.STATUS_AWAITING_IMAGES) is True
+
+    calls = {"poll": 0}
+
+    class FakeCollector:
+        def __init__(self, job_store, notifier, image_output_dir):
+            del job_store, notifier, image_output_dir
+
+        async def poll_and_collect(self, job_id: str) -> bool:
+            del job_id
+            calls["poll"] += 1
+            return False
+
+        async def send_next_prompt(self, job_id: str, job_title: str) -> bool:
+            del job_id, job_title
+            return False
+
+        def all_slots_received(self, job_id: str) -> bool:
+            del job_id
+            return False
+
+    class ServiceStub:
+        def __init__(self, job_store: JobStore) -> None:
+            self.job_store = job_store
+            self.notifier = CaptureNotifier(bot_token="token", chat_id="123")
+            self.pipeline_service = None
+
+    import modules.automation.telegram_image_collector as collector_module
+
+    monkeypatch.setattr(collector_module, "TelegramImageCollector", FakeCollector)
+    service = ServiceStub(store)
+
+    async def _run_once() -> None:
+        task = asyncio.create_task(image_collector_worker_loop(service))
+        try:
+            for _ in range(50):
+                if calls["poll"] > 0:
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(_run_once())
+    assert calls["poll"] > 0

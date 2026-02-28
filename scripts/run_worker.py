@@ -176,6 +176,18 @@ async def main_async(args: argparse.Namespace):
         except Exception as exc:
             logger.warning("QualityEvaluator initialization skipped: %s", exc)
 
+    # ── 메모리 스토어 초기화 (Phase 2) ──
+    _worker_memory_store = None
+    try:
+        if app_config.memory.enabled:
+            from modules.memory.topic_store import TopicMemoryStore
+            _worker_memory_store = TopicMemoryStore(
+                job_store=store,
+                config=app_config.memory,
+            )
+    except Exception as _mem_exc:
+        logger.warning("Worker memory store init failed: %s", _mem_exc)
+
     pipeline = PipelineService(
         job_store=store,
         publisher=publisher,
@@ -186,6 +198,7 @@ async def main_async(args: argparse.Namespace):
         retry_backoff_max_sec=app_config.retry.backoff_max_sec,
         image_generator=image_generator,
         quality_evaluator=quality_evaluator,
+        memory_store=_worker_memory_store,
     )
 
     worker_config = WorkerConfig(

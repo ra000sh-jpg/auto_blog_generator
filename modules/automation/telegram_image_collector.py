@@ -115,6 +115,10 @@ class TelegramImageCollector:
     async def send_next_prompt(self, job_id: str, job_title: str) -> bool:
         """다음 pending 슬롯 프롬프트를 전송한다."""
         slots = self.get_slots(job_id)
+        # 아직 회신 대기 중인 sent 슬롯이 있으면 다음 프롬프트를 보내지 않는다.
+        if any(slot.get("status") == "sent" for slot in slots):
+            return False
+
         pending = [slot for slot in slots if slot.get("status") == "pending"]
         if not pending:
             return False
@@ -161,6 +165,7 @@ class TelegramImageCollector:
         slots = self.get_slots(job_id)
         sent_slot = next((slot for slot in slots if slot.get("status") == "sent"), None)
         if not sent_slot:
+            # 처리 대상 슬롯이 없으면 업데이트를 소비하지 않는다.
             return False
 
         # 오배정 방지를 위해 등록된 chat_id와 일치하는 메시지만 사용한다.
@@ -168,19 +173,27 @@ class TelegramImageCollector:
             self._job_store.get_system_setting("telegram_chat_id", "") or self._notifier.chat_id
         ).strip()
 
+        max_consumed_update_id = 0
         for update in updates:
+            try:
+                update_id = int(update.get("update_id", 0))
+            except (TypeError, ValueError):
+                update_id = 0
             message = update.get("message", {})
             msg_chat_id = str(message.get("chat", {}).get("id", "")).strip()
             if registered_chat_id and msg_chat_id != registered_chat_id:
+                max_consumed_update_id = max(max_consumed_update_id, update_id)
                 continue
 
             photos = message.get("photo")
             if not photos:
+                max_consumed_update_id = max(max_consumed_update_id, update_id)
                 continue
 
             best_photo = max(photos, key=lambda item: item.get("file_size", 0))
             file_id = str(best_photo.get("file_id", "")).strip()
             if not file_id:
+                max_consumed_update_id = max(max_consumed_update_id, update_id)
                 continue
 
             save_path = await self._download_file(
@@ -194,6 +207,7 @@ class TelegramImageCollector:
             sent_slot["status"] = "received"
             sent_slot["received_path"] = str(save_path)
             self._save_slots(job_id, slots)
+            self._set_last_update_id(update_id)
             logger.info(
                 "[ImageCollector] %s: slot %s received -> %s",
                 job_id,
@@ -202,6 +216,8 @@ class TelegramImageCollector:
             )
             return True
 
+        if max_consumed_update_id > 0:
+            self._set_last_update_id(max_consumed_update_id)
         return False
 
     async def _fetch_updates(self) -> list[dict]:
@@ -227,10 +243,19 @@ class TelegramImageCollector:
             return []
 
         updates: list[dict] = data.get("result", [])
-        if updates:
-            last_update_id = max(int(item.get("update_id", 0)) for item in updates)
-            self._job_store.set_system_setting(_LAST_UPDATE_KEY, str(last_update_id))
         return updates
+
+    def _set_last_update_id(self, update_id: int) -> None:
+        """처리 완료한 마지막 update_id를 저장한다."""
+        if update_id <= 0:
+            return
+        current_raw = self._job_store.get_system_setting(_LAST_UPDATE_KEY, "0")
+        try:
+            current = int(current_raw)
+        except (TypeError, ValueError):
+            current = 0
+        if update_id > current:
+            self._job_store.set_system_setting(_LAST_UPDATE_KEY, str(update_id))
 
     async def _download_file(
         self,

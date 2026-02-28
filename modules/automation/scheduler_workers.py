@@ -80,7 +80,7 @@ async def publisher_worker_loop(service: "SchedulerService") -> None:
 
 async def image_collector_worker_loop(service: "SchedulerService") -> None:
     """awaiting_images 잡을 폴링해 이미지 수집 완료 시 ready_to_publish로 승격한다."""
-    from .telegram_image_collector import TelegramImageCollector, is_semi_auto_mode
+    from .telegram_image_collector import TelegramImageCollector
 
     logger.info("Image collector worker loop started")
     try:
@@ -90,7 +90,6 @@ async def image_collector_worker_loop(service: "SchedulerService") -> None:
                     not service.job_store
                     or not service.notifier
                     or not getattr(service.notifier, "enabled", False)
-                    or not is_semi_auto_mode(service.job_store)
                 ):
                     await asyncio.sleep(30)
                     continue

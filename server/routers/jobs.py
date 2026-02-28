@@ -100,7 +100,7 @@ def _serialize_job(job: Job) -> Dict[str, Any]:
     # prepared_payload 안에 저장된 final_content를 최상위 필드로 추출
     pp = payload.get("prepared_payload") or {}
     if "final_content" not in payload or not payload.get("final_content"):
-        payload["final_content"] = str(pp.get("final_content", ""))
+        payload["final_content"] = str(pp.get("final_content") or pp.get("content", ""))
     if "topic_mode" not in payload or not payload.get("topic_mode"):
         payload["topic_mode"] = str(pp.get("topic_mode", ""))
     return payload

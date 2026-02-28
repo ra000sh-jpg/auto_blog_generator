@@ -308,3 +308,132 @@ def test_eval_slot_type_recorded_in_performance_log(tmp_path: Path):
 
     assert row is not None
     assert str(row["slot_type"]) == "eval"
+
+
+def test_auto_champion_switch_respects_strategy_balanced(tmp_path: Path):
+    """balanced 모드에서 품질 threshold 충족 시 챔피언이 교체되어야 한다."""
+    store = _build_store(tmp_path, "auto_champion_balanced.db")
+    store.set_system_setting("router_strategy_mode", "balanced")
+    store.set_system_setting("router_eval_min_samples", "5")
+    store.set_system_setting("router_champion_switch_threshold", "2.0")
+    store.set_system_setting("router_champion_model", "gemini-2.0-flash")
+    store.set_system_setting(
+        "router_registered_models",
+        json.dumps(
+            [
+                {"model_id": "gemini-2.0-flash", "provider": "gemini", "active": True},
+                {"model_id": "deepseek-chat", "provider": "deepseek", "active": True},
+            ],
+            ensure_ascii=False,
+        ),
+    )
+
+    for i in range(6):
+        store.record_model_performance(
+            model_id="gemini-2.0-flash",
+            provider="gemini",
+            topic_mode="it",
+            quality_score=85.0,
+            cost_won=14.0,
+            is_free_model=False,
+            slot_type="main",
+            measured_at=f"2026-02-{10 + i:02d}T01:00:00Z",
+        )
+        store.record_model_performance(
+            model_id="deepseek-chat",
+            provider="deepseek",
+            topic_mode="it",
+            quality_score=90.0,  # +5점: quality threshold 2.0 초과
+            cost_won=9.0,
+            is_free_model=False,
+            slot_type="main",
+            measured_at=f"2026-02-{10 + i:02d}T02:00:00Z",
+        )
+
+    scheduler = SchedulerService(job_store=store, timezone_name="Asia/Seoul")
+    asyncio.run(scheduler._run_auto_champion_switch())
+
+    assert store.get_system_setting("router_champion_model", "") == "deepseek-chat"
+
+
+def test_champion_history_recorded_on_switch(tmp_path: Path):
+    """챔피언 교체 후 champion_history 테이블에 이력이 자동 기록되어야 한다."""
+    store = _build_store(tmp_path, "champion_history_auto.db")
+    store.set_system_setting("router_strategy_mode", "quality")
+    store.set_system_setting("router_eval_min_samples", "3")
+    store.set_system_setting("router_champion_switch_threshold", "2.0")
+    store.set_system_setting("router_champion_model", "gemini-2.0-flash")
+    store.set_system_setting(
+        "router_registered_models",
+        json.dumps(
+            [
+                {"model_id": "gemini-2.0-flash", "provider": "gemini", "active": True},
+                {"model_id": "deepseek-chat", "provider": "deepseek", "active": True},
+            ],
+            ensure_ascii=False,
+        ),
+    )
+
+    for i in range(4):
+        store.record_model_performance(
+            model_id="gemini-2.0-flash",
+            provider="gemini",
+            topic_mode="cafe",
+            quality_score=82.0,
+            cost_won=12.0,
+            is_free_model=False,
+            slot_type="main",
+            measured_at=f"2026-02-{10 + i:02d}T01:00:00Z",
+        )
+        store.record_model_performance(
+            model_id="deepseek-chat",
+            provider="deepseek",
+            topic_mode="cafe",
+            quality_score=88.0,  # +6점: threshold 2.0 초과
+            cost_won=8.0,
+            is_free_model=False,
+            slot_type="main",
+            measured_at=f"2026-02-{10 + i:02d}T02:00:00Z",
+        )
+
+    scheduler = SchedulerService(job_store=store, timezone_name="Asia/Seoul")
+    asyncio.run(scheduler._run_auto_champion_switch())
+
+    # 챔피언 교체 확인
+    assert store.get_system_setting("router_champion_model", "") == "deepseek-chat"
+
+    # champion_history 자동 기록 확인
+    history = store.list_champion_history(limit=1)
+    assert len(history) == 1
+    assert history[0]["champion_model"] == "deepseek-chat"
+    assert history[0]["challenger_model"] == "gemini-2.0-flash"
+    assert history[0]["avg_champion_score"] >= 88.0
+
+
+def test_cost_estimation_includes_v2_stages(tmp_path: Path):
+    """pre_analysis 및 sentence_polish 토큰이 비용 추정에 포함되어야 한다."""
+    store = _build_store(tmp_path, "cost_v2_stages.db")
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=_DummyPublisher(),
+        generate_fn=_dummy_generate,
+    )
+
+    token_usage_v2 = {
+        "parser": {"input_tokens": 100, "output_tokens": 50, "calls": 1},
+        "pre_analysis": {"input_tokens": 300, "output_tokens": 200, "calls": 1},
+        "quality_step": {"input_tokens": 1500, "output_tokens": 800, "calls": 1},
+        "voice_step": {"input_tokens": 2000, "output_tokens": 1200, "calls": 1},
+        "sentence_polish": {"input_tokens": 400, "output_tokens": 300, "calls": 1},
+    }
+    token_usage_v1 = {
+        "parser": {"input_tokens": 100, "output_tokens": 50, "calls": 1},
+        "quality_step": {"input_tokens": 1500, "output_tokens": 800, "calls": 1},
+        "voice_step": {"input_tokens": 2000, "output_tokens": 1200, "calls": 1},
+    }
+
+    cost_v2 = pipeline._estimate_text_cost_won("deepseek", token_usage_v2)  # noqa: SLF001
+    cost_v1 = pipeline._estimate_text_cost_won("deepseek", token_usage_v1)  # noqa: SLF001
+
+    # V2 스테이지(pre_analysis + sentence_polish)가 포함되면 비용이 더 높아야 함
+    assert cost_v2 > cost_v1

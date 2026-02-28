@@ -35,8 +35,6 @@ export default function AllocationSettingsCard({
 
     const [savingSchedule, setSavingSchedule] = useState(false);
     const [scheduleMessage, setScheduleMessage] = useState("");
-    const [savingAllocation, setSavingAllocation] = useState(false);
-    const [allocationMessage, setAllocationMessage] = useState("");
 
     const [dailyPostsTarget, setDailyPostsTarget] = useState(
         Math.max(1, initialOnboardingStatus.daily_posts_target || 3)
@@ -101,35 +99,8 @@ export default function AllocationSettingsCard({
         }
     };
 
-    // 할당 비율만 저장 (카테고리 비율 테이블 전용)
-    async function handleSaveAllocation() {
-        setSavingAllocation(true);
-        setAllocationMessage("");
-        try {
-            const normalized = normalizeAllocations(
-                categoryAllocations.map((item) => item.category),
-                100,
-                categoryAllocations,
-            );
-            const response = await saveOnboardingSchedule({
-                daily_posts_target: dailyPostsTarget,
-                idea_vault_daily_quota: ideaVaultDailyQuota,
-                allocations: normalized,
-                category_mapping: categoryMapping,
-            });
-            setCategoryAllocations(withImageDefaults(response.allocations || []));
-            setAllocationMessage("✅ 할당 비율이 저장되었습니다.");
-            setTimeout(() => setAllocationMessage(""), 3000);
-        } catch (requestError) {
-            const message = requestError instanceof Error ? requestError.message : "저장에 실패했습니다.";
-            setAllocationMessage(message);
-        } finally {
-            setSavingAllocation(false);
-        }
-    }
-
-    // 네이버 카테고리 매핑 저장 (하단 매핑 테이블 전용)
-    async function handleSaveSchedule() {
+    // 배분 설정 저장
+    async function handleSave() {
         setSavingSchedule(true);
         setScheduleMessage("");
         try {
@@ -148,7 +119,8 @@ export default function AllocationSettingsCard({
             setCategoryMapping(response.category_mapping || {});
             setDailyPostsTarget(response.daily_posts_target || 3);
             setIdeaVaultDailyQuota(response.idea_vault_daily_quota || 0);
-            setScheduleMessage("카테고리 매핑이 저장되었습니다.");
+            setScheduleMessage("✅ 배분 설정이 저장되었습니다.");
+            setTimeout(() => setScheduleMessage(""), 3000);
         } catch (requestError) {
             const message = requestError instanceof Error ? requestError.message : "저장에 실패했습니다.";
             setScheduleMessage(message);
@@ -360,23 +332,6 @@ export default function AllocationSettingsCard({
                     </div>
                 )}
 
-                {/* 할당 비율 저장 버튼 */}
-                <div className="flex items-center justify-end gap-3 border-t border-slate-200 pt-3">
-                    {allocationMessage && (
-                        <span className={`text-xs font-medium ${allocationMessage.startsWith("✅") ? "text-emerald-600" : "text-rose-500"
-                            }`}>
-                            {allocationMessage}
-                        </span>
-                    )}
-                    <button
-                        type="button"
-                        onClick={handleSaveAllocation}
-                        disabled={savingAllocation}
-                        className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:opacity-50"
-                    >
-                        {savingAllocation ? "저장 중..." : "💾 할당 비율 저장"}
-                    </button>
-                </div>
             </div>
 
             <div className="mt-8 border-t border-slate-200 pt-6">
@@ -432,11 +387,11 @@ export default function AllocationSettingsCard({
                 )}
                 <button
                     type="button"
-                    onClick={handleSaveSchedule}
+                    onClick={handleSave}
                     disabled={savingSchedule}
                     className="rounded-full bg-slate-900 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-slate-700 disabled:opacity-50"
                 >
-                    {savingSchedule ? "저장 중..." : "카테고리 매핑 저장"}
+                    {savingSchedule ? "저장 중..." : "💾 배분 설정 저장"}
                 </button>
             </div>
         </section>

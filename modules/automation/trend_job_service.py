@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import uuid
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..collectors.naver_datalab import NaverDataLabCollector
 from .job_store import JobStore
@@ -39,12 +39,14 @@ class TrendJobService:
         max_jobs_per_run: int = 3,
         platform: str = "naver",
         persona_id: str = "default",
+        memory_store: Optional[Any] = None,
     ):
         self.job_store = job_store
         self.collector = collector or NaverDataLabCollector()
         self.max_jobs_per_run = max(1, max_jobs_per_run)
         self.platform = platform
         self.persona_id = persona_id
+        self.memory_store = memory_store
 
     def fetch_and_create_jobs(
         self,
@@ -87,11 +89,11 @@ class TrendJobService:
 
     def _create_job_from_keyword(self, keyword: str, category: str) -> Optional[str]:
         """키워드 1개를 즉시 실행 Job으로 변환한다."""
-        if self._has_recent_job(keyword):
+        topic_mode = CATEGORY_TO_TOPIC.get(category, "cafe")
+        if self._has_recent_job(keyword, topic_mode=topic_mode):
             logger.debug("Skipping duplicate keyword: %s", keyword)
             return None
 
-        topic_mode = CATEGORY_TO_TOPIC.get(category, "cafe")
         title = self._generate_title(keyword, topic_mode)
         seed_keywords = self._build_seed_keywords(keyword)
         job_id = str(uuid.uuid4())
@@ -107,13 +109,58 @@ class TrendJobService:
         )
         return job_id if success else None
 
-    def _has_recent_job(self, keyword: str, days: int = 7) -> bool:
+    def _has_recent_job(self, keyword: str, days: int = 7, topic_mode: str = "") -> bool:
         """최근 중복 키워드 여부를 확인한다.
 
-        TODO: JobStore 검색 메서드가 추가되면 실제 중복 탐지로 교체한다.
+        1) 활성 jobs(queued/running/ready 등)와 중복 검사
+        2) memory_store가 있으면 topic_memory 유사도 검사
         """
-        del keyword, days
-        return False
+        normalized_keyword = str(keyword).strip()
+        if not normalized_keyword:
+            return False
+
+        try:
+            active_check = getattr(self.job_store, "has_recent_similar_active_job", None)
+            if callable(active_check):
+                if active_check(
+                    keyword=normalized_keyword,
+                    topic_mode=topic_mode,
+                    platform=self.platform,
+                    lookback_days=max(1, int(days)),
+                ):
+                    return True
+        except Exception as exc:
+            logger.debug("Active job duplicate check failed (non-critical): %s", exc)
+
+        if self.memory_store is None:
+            return False
+
+        try:
+            lookback_weeks = max(1, (max(1, int(days)) + 6) // 7)
+            memory_config = getattr(self.memory_store, "_config", None)
+            threshold = 0.50
+            if memory_config is not None:
+                threshold = float(
+                    getattr(
+                        memory_config,
+                        "precheck_duplicate_threshold",
+                        getattr(memory_config, "duplicate_threshold", 0.50),
+                    )
+                )
+
+            return bool(
+                self.memory_store.is_duplicate_before_job(
+                    title=normalized_keyword,
+                    keywords=[normalized_keyword],
+                    topic_mode=topic_mode,
+                    similarity_threshold=threshold,
+                    platform=self.platform,
+                    lookback_weeks=lookback_weeks,
+                )
+            )
+        except Exception as exc:
+            logger.debug("Topic memory duplicate check failed (non-critical): %s", exc)
+            return False
 
     def _build_seed_keywords(self, keyword: str) -> List[str]:
         """seed_keywords를 구성한다."""

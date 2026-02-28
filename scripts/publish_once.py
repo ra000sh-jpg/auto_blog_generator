@@ -402,6 +402,18 @@ async def run(args: argparse.Namespace):
         except Exception as exc:
             logger.warning("Tag generator initialization skipped: %s", exc)
 
+    # ── 메모리 스토어 초기화 (Phase 2) ──
+    _publish_memory_store = None
+    try:
+        if app_config.memory.enabled:
+            from modules.memory.topic_store import TopicMemoryStore
+            _publish_memory_store = TopicMemoryStore(
+                job_store=store,
+                config=app_config.memory,
+            )
+    except Exception as _mem_exc:
+        logger.warning("Publish memory store init failed: %s", _mem_exc)
+
     pipeline = PipelineService(
         job_store=store,
         publisher=publisher,
@@ -413,6 +425,7 @@ async def run(args: argparse.Namespace):
         image_generator=image_generator,
         tag_generator=tag_generator,
         quality_evaluator=quality_evaluator,
+        memory_store=_publish_memory_store,
     )
 
     # ── Job 등록 ───────────────────────────────────────────

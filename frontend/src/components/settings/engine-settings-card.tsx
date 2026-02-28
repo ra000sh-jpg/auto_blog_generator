@@ -69,7 +69,6 @@ export default function EngineSettingsCard({
     );
     const [imageEngine, setImageEngine] = useState(initialRouterSettings.settings.image_engine || "pexels");
     const [imageEnabled, setImageEnabled] = useState(Boolean(initialRouterSettings.settings.image_enabled));
-    const [imageAiQuota] = useState<"0" | "1" | "all">("1");
     const [imageAiEngine, setImageAiEngine] = useState(
         initialRouterSettings.settings.image_ai_engine || "together_flux"
     );
@@ -224,7 +223,6 @@ export default function EngineSettingsCard({
                     image_api_keys: compactKeys(imageApiKeys),
                     image_engine: imageEngine,
                     image_ai_engine: imageAiEngine,
-                    image_ai_quota: imageAiQuota,
                     image_topic_quota_overrides: imageTopicQuotaOverrides,
                     traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                     image_enabled: imageEnabled,
@@ -268,7 +266,7 @@ export default function EngineSettingsCard({
             }
         }, 350);
         return () => clearTimeout(timer);
-    }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageAiEngine, imageAiQuota, imageTopicQuotaOverrides, trafficFeedbackStrongMode, imageEnabled, imagesPerPostMin, imagesPerPostMax]);
+    }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageAiEngine, imageTopicQuotaOverrides, trafficFeedbackStrongMode, imageEnabled, imagesPerPostMin, imagesPerPostMax]);
 
     function handleTextKeyChange(keyId: string, value: string) {
         setTextApiKeys((prev) => ({ ...prev, [keyId]: value }));
@@ -313,7 +311,6 @@ export default function EngineSettingsCard({
                 image_api_keys: compactKeys(imageApiKeys),
                 image_engine: imageEngine,
                 image_ai_engine: imageAiEngine,
-                image_ai_quota: imageAiQuota,
                 image_topic_quota_overrides: finalOverrides,
                 traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                 image_enabled: imageEnabled,
@@ -838,6 +835,64 @@ export default function EngineSettingsCard({
                         </p>
                     </label>
                 </div>
+                {championHistory.length > 0 && (
+                    <div className="mt-3 border-t border-blue-100 pt-3">
+                        <p className="mb-2 text-xs font-semibold text-blue-900">챔피언 이력</p>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-xs">
+                                <thead>
+                                    <tr className="border-b border-blue-100 text-left text-[10px] uppercase tracking-wide text-blue-700">
+                                        <th className="py-1.5 pr-3">주차</th>
+                                        <th className="py-1.5 pr-3">챔피언</th>
+                                        <th className="py-1.5 pr-3">도전자</th>
+                                        <th className="py-1.5 pr-3 text-right">평균 점수</th>
+                                        <th className="py-1.5 pr-3 text-right">비용(₩)</th>
+                                        <th className="py-1.5 pr-3">토픽별 점수</th>
+                                        <th className="py-1.5">비고</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {championHistory.slice(0, 8).map((history, idx) => (
+                                        <tr key={`${history.week_start}-${idx}`} className="border-b border-blue-50">
+                                            <td className="py-1.5 pr-3 font-medium text-blue-900">{history.week_start}</td>
+                                            <td className="py-1.5 pr-3 text-blue-800">{history.champion_model}</td>
+                                            <td className="py-1.5 pr-3 text-slate-600">{history.challenger_model || "—"}</td>
+                                            <td className="py-1.5 pr-3 text-right font-semibold text-blue-900">
+                                                {Number(history.avg_champion_score || 0).toFixed(1)}
+                                            </td>
+                                            <td className="py-1.5 pr-3 text-right text-slate-600">
+                                                {history.cost_won > 0 ? `${formatKrw(history.cost_won)}` : "—"}
+                                            </td>
+                                            <td className="py-1.5 pr-3">
+                                                <div className="flex flex-wrap gap-1">
+                                                    {Object.entries(history.topic_mode_scores || {}).map(([topic, score]) => (
+                                                        <span
+                                                            key={topic}
+                                                            className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[9px] text-blue-700"
+                                                        >
+                                                            {topic} {Number(score).toFixed(1)}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </td>
+                                            <td className="py-1.5">
+                                                {history.early_terminated && (
+                                                    <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">조기종료</span>
+                                                )}
+                                                {history.shadow_only && (
+                                                    <span className="ml-1 rounded-full bg-slate-200 px-1.5 py-0.5 text-[9px] text-slate-600">shadow</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                        {championHistory.length > 8 && (
+                            <p className="mt-1 text-[10px] text-blue-500">최근 8주만 표시됩니다.</p>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50/70 p-4">

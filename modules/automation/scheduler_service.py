@@ -121,6 +121,7 @@ class SchedulerService:
         random_seed: Optional[int] = None,
         notifier: Optional["TelegramNotifier"] = None,
         api_only_mode: bool = False,
+        memory_store: Optional[Any] = None,
     ):
         self.trend_service = trend_service
         self.pipeline_service = pipeline_service
@@ -151,6 +152,7 @@ class SchedulerService:
         self.random_seed = random_seed
         self.notifier = notifier
         self.api_only_mode = bool(api_only_mode)
+        self.memory_store = memory_store
         self._scheduler: Any = None
         self._generator_task: Optional[asyncio.Task[None]] = None
         self._publisher_task: Optional[asyncio.Task[None]] = None

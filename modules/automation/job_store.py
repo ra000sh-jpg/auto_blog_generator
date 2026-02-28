@@ -453,6 +453,35 @@ class JobStore:
 
                 CREATE INDEX IF NOT EXISTS idx_champion_history_score
                 ON champion_history(avg_champion_score);
+
+                CREATE TABLE IF NOT EXISTS topic_memory (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id        TEXT UNIQUE NOT NULL,
+                    title         TEXT NOT NULL,
+                    keywords      TEXT NOT NULL DEFAULT '[]',
+                    topic_mode    TEXT NOT NULL DEFAULT 'cafe',
+                    platform      TEXT NOT NULL DEFAULT 'naver',
+                    persona_id    TEXT NOT NULL DEFAULT 'P1',
+                    summary       TEXT DEFAULT '',
+                    result_url    TEXT DEFAULT '',
+                    quality_score INTEGER DEFAULT 0,
+                    recorded_at   TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tm_topic_recorded
+                ON topic_memory(topic_mode, recorded_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tm_persona_recorded
+                ON topic_memory(persona_id, recorded_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tm_recorded
+                ON topic_memory(recorded_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tm_platform_recorded
+                ON topic_memory(platform, recorded_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tm_topic_platform_recorded
+                ON topic_memory(topic_mode, platform, recorded_at DESC);
             """)
 
             existing_metric_columns = {
@@ -2942,3 +2971,284 @@ class JobStore:
                 }
             )
         return payload
+
+    # ────────────────────────────────────────────
+    # topic_memory CRUD
+    # ────────────────────────────────────────────
+
+    def insert_topic_memory(
+        self,
+        job_id: str,
+        title: str,
+        keywords: List[str],
+        topic_mode: str,
+        platform: str,
+        persona_id: str,
+        summary: str,
+        result_url: str,
+        quality_score: int,
+    ) -> None:
+        """발행 완료 후 topic_memory에 기록한다."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO topic_memory
+                    (job_id, title, keywords, topic_mode, platform, persona_id,
+                     summary, result_url, quality_score, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(job_id),
+                    str(title),
+                    json.dumps(list(keywords), ensure_ascii=False),
+                    str(topic_mode),
+                    str(platform),
+                    str(persona_id),
+                    str(summary)[:400],
+                    str(result_url),
+                    int(quality_score),
+                    now_iso,
+                ),
+            )
+
+    def query_topic_memory(
+        self,
+        topic_mode: str = "",
+        persona_id: str = "",
+        lookback_days: int = 56,
+        limit: int = 30,
+        min_quality_score: int = 0,
+        platform: str = "",
+    ) -> List[Dict[str, Any]]:
+        """최근 발행 이력을 조회한다. topic_mode/persona/platform 필터 가능."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))).isoformat()
+
+        params: list = [cutoff]
+        where_clauses = ["recorded_at >= ?"]
+        if topic_mode:
+            where_clauses.append("topic_mode = ?")
+            params.append(str(topic_mode))
+        if persona_id:
+            where_clauses.append("persona_id = ?")
+            params.append(str(persona_id))
+        if platform:
+            where_clauses.append("platform = ?")
+            params.append(str(platform))
+        if min_quality_score > 0:
+            where_clauses.append("quality_score >= ?")
+            params.append(int(min_quality_score))
+        params.append(max(1, min(int(limit), 200)))
+
+        sql = f"""
+            SELECT job_id, title, keywords, topic_mode, platform, persona_id,
+                   summary, result_url, quality_score, recorded_at
+            FROM topic_memory
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY recorded_at DESC
+            LIMIT ?
+        """
+        with self.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        result = []
+        for row in rows:
+            try:
+                kw = json.loads(row[2]) if row[2] else []
+            except Exception:
+                kw = []
+            result.append({
+                "job_id": row[0],
+                "title": row[1],
+                "keywords": kw,
+                "topic_mode": row[3],
+                "platform": row[4],
+                "persona_id": row[5],
+                "summary": row[6],
+                "result_url": row[7],
+                "quality_score": row[8],
+                "recorded_at": row[9],
+            })
+        return result
+
+    def get_topic_coverage_stats(
+        self,
+        lookback_days: int = 56,
+        platform: str = "",
+    ) -> Dict[str, int]:
+        """lookback 기간의 topic_mode별 발행 수를 반환한다."""
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))).isoformat()
+        params: List[Any] = [cutoff]
+        where_clauses = ["recorded_at >= ?"]
+        if platform:
+            where_clauses.append("platform = ?")
+            params.append(str(platform))
+
+        sql = f"""
+            SELECT topic_mode, COUNT(*) AS cnt
+            FROM topic_memory
+            WHERE {' AND '.join(where_clauses)}
+            GROUP BY topic_mode
+            ORDER BY cnt DESC
+        """
+        with self.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return {
+            str(row["topic_mode"]): int(row["cnt"])
+            for row in rows
+            if row["topic_mode"]
+        }
+
+    def get_keyword_frequencies(
+        self,
+        topic_mode: str = "",
+        lookback_days: int = 56,
+        top_n: int = 30,
+    ) -> List[tuple]:
+        """lookback 기간의 키워드 사용 빈도를 반환한다."""
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))).isoformat()
+        params: List[Any] = [cutoff]
+        where_clauses = ["recorded_at >= ?"]
+        if topic_mode:
+            where_clauses.append("topic_mode = ?")
+            params.append(str(topic_mode))
+
+        sql = f"""
+            SELECT keywords
+            FROM topic_memory
+            WHERE {' AND '.join(where_clauses)}
+        """
+        with self.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        freq: Dict[str, int] = {}
+        for row in rows:
+            try:
+                keywords = json.loads(row["keywords"]) if row["keywords"] else []
+            except Exception:
+                keywords = []
+            for keyword in keywords:
+                normalized = str(keyword).strip().lower()
+                if not normalized:
+                    continue
+                freq[normalized] = freq.get(normalized, 0) + 1
+
+        sorted_freq = sorted(freq.items(), key=lambda item: item[1], reverse=True)
+        return sorted_freq[: max(1, int(top_n))]
+
+    def has_recent_similar_active_job(
+        self,
+        keyword: str,
+        topic_mode: str = "",
+        platform: str = "",
+        lookback_days: int = 7,
+    ) -> bool:
+        """최근 활성 작업 중 키워드가 유사한 작업 존재 여부를 반환한다."""
+        del topic_mode
+        normalized_keyword = str(keyword).strip().lower()
+        if not normalized_keyword:
+            return False
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(lookback_days)))
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        keyword_pattern = f"%{normalized_keyword}%"
+        active_statuses = (
+            self.STATUS_QUEUED,
+            self.STATUS_RUNNING,
+            self.STATUS_RETRY_WAIT,
+            self.STATUS_READY,
+            self.STATUS_AWAITING_IMAGES,
+        )
+
+        params: List[Any] = [*active_statuses, cutoff, cutoff]
+        where_clauses = [
+            "status IN (?, ?, ?, ?, ?)",
+            "(updated_at >= ? OR scheduled_at >= ?)",
+        ]
+        if platform:
+            where_clauses.append("platform = ?")
+            params.append(str(platform))
+        where_clauses.append("(LOWER(title) LIKE ? OR LOWER(seed_keywords) LIKE ?)")
+        params.extend([keyword_pattern, keyword_pattern])
+
+        sql = f"""
+            SELECT 1
+            FROM jobs
+            WHERE {' AND '.join(where_clauses)}
+            LIMIT 1
+        """
+        with self.connection() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return row is not None
+
+    def backfill_topic_memory_from_jobs(self, limit: int = 300) -> int:
+        """
+        기존 completed jobs 테이블에서 topic_memory를 백필한다.
+        초기 실행 시 1회 호출. 이미 등록된 job_id는 INSERT OR IGNORE로 스킵.
+        반환값: 새로 삽입된 행 수
+        """
+        completed_jobs = self.list_recent_completed_jobs(limit=limit)
+        inserted = 0
+        for job in completed_jobs:
+            if not job.result_url:
+                continue
+            # seo_snapshot에서 topic_mode 추출
+            seo_snap: Dict[str, Any] = {}
+            try:
+                seo_raw = getattr(job, "seo_snapshot", None)
+                if isinstance(seo_raw, str):
+                    seo_snap = json.loads(seo_raw)
+                elif isinstance(seo_raw, dict):
+                    seo_snap = seo_raw
+            except Exception:
+                pass
+            topic_mode = str(seo_snap.get("topic_mode", "cafe")).strip() or "cafe"
+
+            # quality_snapshot에서 점수 추출
+            q_snap: Dict[str, Any] = {}
+            try:
+                q_raw = getattr(job, "quality_snapshot", None)
+                if isinstance(q_raw, str):
+                    q_snap = json.loads(q_raw)
+                elif isinstance(q_raw, dict):
+                    q_snap = q_raw
+            except Exception:
+                pass
+            quality_score = int(q_snap.get("score", 0))
+
+            # 요약: 제목 + 키워드 결합 (LLM 호출 없음)
+            kw_list = list(job.seed_keywords) if job.seed_keywords else []
+            summary = f"{job.title} / 키워드: {', '.join(kw_list[:5])}"
+
+            try:
+                with self.connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO topic_memory
+                            (job_id, title, keywords, topic_mode, platform, persona_id,
+                             summary, result_url, quality_score, recorded_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(job.job_id),
+                            str(job.title),
+                            json.dumps(kw_list, ensure_ascii=False),
+                            topic_mode,
+                            str(job.platform),
+                            str(job.persona_id or "P1"),
+                            summary[:400],
+                            str(job.result_url),
+                            quality_score,
+                            str(getattr(job, "completed_at", "") or ""),
+                        ),
+                    )
+                    inserted += 1
+            except Exception:
+                pass
+        return inserted

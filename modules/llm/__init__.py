@@ -143,10 +143,16 @@ def _build_generator(
 
             api_key = str(web_search_config.api_key or os.getenv("BRAVE_API_KEY", "")).strip()
             if api_key:
+                # 도메인 설정 파싱
+                allowed = [d.strip() for d in (web_search_config.allowed_domains or "").split(",") if d.strip()]
+                blocked = [d.strip() for d in (web_search_config.blocked_domains or "").split(",") if d.strip()]
+                
                 web_search_client = create_web_search_client(
                     provider=web_search_config.provider,
                     api_key=api_key,
                     timeout_sec=web_search_config.timeout_sec,
+                    allowed_domains=allowed,
+                    blocked_domains=blocked,
                 )
                 if web_search_client is not None:
                     web_fetch_client = WebFetchClient(
@@ -155,6 +161,19 @@ def _build_generator(
                     )
     except Exception as exc:
         logger.warning("Web search client init failed: %s", exc)
+
+    # ── 메모리 스토어 초기화 ──
+    memory_store = None
+    try:
+        mem_config = load_config().memory
+        if mem_config.enabled and job_store is not None:
+            from ..memory.topic_store import TopicMemoryStore
+            memory_store = TopicMemoryStore(
+                job_store=job_store,
+                config=mem_config,
+            )
+    except Exception as exc:
+        logger.warning("Memory store init failed: %s", exc)
 
     return ContentGenerator(
         primary_client=primary_client,
@@ -178,6 +197,7 @@ def _build_generator(
         web_search_client=web_search_client,
         web_fetch_client=web_fetch_client,
         web_search_max_results=web_search_max_results,
+        memory_store=memory_store,
     )
 
 

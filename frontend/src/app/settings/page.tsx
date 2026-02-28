@@ -7,18 +7,15 @@ import AllocationSettingsCard from "@/components/settings/allocation-settings-ca
 import ChannelManagerCard from "@/components/settings/channel-manager-card";
 
 import {
-  fetchConfig,
   fetchNaverConnectStatus,
   fetchOnboardingStatus,
   fetchRouterSettings,
-  type ConfigResponse,
   type NaverConnectStatusResponse,
   type OnboardingStatusResponse,
   type RouterSettingsResponse,
 } from "@/lib/api";
 
 export default function SettingsPage() {
-  const [data, setData] = useState<ConfigResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -31,8 +28,7 @@ export default function SettingsPage() {
 
     async function loadConfig() {
       try {
-        const [configResult, onboardingResult, routerResult, naverResult] = await Promise.allSettled([
-          fetchConfig(),
+        const [onboardingResult, routerResult, naverResult] = await Promise.allSettled([
           fetchOnboardingStatus(),
           fetchRouterSettings(),
           fetchNaverConnectStatus(),
@@ -42,12 +38,6 @@ export default function SettingsPage() {
         }
 
         const errors: string[] = [];
-
-        if (configResult.status === "fulfilled") {
-          setData(configResult.value);
-        } else {
-          errors.push(`config: ${configResult.reason instanceof Error ? configResult.reason.message : "요청 실패"}`);
-        }
 
         if (onboardingResult.status === "fulfilled") {
           setOnboardingData(onboardingResult.value);
@@ -113,7 +103,7 @@ export default function SettingsPage() {
         </p>
       )}
 
-      {error && (
+      {!loading && error && (
         <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
           {error}
         </p>
@@ -136,54 +126,6 @@ export default function SettingsPage() {
           />
 
           <ChannelManagerCard />
-        </>
-      )}
-
-      {data && (
-        <>
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <h2 className="font-[family-name:var(--font-heading)] text-lg font-semibold">
-              API Keys
-            </h2>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              {data.api_keys.map((item) => (
-                <article key={item.provider} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">{item.provider}</p>
-                  <p className="mt-1 text-sm font-medium text-slate-900">{item.env_var}</p>
-                  <p className="mt-2 text-xs text-slate-600">
-                    상태: {item.configured ? "연결됨" : "미설정"}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-600">
-                    값: {item.configured ? item.masked : "-"}
-                  </p>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <h2 className="font-[family-name:var(--font-heading)] text-lg font-semibold">
-              Personas
-            </h2>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {data.personas.map((item) => (
-                <article key={item.value} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <h3 className="text-sm font-medium text-slate-800">{item.label}</h3>
-                  <p className="mt-1 text-xs text-slate-500">ID: {item.value}</p>
-                  <div className="mt-3">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                      Topic Mode
-                    </p>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700">
-                        {item.topic_mode}
-                      </span>
-                    </div>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
         </>
       )}
     </div>
