@@ -27,24 +27,28 @@ def _memory_async_config() -> MemoryConfig:
 def test_record_post_enqueues_when_async_enabled(tmp_path: Path) -> None:
     store = _build_store(tmp_path, "enqueue_only.db")
     memory_store = TopicMemoryStore(job_store=store, config=_memory_async_config())
-    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
-    memory_store.bind_event_queue(queue)
 
-    memory_store.record_post(
-        job_id="async-1",
-        title="비동기 메모리 테스트",
-        keywords=["비동기", "메모리"],
-        topic_mode="it",
-        platform="naver",
-        persona_id="P1",
-        result_url="https://example.com/async-1",
-        quality_score=90,
-    )
-    assert queue.qsize() == 1
-    assert store.query_topic_memory(topic_mode="it", platform="naver", limit=10) == []
+    async def _run() -> None:
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
+        memory_store.bind_event_queue(queue)
 
-    event = queue.get_nowait()
-    assert event["type"] == "record_post"
+        memory_store.record_post(
+            job_id="async-1",
+            title="비동기 메모리 테스트",
+            keywords=["비동기", "메모리"],
+            topic_mode="it",
+            platform="naver",
+            persona_id="P1",
+            result_url="https://example.com/async-1",
+            quality_score=90,
+        )
+        assert queue.qsize() == 1
+        assert store.query_topic_memory(topic_mode="it", platform="naver", limit=10) == []
+
+        event = queue.get_nowait()
+        assert event["type"] == "record_post"
+
+    asyncio.run(_run())
 
 
 def test_process_memory_event_persists_topic_memory(tmp_path: Path) -> None:
@@ -77,33 +81,41 @@ def test_process_memory_event_persists_topic_memory(tmp_path: Path) -> None:
 def test_request_backfill_enqueues_event(tmp_path: Path) -> None:
     store = _build_store(tmp_path, "request_backfill.db")
     memory_store = TopicMemoryStore(job_store=store, config=_memory_async_config())
-    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
-    memory_store.bind_event_queue(queue)
 
-    memory_store.request_backfill(limit=123)
-    assert queue.qsize() == 1
-    event = queue.get_nowait()
-    assert event["type"] == "ensure_backfill"
-    assert event["payload"]["limit"] == 123
+    async def _run() -> None:
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
+        memory_store.bind_event_queue(queue)
+
+        memory_store.request_backfill(limit=123)
+        assert queue.qsize() == 1
+        event = queue.get_nowait()
+        assert event["type"] == "ensure_backfill"
+        assert event["payload"]["limit"] == 123
+
+    asyncio.run(_run())
 
 
 def test_record_post_fallback_sync_when_queue_full(tmp_path: Path) -> None:
     store = _build_store(tmp_path, "queue_full_fallback.db")
     memory_store = TopicMemoryStore(job_store=store, config=_memory_async_config())
-    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
-    memory_store.bind_event_queue(queue)
-    queue.put_nowait({"type": "dummy", "payload": {}, "attempts": 0})
 
-    memory_store.record_post(
-        job_id="async-fallback-1",
-        title="큐 포화 폴백",
-        keywords=["큐", "포화"],
-        topic_mode="it",
-        platform="naver",
-        persona_id="P1",
-        result_url="https://example.com/fallback",
-        quality_score=90,
-    )
+    async def _run() -> None:
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+        memory_store.bind_event_queue(queue)
+        queue.put_nowait({"type": "dummy", "payload": {}, "attempts": 0})
+
+        memory_store.record_post(
+            job_id="async-fallback-1",
+            title="큐 포화 폴백",
+            keywords=["큐", "포화"],
+            topic_mode="it",
+            platform="naver",
+            persona_id="P1",
+            result_url="https://example.com/fallback",
+            quality_score=90,
+        )
+
+    asyncio.run(_run())
     rows = store.query_topic_memory(topic_mode="it", platform="naver", limit=10)
     assert len(rows) == 1
     assert rows[0]["job_id"] == "async-fallback-1"
@@ -112,17 +124,18 @@ def test_record_post_fallback_sync_when_queue_full(tmp_path: Path) -> None:
 def test_memory_worker_loop_consumes_queue(tmp_path: Path) -> None:
     store = _build_store(tmp_path, "worker_consume.db")
     memory_store = TopicMemoryStore(job_store=store, config=_memory_async_config())
-    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
-    memory_store.bind_event_queue(queue)
 
     class ServiceStub:
         pass
 
     service = ServiceStub()
-    service._memory_event_queue = queue
+    service._memory_event_queue = None
     service.memory_store = memory_store
 
     async def _run() -> None:
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
+        memory_store.bind_event_queue(queue)
+        service._memory_event_queue = queue
         worker = asyncio.create_task(memory_worker_loop(service))
         try:
             await queue.put(
@@ -153,4 +166,3 @@ def test_memory_worker_loop_consumes_queue(tmp_path: Path) -> None:
     rows = store.query_topic_memory(topic_mode="it", platform="naver", limit=10)
     assert len(rows) == 1
     assert rows[0]["job_id"] == "worker-1"
-
