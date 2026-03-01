@@ -4,6 +4,7 @@ set -euo pipefail
 # 프로젝트 루트 경로를 계산한다.
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
+PYTHON_EXECUTABLE="$(command -v python3.11 || command -v python3 || echo "python3")"
 
 echo "🔧 실행 중인 서비스 중지..."
 shopt -s nullglob
@@ -17,7 +18,7 @@ cd "${PROJECT_DIR}"
 git pull --ff-only origin main
 
 echo "🔧 Python 의존성 업데이트..."
-python3 -m pip install -r requirements.txt
+"${PYTHON_EXECUTABLE}" -m pip install -r requirements.txt
 
 echo "🔧 프론트엔드 의존성/빌드 업데이트..."
 (

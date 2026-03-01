@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 고정 경로: 설치 대상 워크스페이스
-WORKSPACE_DIR="/Users/naseunghwan/Desktop/auto_blog_generator"
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
 PLIST_TARGET="${LAUNCH_AGENTS_DIR}/com.autoblog.worker.plist"
 LABEL="com.autoblog.worker"

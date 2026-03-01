@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE_DIR="/Users/naseunghwan/Desktop/auto_blog_generator"
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${WORKSPACE_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/worker.stdout.log"
 STDERR_LOG="${LOG_DIR}/worker.stderr.log"

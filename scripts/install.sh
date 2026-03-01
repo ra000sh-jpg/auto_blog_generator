@@ -50,6 +50,29 @@ raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
 }
 
+is_python_executable_311_or_higher() {
+  local python_exec="$1"
+  if [[ -z "${python_exec}" ]]; then
+    return 1
+  fi
+  "${python_exec}" - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
+resolve_python_executable() {
+  if command -v python3.11 >/dev/null 2>&1; then
+    command -v python3.11
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return
+  fi
+  echo "python3"
+}
+
 is_node_20_9_or_higher() {
   if ! command -v node >/dev/null 2>&1; then
     return 1
@@ -141,6 +164,13 @@ if is_python_311_or_higher; then
 else
   brew install python@3.11
 fi
+PYTHON_EXECUTABLE="$(resolve_python_executable)"
+if ! is_python_executable_311_or_higher "${PYTHON_EXECUTABLE}"; then
+  echo "❌ Python 3.11 이상 실행 파일을 찾지 못했습니다."
+  echo "   python3.11 경로를 확인하고 다시 실행해 주세요."
+  exit 1
+fi
+echo "✓ Python 실행 파일 확인 완료: ${PYTHON_EXECUTABLE}"
 
 step "Node.js 20.9+ 확인"
 if is_node_20_9_or_higher; then
@@ -161,11 +191,11 @@ fi
 echo "✓ npm 경로 확인 완료: $(command -v npm)"
 
 step "Playwright 브라우저 설치"
-python3 -m pip install playwright
-python3 -m playwright install chromium
+"${PYTHON_EXECUTABLE}" -m pip install playwright
+"${PYTHON_EXECUTABLE}" -m playwright install chromium
 
 step "프로젝트 의존성 설치"
-python3 -m pip install -r "${PROJECT_DIR}/requirements.txt"
+"${PYTHON_EXECUTABLE}" -m pip install -r "${PROJECT_DIR}/requirements.txt"
 (
   cd "${FRONTEND_DIR}"
   npm install
@@ -186,8 +216,7 @@ fi
 step "launchd 서비스 파일 생성/등록"
 mkdir -p "${LAUNCH_AGENTS_DIR}" "${LOG_DIR}"
 
-# Python 및 Node 실행 경로 탐색 (시스템 기본 경로가 꼬일 경우를 대비해 브루 경로 우선 탐색)
-PYTHON_EXECUTABLE="$(command -v python3.11 || command -v python3 || echo "python3")"
+# Node 실행 경로 탐색 (시스템 기본 경로가 꼬일 경우를 대비해 브루 경로 우선 탐색)
 NODE_EXECUTABLE="$(command -v node || echo "node")"
 
 cat > "${SERVER_PLIST}" <<PLIST

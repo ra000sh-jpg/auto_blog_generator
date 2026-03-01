@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 일일 자동 스모크 실행용 래퍼 스크립트
-WORKSPACE_DIR="/Users/naseunghwan/Desktop/auto_blog_generator"
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${WORKSPACE_DIR}"
 
 # 자동 실행은 화면 점유를 줄이기 위해 기본 headless로 수행한다.

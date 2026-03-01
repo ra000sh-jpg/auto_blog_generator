@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE_DIR="/Users/naseunghwan/Desktop/auto_blog_generator"
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
 PLIST_TARGET="${LAUNCH_AGENTS_DIR}/com.autoblog.smoke.plist"
 LABEL="com.autoblog.smoke"

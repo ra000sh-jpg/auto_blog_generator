@@ -6,16 +6,18 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
 SERVER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.server.plist"
 SCHEDULER_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.scheduler.plist"
+FRONTEND_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.frontend.plist"
 SERVER_LABEL="com.autoblog.server"
 SCHEDULER_LABEL="com.autoblog.scheduler"
+FRONTEND_LABEL="com.autoblog.frontend"
 
 usage() {
   cat <<USAGE
 사용법: auto-blog <command>
 
 명령어:
-  start    서비스 시작 (server + scheduler)
-  stop     서비스 중지 (server + scheduler)
+  start    서비스 시작 (server + scheduler + frontend)
+  stop     서비스 중지 (server + scheduler + frontend)
   restart  서비스 재시작
   update   업데이트 스크립트 실행
   status   서비스 상태 + 현재 커밋 표시
@@ -31,6 +33,9 @@ start_services() {
   if [[ -f "${SCHEDULER_PLIST}" ]]; then
     launchctl load "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
   fi
+  if [[ -f "${FRONTEND_PLIST}" ]]; then
+    launchctl load "${FRONTEND_PLIST}" >/dev/null 2>&1 || true
+  fi
   echo "✅ 시작 완료"
 }
 
@@ -42,11 +47,14 @@ stop_services() {
   if [[ -f "${SCHEDULER_PLIST}" ]]; then
     launchctl unload "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
   fi
+  if [[ -f "${FRONTEND_PLIST}" ]]; then
+    launchctl unload "${FRONTEND_PLIST}" >/dev/null 2>&1 || true
+  fi
   echo "✅ 중지 완료"
 }
 
 status_services() {
-  local server_status scheduler_status commit_hash
+  local server_status scheduler_status frontend_status commit_hash
 
   if launchctl list | grep -q "${SERVER_LABEL}"; then
     server_status="running"
@@ -60,9 +68,16 @@ status_services() {
     scheduler_status="stopped"
   fi
 
+  if launchctl list | grep -q "${FRONTEND_LABEL}"; then
+    frontend_status="running"
+  else
+    frontend_status="stopped"
+  fi
+
   commit_hash="$(cd "${PROJECT_DIR}" && git rev-parse --short HEAD)"
   echo "server: ${server_status}"
   echo "scheduler: ${scheduler_status}"
+  echo "frontend: ${frontend_status}"
   echo "commit: ${commit_hash}"
 }
 
