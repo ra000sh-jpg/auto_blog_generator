@@ -38,6 +38,7 @@ from ..seo.quality_gate import QualityGate, QualityGateResult
 from ..seo.tag_generator import TagGenerator
 from ..seo.platform_strategy import get_category_for_topic
 from .telegram_image_collector import TelegramImageCollector, is_semi_auto_mode
+from .visual_sidecar import build_visual_sidecar_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ class PipelineService:
         queue_retry_limit: int = 1,
         quality_evaluator: Optional[Any] = None,  # Phase 25: QualityEvaluator (optional)
         memory_store: Optional[Any] = None,  # Phase 2: TopicMemoryStore
+        visual_sidecar: Optional[Any] = None,
     ):
         self.job_store = job_store
         self.publisher = publisher
@@ -145,6 +147,7 @@ class PipelineService:
         self.queue_retry_limit = max(0, queue_retry_limit)
         self.quality_evaluator = quality_evaluator  # Phase 25
         self.memory_store = memory_store  # Phase 2
+        self.visual_sidecar = visual_sidecar
         self._channel_publishers: Dict[str, PublisherLike] = {}
         self._image_output_dir = "data/images"
         if self.image_generator is not None:
@@ -154,6 +157,11 @@ class PipelineService:
                 output_dir = getattr(client, "output_dir", None)
             if output_dir:
                 self._image_output_dir = str(output_dir)
+        if self.visual_sidecar is None:
+            self.visual_sidecar = build_visual_sidecar_from_env(
+                output_dir=self._image_output_dir,
+                job_store=self.job_store,
+            )
 
     async def run_job(self, job: Job) -> None:
         """
@@ -555,6 +563,7 @@ class PipelineService:
     async def _publish_payload(self, job: Job, payload: Dict[str, Any]) -> None:
         """준비된 payload를 실제 블로그에 발행한다."""
         job_id = job.job_id
+        payload = await self._ensure_visual_sidecar_payload(job=job, payload=payload)
         attempt_id = str(uuid.uuid4())
         self.job_store.set_publish_attempt(job_id, attempt_id)
 
@@ -585,10 +594,14 @@ class PipelineService:
                 if not normalized_path:
                     continue
                 if isinstance(meta, dict):
-                    image_sources[normalized_path] = {
+                    normalized_meta = {
                         "kind": str(meta.get("kind", "unknown")).strip().lower() or "unknown",
                         "provider": str(meta.get("provider", "unknown")).strip().lower() or "unknown",
                     }
+                    renderer = str(meta.get("renderer", "")).strip().lower()
+                    if renderer:
+                        normalized_meta["renderer"] = renderer
+                    image_sources[normalized_path] = normalized_meta
                 else:
                     image_sources[normalized_path] = {"kind": "unknown", "provider": "unknown"}
         raw_tags = payload.get("tags", [])
@@ -1155,6 +1168,27 @@ class PipelineService:
             )
         except Exception:
             logger.debug("model_performance_log skipped", extra={"job_id": job.job_id}, exc_info=True)
+
+    async def _ensure_visual_sidecar_payload(
+        self,
+        *,
+        job: Job,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """FreeLLMAPI 시각자료 사이드카를 선택적으로 적용한다."""
+        if self.visual_sidecar is None:
+            return payload
+        try:
+            enriched = await self.visual_sidecar.enrich_payload(job=job, payload=payload)
+        except Exception as exc:
+            logger.info(
+                "Visual sidecar skipped",
+                extra={"job_id": job.job_id, "error": str(exc)[:200]},
+            )
+            return payload
+        if not isinstance(enriched, dict):
+            return payload
+        return enriched
 
     def _fail_with_retry_policy(
         self,

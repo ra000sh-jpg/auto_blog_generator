@@ -28,6 +28,7 @@ class DummyPublisher:
     def __init__(self, success: bool = True):
         self.success = success
         self.called = 0
+        self.last_payload: Dict[str, Any] = {}
 
     async def publish(
         self,
@@ -40,11 +41,51 @@ class DummyPublisher:
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
     ) -> PublishResult:
-        del images, image_sources, image_points, tags, category
+        self.last_payload = {
+            "title": title,
+            "content": content,
+            "thumbnail": thumbnail or "",
+            "images": list(images or []),
+            "image_sources": image_sources or {},
+            "image_points": list(image_points or []),
+            "tags": list(tags or []),
+            "category": category or "",
+        }
         self.called += 1
         if self.success:
             return PublishResult(success=True, url=f"https://blog.naver.com/test/{self.called}")
         return PublishResult(success=False, error_code="PUBLISH_FAILED", error_message="publish failed")
+
+
+class DummyVisualSidecar:
+    """발행 직전 사이드카 호출 확인용 대역."""
+
+    async def enrich_payload(self, *, job, payload):
+        del job
+        enriched = dict(payload)
+        content = str(enriched.get("content", "") or "")
+        enriched["content"] = f"{content}\n\n[IMG_0]"
+        enriched["image_points"] = [
+            {
+                "index": 0,
+                "path": "data/images/sidecar_flowchart.png",
+                "marker": "[IMG_0]",
+                "section_hint": "흐름도",
+                "is_thumbnail": False,
+            }
+        ]
+        enriched["image_sources"] = {
+            "data/images/sidecar_flowchart.png": {
+                "kind": "manual",
+                "provider": "freellmapi_visual_sidecar",
+                "renderer": "flowchart",
+            }
+        }
+        enriched["quality_snapshot"] = {
+            **dict(enriched.get("quality_snapshot", {}) or {}),
+            "visual_sidecar": {"status": "attached", "added_count": 1},
+        }
+        return enriched
 
 
 def schedule_and_claim(store: JobStore, job_id: str = "job-1"):
@@ -171,6 +212,46 @@ def test_pipeline_already_published_skip(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert complete_spy.call_count == 0
     assert publisher.called == 0
+
+
+def test_ready_payload_applies_visual_sidecar_before_publish(tmp_path: Path):
+    """발행 직전 FreeLLMAPI 시각자료 사이드카가 payload를 보강해야 한다."""
+    store = build_store(tmp_path, "ready_visual_sidecar.db")
+    job = schedule_and_claim(store, "ready-visual-sidecar-job")
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "사이드카 테스트",
+            "content": "본문입니다.\n\n두 번째 문단입니다.",
+            "images": [],
+            "image_sources": {},
+            "image_points": [],
+            "tags": [],
+            "category": "",
+            "seo_snapshot": {"topic_mode": "it"},
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+        visual_sidecar=DummyVisualSidecar(),
+    )
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is True
+
+    assert "[IMG_0]" in publisher.last_payload["content"]
+    assert publisher.last_payload["image_sources"]["data/images/sidecar_flowchart.png"] == {
+        "kind": "manual",
+        "provider": "freellmapi_visual_sidecar",
+        "renderer": "flowchart",
+    }
+    assert getattr(publisher.last_payload["image_points"][0], "marker", "") == "[IMG_0]"
 
 
 def test_playwright_dry_run_returns_url(monkeypatch: pytest.MonkeyPatch):

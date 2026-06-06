@@ -387,3 +387,18 @@ def test_image_generator_detects_free_tier_exhaustion_and_fallbacks_to_stock():
     assert result.source_kind_by_path[result.content_paths[0]] == "stock"
     fallback_logs = [row for row in result.generation_logs if row.get("fallback_reason") == "free_tier_exhausted"]
     assert fallback_logs
+
+def test_flowchart_renderer_creates_png(tmp_path):
+    """흐름도 렌더러가 PNG 파일을 생성해야 한다."""
+    from pathlib import Path
+    from modules.images.flowchart_renderer import render_flowchart
+
+    result = render_flowchart(
+        title="선택 기준 점검",
+        nodes=["현재 상황 확인", "선택지 비교", "주의점 기록", "다음 행동 결정"],
+        output_dir=str(tmp_path),
+    )
+
+    assert result is not None
+    assert Path(result.path).exists()
+    assert result.node_count == 4
