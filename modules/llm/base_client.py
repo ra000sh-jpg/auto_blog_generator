@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -37,6 +38,8 @@ class BaseLLMClient(ABC):
         max_retries: int = 3,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        retry_base_delay_sec: Optional[float] = None,
+        retry_max_delay_sec: Optional[float] = None,
     ) -> LLMResponse:
         """재시도 로직과 함께 메시지를 생성한다."""
 

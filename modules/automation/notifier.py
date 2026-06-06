@@ -7,10 +7,11 @@ import json
 import logging
 import os
 import sqlite3
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class TelegramNotifier:
         text: str,
         *,
         disable_notification: bool = False,
+        reply_markup: Dict[str, Any] | None = None,
     ) -> bool:
         """텔레그램 메시지를 비동기로 전송한다."""
         if not self.enabled:
@@ -76,18 +78,80 @@ class TelegramNotifier:
         payload = {
             "chat_id": self.chat_id,
             "text": text,
-            "disable_notification": "true" if disable_notification else "false",
+            "disable_notification": bool(disable_notification),
         }
-        encoded = urllib.parse.urlencode(payload).encode("utf-8")
+        if isinstance(reply_markup, dict) and reply_markup:
+            payload["reply_markup"] = reply_markup
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
-        return await asyncio.to_thread(self._send_blocking, url, encoded)
+        timeout = self.connect_timeout_sec + self.read_timeout_sec
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=payload)
+            try:
+                response_payload: Dict[str, Any] = response.json()
+            except json.JSONDecodeError:
+                response_payload = {"ok": False, "status_code": response.status_code}
+            ok = bool(response_payload.get("ok", False))
+            if not ok:
+                logger.warning("Telegram API returned not-ok: %s", response_payload)
+            return ok
+        except Exception as exc:
+            logger.warning("Telegram notify failed: %s", exc)
+            return False
+
+    async def send_document(
+        self,
+        *,
+        file_path: str,
+        caption: str = "",
+        filename: str = "",
+        disable_notification: bool = False,
+        reply_markup: Dict[str, Any] | None = None,
+    ) -> bool:
+        """텔레그램 문서 파일을 비동기로 전송한다."""
+        if not self.enabled:
+            return False
+
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            logger.warning("Telegram document missing: %s", file_path)
+            return False
+
+        payload: Dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "caption": str(caption or "")[:1024],
+            "disable_notification": bool(disable_notification),
+        }
+        if isinstance(reply_markup, dict) and reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+        upload_name = filename or path.name
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        timeout = self.connect_timeout_sec + self.read_timeout_sec
+        try:
+            with path.open("rb") as file_obj:
+                files = {"document": (upload_name, file_obj, "text/plain")}
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(url, data=payload, files=files)
+            try:
+                response_payload: Dict[str, Any] = response.json()
+            except json.JSONDecodeError:
+                response_payload = {"ok": False, "status_code": response.status_code}
+            ok = bool(response_payload.get("ok", False))
+            if not ok:
+                logger.warning("Telegram sendDocument returned not-ok: %s", response_payload)
+            return ok
+        except Exception as exc:
+            logger.warning("Telegram document notify failed: %s", exc)
+            return False
 
     def send_message_background(
         self,
         text: str,
         *,
         disable_notification: bool = False,
+        reply_markup: Dict[str, Any] | None = None,
     ) -> None:
         """메시지 전송을 fire-and-forget으로 실행한다."""
         if not self.enabled:
@@ -98,8 +162,40 @@ class TelegramNotifier:
             logger.warning("No running event loop for async notifier")
             return
         loop.create_task(
-            self.send_message(text, disable_notification=disable_notification),
+            self.send_message(
+                text,
+                disable_notification=disable_notification,
+                reply_markup=reply_markup,
+            ),
             name="telegram-send-message",
+        )
+
+    def send_document_background(
+        self,
+        *,
+        file_path: str,
+        caption: str = "",
+        filename: str = "",
+        disable_notification: bool = False,
+        reply_markup: Dict[str, Any] | None = None,
+    ) -> None:
+        """문서 전송을 fire-and-forget으로 실행한다."""
+        if not self.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("No running event loop for async document notifier")
+            return
+        loop.create_task(
+            self.send_document(
+                file_path=file_path,
+                caption=caption,
+                filename=filename,
+                disable_notification=disable_notification,
+                reply_markup=reply_markup,
+            ),
+            name="telegram-send-document",
         )
 
     def notify_critical_background(
@@ -154,24 +250,3 @@ class TelegramNotifier:
 
         text = "\n".join(lines)
         return await self.send_message(text, disable_notification=False)
-
-    def _send_blocking(self, url: str, encoded_payload: bytes) -> bool:
-        """블로킹 HTTP 요청을 실행한다."""
-        request = urllib.request.Request(  # nosec B310
-            url=url,
-            data=encoded_payload,
-            method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        timeout = self.connect_timeout_sec + self.read_timeout_sec
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
-                raw = response.read().decode("utf-8", errors="ignore")
-            payload: Dict[str, Any] = json.loads(raw or "{}")
-            ok = bool(payload.get("ok", False))
-            if not ok:
-                logger.warning("Telegram API returned not-ok: %s", payload)
-            return ok
-        except Exception as exc:
-            logger.warning("Telegram notify failed: %s", exc)
-            return False

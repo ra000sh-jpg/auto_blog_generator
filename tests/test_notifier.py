@@ -56,3 +56,51 @@ def test_daily_summary_without_idea_context_keeps_legacy_format():
     assert sent is True
     assert notifier.messages
     assert "🚨" not in notifier.messages[0]
+
+
+def test_send_document_uploads_txt_with_reply_markup(tmp_path, monkeypatch):
+    """TXT 첨부는 sendDocument multipart 요청으로 전송되어야 한다."""
+
+    captured = {}
+
+    class FakeResponse:
+        def json(self):
+            return {"ok": True}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        async def post(self, url, *, data=None, files=None, json=None):
+            del json
+            captured["url"] = url
+            captured["data"] = data
+            captured["files"] = files
+            return FakeResponse()
+
+    monkeypatch.setattr("modules.automation.notifier.httpx.AsyncClient", FakeClient)
+    draft_path = tmp_path / "draft.txt"
+    draft_path.write_text("초안 본문", encoding="utf-8")
+
+    notifier = TelegramNotifier(bot_token="token", chat_id="chat")
+    sent = asyncio.run(
+        notifier.send_document(
+            file_path=str(draft_path),
+            caption="초안 승인 요청",
+            filename="draft_job.txt",
+            reply_markup={"inline_keyboard": [[{"text": "승인", "callback_data": "x"}]]},
+        )
+    )
+
+    assert sent is True
+    assert captured["url"].endswith("/sendDocument")
+    assert captured["data"]["caption"] == "초안 승인 요청"
+    assert "inline_keyboard" in captured["data"]["reply_markup"]
+    assert captured["files"]["document"][0] == "draft_job.txt"

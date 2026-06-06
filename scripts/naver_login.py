@@ -20,6 +20,7 @@
 
 import asyncio
 import importlib
+import os
 import sys
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -97,14 +98,29 @@ async def main():
     print()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=[
+        browser_channel = (
+            os.getenv("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
+            or os.getenv("NAVER_BROWSER_CHANNEL", "").strip()
+        )
+        launch_options = {
+            "headless": False,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--start-maximized",
             ],
-        )
+        }
+        if browser_channel:
+            launch_options["channel"] = browser_channel
+
+        try:
+            browser = await p.chromium.launch(**launch_options)
+        except Exception as exc:
+            if not browser_channel:
+                raise
+            print(f"⚠️  브라우저 채널({browser_channel}) 실행 실패 - bundled Chromium으로 재시도합니다: {exc}")
+            launch_options.pop("channel", None)
+            browser = await p.chromium.launch(**launch_options)
 
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},

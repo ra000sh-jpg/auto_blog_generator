@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from modules.automation.job_store import JobConfig, JobStore
 from modules.automation.pipeline_service import PipelineService
 from modules.automation.time_utils import now_utc
+from modules.automation.worker import Worker, WorkerConfig
 from modules.uploaders.playwright_publisher import PublishResult
 from scripts import run_worker
 
@@ -44,6 +45,7 @@ async def _generate_fn(_job) -> Dict[str, Any]:
 
 def test_pipeline_generation_then_publication_split(tmp_path: Path):
     store = build_store(tmp_path)
+    store.set_system_setting("telegram_draft_approval_enabled", "false")
     due_now = now_utc()
     assert store.schedule_job(
         job_id="hybrid-job-1",
@@ -97,3 +99,61 @@ def test_run_worker_mode_accepts_publisher(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_worker.py", "--mode", "publisher"])
     args = run_worker.parse_args()
     assert args.mode == "publisher"
+
+
+def test_run_worker_required_tag_defaults_to_market_daily(tmp_path: Path, monkeypatch):
+    store = build_store(tmp_path, "hybrid_required_tag_default.db")
+    monkeypatch.delenv("SCHEDULER_MARKET_DAILY_ENABLED", raising=False)
+
+    assert run_worker._resolve_required_job_tag(store) == "market_daily"
+
+
+def test_run_worker_required_tag_can_be_disabled(tmp_path: Path):
+    store = build_store(tmp_path, "hybrid_required_tag_disabled.db")
+    store.set_system_setting("scheduler_market_daily_enabled", "false")
+
+    assert run_worker._resolve_required_job_tag(store) is None
+
+
+def test_worker_poll_respects_required_tag(tmp_path: Path):
+    store = build_store(tmp_path, "worker_required_tag.db")
+    due_now = now_utc()
+    assert store.schedule_job(
+        job_id="worker-legacy-job",
+        title="일반 잡",
+        seed_keywords=["legacy"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        tags=["not_market_daily"],
+    )
+    assert store.schedule_job(
+        job_id="worker-market-job",
+        title="시장 잡",
+        seed_keywords=["market"],
+        platform="naver",
+        persona_id="P4",
+        scheduled_at=due_now,
+        tags=["market_daily", "market_slot:kr_preopen"],
+    )
+
+    processed: List[str] = []
+
+    async def process_job(job):
+        processed.append(job.job_id)
+
+    worker = Worker(
+        job_store=store,
+        process_job=process_job,
+        config=WorkerConfig(max_concurrent_jobs=2, required_tag="market_daily"),
+    )
+
+    async def poll_once() -> None:
+        await worker._poll_and_execute()
+        await asyncio.sleep(0)
+
+    asyncio.run(poll_once())
+
+    assert processed == ["worker-market-job"]
+    assert store.get_job("worker-legacy-job").status == store.STATUS_QUEUED
+    assert store.get_job("worker-market-job").status == store.STATUS_RUNNING

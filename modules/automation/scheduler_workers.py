@@ -7,10 +7,51 @@ from datetime import datetime, timezone
 import logging
 from typing import TYPE_CHECKING, Any, Dict
 
+from .. import constants
+
 if TYPE_CHECKING:
     from .scheduler_service import SchedulerService
 
 logger = logging.getLogger(__name__)
+
+async def _reap_stale_running_jobs(
+    service: "SchedulerService",
+    *,
+    source: str,
+    max_jobs: int = 3,
+) -> None:
+    """lease timeout을 넘긴 running 잡을 retry_wait으로 되돌린다."""
+    if not service.job_store:
+        return
+    try:
+        stale_jobs = service.job_store.get_stale_running_jobs()
+    except Exception as exc:
+        logger.debug("Stale running job scan failed (%s): %s", source, exc, exc_info=True)
+        return
+
+    if not stale_jobs:
+        return
+
+    requeued = 0
+    affected_ids = []
+    for job in stale_jobs[: max(1, int(max_jobs))]:
+        try:
+            ok = service.job_store.requeue_stale_job(job.job_id, error_code="WORKER_CRASH")
+        except Exception as exc:
+            logger.warning("Stale job requeue failed (%s): %s", job.job_id, exc)
+            continue
+        if ok:
+            requeued += 1
+            affected_ids.append(job.job_id)
+
+    if requeued > 0:
+        logger.warning(
+            "Stale running jobs requeued by %s worker: %d/%d (%s)",
+            source,
+            requeued,
+            len(stale_jobs),
+            ", ".join(affected_ids[:5]),
+        )
 
 
 async def memory_worker_loop(service: "SchedulerService") -> None:
@@ -84,6 +125,7 @@ async def generator_worker_loop(service: "SchedulerService") -> None:
     consecutive_failures = 0
     try:
         while True:
+            await _reap_stale_running_jobs(service, source="generator")
             if service.job_store:
                 try:
                     # 데몬 생존 여부 판단을 위해 최신 하트비트를 기록한다.
@@ -121,6 +163,7 @@ async def publisher_worker_loop(service: "SchedulerService") -> None:
     consecutive_failures = 0
     try:
         while True:
+            await _reap_stale_running_jobs(service, source="publisher")
             if service.job_store:
                 paused_flag = service.job_store.get_system_setting("scheduler_paused", "")
                 if paused_flag == "1":
@@ -142,6 +185,45 @@ async def publisher_worker_loop(service: "SchedulerService") -> None:
             await asyncio.sleep(service.publisher_poll_seconds)
     except asyncio.CancelledError:
         logger.info("Publisher worker stopped")
+
+
+async def telegram_update_poll_loop(service: "SchedulerService") -> None:
+    """텔레그램 버튼/수정본 메시지를 주기적으로 수집한다."""
+    consecutive_failures = 0
+    poll_seconds = int(
+        getattr(
+            service,
+            "telegram_update_poll_seconds",
+            constants.DEFAULT_TELEGRAM_UPDATE_POLL_SECONDS,
+        )
+        or constants.DEFAULT_TELEGRAM_UPDATE_POLL_SECONDS
+    )
+    poll_seconds = max(5, poll_seconds)
+    logger.info("Telegram update poll loop started")
+    try:
+        while True:
+            try:
+                if not service.job_store:
+                    await asyncio.sleep(poll_seconds)
+                    continue
+
+                collected = await service._collect_telegram_pending_updates()
+                if collected > 0:
+                    logger.info(
+                        "Telegram update poll processed updates",
+                        extra={"stored_items": collected},
+                    )
+                consecutive_failures = 0
+            except Exception as exc:
+                consecutive_failures += 1
+                logger.warning(
+                    "Telegram update poll failed (%d): %s",
+                    consecutive_failures,
+                    exc,
+                )
+            await asyncio.sleep(poll_seconds)
+    except asyncio.CancelledError:
+        logger.info("Telegram update poll loop stopped")
 
 
 async def image_collector_worker_loop(service: "SchedulerService") -> None:

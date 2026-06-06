@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Optional
 
 import httpx
@@ -15,6 +16,21 @@ from .retry_helper import llm_retry
 
 logger = logging.getLogger(__name__)
 
+# DeepSeek Reasoner(<think>…</think>) 태그 제거 패턴
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+# deepseek-reasoner 등 reasoning 모델 식별 키워드
+_REASONING_MODEL_KEYWORDS = ("deepseek-r1", "deepseek-reasoner", "-r1")
+
+
+def _is_reasoning_model(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return any(kw in lowered for kw in _REASONING_MODEL_KEYWORDS)
+
+
+def _strip_thinking_tags(text: str) -> str:
+    return _THINK_TAG_RE.sub("", text).strip()
+
 
 class DeepSeekClient(BaseLLMClient):
     """OpenAI 호환 DeepSeek 클라이언트."""
@@ -24,7 +40,7 @@ class DeepSeekClient(BaseLLMClient):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "deepseek-chat",
+        model: str = constants.DEFAULT_DEEPSEEK_MODEL,
         timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     ):
         resolved_api_key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
@@ -74,8 +90,12 @@ class DeepSeekClient(BaseLLMClient):
         usage = data.get("usage", {})
         cached = int(usage.get("prompt_cache_hit_tokens", 0) or 0) > 0
 
+        raw_content = str(message.get("content", "")).strip()
+        if _is_reasoning_model(self.model):
+            raw_content = _strip_thinking_tags(raw_content)
+
         llm_response = LLMResponse(
-            content=str(message.get("content", "")).strip(),
+            content=raw_content,
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
             model=str(data.get("model", self.model)),
@@ -102,6 +122,8 @@ class DeepSeekClient(BaseLLMClient):
         max_retries: int = 3,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        retry_base_delay_sec: Optional[float] = None,
+        retry_max_delay_sec: Optional[float] = None,
     ) -> LLMResponse:
         attempts = max(1, max_retries)
         current_attempt = 0
@@ -124,7 +146,12 @@ class DeepSeekClient(BaseLLMClient):
         return await llm_retry(
             func=_execute,
             attempts=attempts,
-            base_delay=constants.LLM_RETRY_BASE_DELAY_SEC,
+            base_delay=(
+                float(retry_base_delay_sec)
+                if retry_base_delay_sec is not None
+                else constants.LLM_RETRY_BASE_DELAY_SEC
+            ),
+            max_delay=retry_max_delay_sec,
             logger=logger,
             provider=self.provider_name,
         )

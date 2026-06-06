@@ -87,6 +87,8 @@ class ClaudeClient(BaseLLMClient):
         max_retries: int = 3,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        retry_base_delay_sec: Optional[float] = None,
+        retry_max_delay_sec: Optional[float] = None,
     ) -> LLMResponse:
         """지수 백오프를 적용한 생성."""
         attempts = max(1, max_retries)
@@ -106,7 +108,12 @@ class ClaudeClient(BaseLLMClient):
         return await llm_retry(
             func=_execute,
             attempts=attempts,
-            base_delay=constants.LLM_RETRY_BASE_DELAY_SEC,
+            base_delay=(
+                float(retry_base_delay_sec)
+                if retry_base_delay_sec is not None
+                else constants.LLM_RETRY_BASE_DELAY_SEC
+            ),
+            max_delay=retry_max_delay_sec,
             logger=logger,
             provider=self.provider_name,
         )

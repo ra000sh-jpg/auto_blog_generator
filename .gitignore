@@ -45,4 +45,6 @@ auto_blog_integration_design.md
 # 로컬 개발 아티팩트
 .claude/
 auto_blog.db
+auto_blog.db-shm
+auto_blog.db-wal
 server_restart.log

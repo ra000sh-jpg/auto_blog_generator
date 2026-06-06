@@ -28,8 +28,9 @@ class WordPressPublisher(BasePublisher):
         image_points: Optional[List["ImageInsertionPoint"]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
-        del title, content, thumbnail, images, image_sources, image_points, tags, category
+        del title, content, thumbnail, images, image_sources, image_points, tags, category, publish_mode
         return PublishResult(
             success=False,
             error_code="PUBLISHER_NOT_IMPLEMENTED",

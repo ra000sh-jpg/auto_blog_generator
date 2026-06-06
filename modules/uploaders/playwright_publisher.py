@@ -23,6 +23,7 @@ import logging
 import os
 import random
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -42,6 +43,7 @@ from .publisher_constants import (
     AI_IMAGE_PREFIXES,
     THUMBNAIL_PLACEMENT_MODES,
     AI_TOGGLE_MODES,
+    DRAFT_SAVE_SELECTORS,
     TITLE_SELECTORS,
     BODY_SELECTORS,
     DRAFT_CANCEL_SELECTORS,
@@ -110,6 +112,8 @@ class PlaywrightPublisher:
         if raw_ai_toggle_mode not in self.AI_TOGGLE_MODES:
             raw_ai_toggle_mode = "force" if raw_force_ai_toggle in {"1", "true", "yes", "on"} else "metadata"
         self._ai_toggle_mode = raw_ai_toggle_mode
+        raw_publish_mode = str(os.getenv("NAVER_PUBLISH_MODE", "publish")).strip().lower()
+        self._publish_mode = raw_publish_mode if raw_publish_mode in {"publish", "draft"} else "publish"
         self._force_ai_toggle = self._ai_toggle_mode == "force"
         raw_post_verify = str(os.getenv("NAVER_AI_TOGGLE_POST_VERIFY", "true")).strip().lower()
         self._ai_toggle_post_verify = raw_post_verify in {"1", "true", "yes", "on"}
@@ -133,6 +137,40 @@ class PlaywrightPublisher:
             self._image_upload_target_width = max(320, min(1200, int(raw_width)))
         except Exception:
             self._image_upload_target_width = 800
+        self._postwrite_nav_timeout_ms = self._read_timeout_ms(
+            "NAVER_POSTWRITE_NAV_TIMEOUT_MS",
+            default=90_000,
+            min_value=30_000,
+            max_value=240_000,
+        )
+        self._postwrite_networkidle_timeout_ms = self._read_timeout_ms(
+            "NAVER_POSTWRITE_NETWORKIDLE_WAIT_MS",
+            default=12_000,
+            min_value=3_000,
+            max_value=60_000,
+        )
+        self._postwrite_nav_attempts = self._read_retry_count(
+            "NAVER_POSTWRITE_NAV_ATTEMPTS",
+            default=2,
+            min_value=1,
+            max_value=4,
+        )
+        self._browser_channel = (
+            os.getenv("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
+            or os.getenv("NAVER_BROWSER_CHANNEL", "").strip()
+        )
+        self._editor_preflight_enabled = self._read_bool_env(
+            "NAVER_EDITOR_PREFLIGHT",
+            default=False,
+        )
+        self._editor_preflight_strict = self._read_bool_env(
+            "NAVER_EDITOR_PREFLIGHT_STRICT",
+            default=True,
+        )
+        self._editor_preflight_dir = (
+            os.getenv("NAVER_EDITOR_PREFLIGHT_DIR", "data/editor_diagnostics").strip()
+            or "data/editor_diagnostics"
+        )
 
         # 리소스 (명시적 정리)
         self._playwright = None
@@ -220,6 +258,7 @@ class PlaywrightPublisher:
         image_points: Optional[List["ImageInsertionPoint"]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
         """
         블로그 포스트 발행.
@@ -233,6 +272,7 @@ class PlaywrightPublisher:
             image_points: 이미지 삽입 위치 정보 (마커 기반 배치용)
             tags: 발행 태그 목록 (네이버 태그 입력 필드에 주입)
             category: 발행 카테고리
+            publish_mode: 작업 단위 발행 모드(publish/draft). 없으면 환경변수 기본값 사용
 
         Returns:
             PublishResult
@@ -269,6 +309,7 @@ class PlaywrightPublisher:
                 image_points,
                 tags,
                 category,
+                publish_mode,
             )
 
         except PublishError as exc:
@@ -318,14 +359,29 @@ class PlaywrightPublisher:
             ) from e
 
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self._headless,
-            args=[
+        launch_options = {
+            "headless": self._headless,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
             ],
-        )
+        }
+        if self._browser_channel:
+            launch_options["channel"] = self._browser_channel
+
+        try:
+            self._browser = await self._playwright.chromium.launch(**launch_options)
+        except Exception as exc:
+            if not self._browser_channel:
+                raise
+            logger.warning(
+                "브라우저 채널(%s) 실행 실패, bundled chromium으로 폴백: %s",
+                self._browser_channel,
+                exc,
+            )
+            launch_options.pop("channel", None)
+            self._browser = await self._playwright.chromium.launch(**launch_options)
 
         session_state = self._session_state_path()
         self._context = await self._browser.new_context(
@@ -349,12 +405,16 @@ class PlaywrightPublisher:
         image_points: Optional[List["ImageInsertionPoint"]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
         """실제 발행 흐름 (네이버 스마트 에디터 ONE 기준)"""
         del image_sources
+        effective_publish_mode = str(publish_mode or self._publish_mode).strip().lower()
+        if effective_publish_mode not in {"publish", "draft"}:
+            effective_publish_mode = self._publish_mode
         write_url = BLOG_WRITE_URL.format(blog_id=self.blog_id)
 
-        await page.goto(write_url, wait_until="networkidle", timeout=45_000)
+        await self._open_write_page(page, write_url)
         await self._human_delay(3000, 5000)
 
         # 로그인 체크
@@ -389,6 +449,7 @@ class PlaywrightPublisher:
 
         # ── 에디터 준비 상태 확인 (지연/오버레이 복구) ───────────────
         await self._ensure_editor_ready(page)
+        await self._run_editor_preflight(page, stage="before_input")
 
         # ── 스마트 에디터 ONE: iframe 없이 직접 접근 ─────────────────
         # 제목 영역 클릭 및 입력
@@ -470,6 +531,13 @@ class PlaywrightPublisher:
 
         # ── AI 활용 설정 사전 점검 (필요 시 1회 자가복구) ──────────────
         await self._run_ai_toggle_prepublish_validation(page)
+
+        if effective_publish_mode == "draft":
+            draft_url = await self._save_current_post_as_draft(page)
+            if self._context is not None:
+                await self._context.storage_state(path=str(self._session_state_path()))
+            logger.info("Draft saved: %s", draft_url)
+            return PublishResult(success=True, url=draft_url)
 
         # ── 발행 버튼 클릭 (1단계: 설정 팝업 열기) ───────────────────
         # 상단 툴바 내에 있는 '발행' 텍스트 버튼 찾기
@@ -555,6 +623,126 @@ class PlaywrightPublisher:
         self._persist_ai_toggle_report(post_url)
 
         return PublishResult(success=True, url=post_url)
+
+    async def _save_current_post_as_draft(self, page) -> str:
+        """현재 작성 중인 글을 네이버 임시저장으로 저장한다."""
+        await self._dismiss_blocking_layer_popup(page)
+        save_button = None
+        matched_selector = ""
+        for selector in DRAFT_SAVE_SELECTORS:
+            try:
+                nodes = page.locator(selector)
+                count = await nodes.count()
+                if count == 0:
+                    continue
+                for index in range(min(count, 8)):
+                    candidate = nodes.nth(index)
+                    if not await candidate.is_visible():
+                        continue
+                    text = ""
+                    try:
+                        text = " ".join(str(await candidate.inner_text(timeout=500) or "").split())
+                    except Exception:
+                        pass
+                    if text and "저장" not in text:
+                        continue
+                    save_button = candidate
+                    matched_selector = selector
+                    break
+                if save_button is not None:
+                    break
+            except Exception:
+                continue
+
+        if save_button is None:
+            await self._save_screenshot(page, "draft_save_btn_not_found")
+            raise PublishError(
+                "임시저장 버튼을 찾을 수 없습니다.",
+                "ELEMENT_NOT_FOUND",
+                retryable=True,
+                context={"selectors": DRAFT_SAVE_SELECTORS, "current_url": page.url},
+            )
+
+        try:
+            await save_button.click(timeout=5_000)
+        except Exception:
+            await self._activate_toggle_target(page, save_button, aggressive=True)
+        logger.info("임시저장 버튼 클릭: %s", matched_selector)
+        await self._human_delay(1500, 2500)
+        await self._wait_for_draft_save_feedback(page)
+        return await self._build_draft_result_url(page)
+
+    async def _wait_for_draft_save_feedback(self, page) -> None:
+        """임시저장 후 짧게 저장 상태 피드백을 기다린다."""
+        feedback_patterns = (
+            "저장되었습니다",
+            "임시저장",
+            "저장 완료",
+            "자동저장",
+        )
+        for _ in range(10):
+            try:
+                body_text = await page.locator("body").inner_text(timeout=1_000)
+            except Exception:
+                body_text = ""
+            if any(pattern in str(body_text) for pattern in feedback_patterns):
+                return
+            await asyncio.sleep(0.5)
+
+    async def _build_draft_result_url(self, page) -> str:
+        """임시저장 결과 표시용 URL을 구성한다."""
+        try:
+            current_url = str(page.url or "").strip()
+        except Exception:
+            current_url = ""
+        if current_url:
+            return current_url
+        return f"https://blog.naver.com/{self.blog_id}/postwrite#draft-saved"
+
+    async def _open_write_page(self, page, write_url: str) -> None:
+        """글쓰기 페이지 진입을 탄력적으로 수행한다."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self._postwrite_nav_attempts + 1):
+            try:
+                await page.goto(
+                    write_url,
+                    wait_until="domcontentloaded",
+                    timeout=self._postwrite_nav_timeout_ms,
+                )
+                # 네이버 write 페이지는 서드파티 요청이 길어 networkidle 대기가 잦게 실패한다.
+                with suppress(Exception):
+                    await page.wait_for_load_state(
+                        "networkidle",
+                        timeout=self._postwrite_networkidle_timeout_ms,
+                    )
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "postwrite 진입 실패 (attempt %d/%d): %s",
+                    attempt,
+                    self._postwrite_nav_attempts,
+                    exc,
+                )
+                if attempt >= self._postwrite_nav_attempts:
+                    break
+                # 다음 시도 전 blog 메인으로 짧게 재진입해 세션 상태를 안정화한다.
+                try:
+                    await page.goto(
+                        f"https://blog.naver.com/{self.blog_id}",
+                        wait_until="domcontentloaded",
+                        timeout=min(45_000, self._postwrite_nav_timeout_ms),
+                    )
+                except Exception:
+                    pass
+                await self._human_delay(800, 1600)
+
+        raise PublishError(
+            f"글쓰기 페이지 진입 실패: {last_error}",
+            "NETWORK_TIMEOUT",
+            retryable=True,
+            context={"write_url": write_url, "attempts": self._postwrite_nav_attempts},
+        )
 
     async def _dismiss_existing_draft_popup(self, page, wait_sec: float = 8.0) -> None:
         """작성 중인 글 복구 팝업이 뜨면 '취소'를 눌러 새 글 작성으로 진입한다."""
@@ -767,6 +955,50 @@ class PlaywrightPublisher:
                     logger.warning("에디터 준비 재시도 중 reload 실패: %s", exc)
 
         logger.warning("에디터 준비 상태 확인 실패(후속 셀렉터 단계로 계속 진행)")
+
+    async def _run_editor_preflight(self, page, stage: str) -> None:
+        """현재 에디터 화면 구조를 사전 진단한다."""
+        if not self._editor_preflight_enabled:
+            return
+
+        try:
+            from .editor_diagnostics import diagnose_editor_page
+
+            report = await diagnose_editor_page(
+                page,
+                stage=stage,
+                output_dir=self._editor_preflight_dir,
+                save_screenshot=True,
+            )
+        except Exception as exc:
+            logger.warning("네이버 에디터 사전 진단 실패: %s", exc)
+            if self._editor_preflight_strict:
+                raise PublishError(
+                    f"네이버 에디터 사전 진단 실행 실패: {exc}",
+                    "ELEMENT_NOT_FOUND",
+                    retryable=True,
+                    context={"stage": stage},
+                ) from exc
+            return
+
+        logger.info(
+            "네이버 에디터 사전 진단 완료: status=%s report=%s",
+            report.status,
+            report.report_path,
+        )
+        if report.status == "unhealthy" and self._editor_preflight_strict:
+            raise PublishError(
+                "네이버 에디터 사전 진단 실패",
+                "ELEMENT_NOT_FOUND",
+                retryable=True,
+                context={
+                    "stage": stage,
+                    "report_path": report.report_path,
+                    "screenshot_path": report.screenshot_path,
+                    "failures": report.failures,
+                    "warnings": report.warnings,
+                },
+            )
 
     async def _upload_thumbnail(self, page, path: str):
         """썸네일 업로드 (실패해도 발행은 계속 진행)."""
@@ -1626,15 +1858,24 @@ class PlaywrightPublisher:
         except Exception:
             return False
 
+    _AI_PROVIDER_TOKENS = frozenset((
+        "together", "fal", "openai", "dashscope", "huggingface", "pollinations",
+    ))
+
     def _is_ai_generated_image(self, image_path: str) -> bool:
         """메타데이터 우선으로 AI 생성 이미지를 판별한다."""
         source_meta = self._get_image_source_meta(image_path)
         source_kind = str(source_meta.get("kind", "unknown")).strip().lower()
+        provider = str(source_meta.get("provider", "")).strip().lower()
         if source_kind:
-            if source_kind == "ai":
+            # "ai", "ai_generated" 등
+            if source_kind == "ai" or source_kind.startswith("ai_"):
                 return True
-            if source_kind in {"stock", "placeholder", "manual"}:
+            if source_kind == "stock" or source_kind == "manual":
                 return False
+            # "placeholder"지만 AI 프로바이더로 생성된 이미지
+            if source_kind == "placeholder":
+                return any(tok in provider for tok in self._AI_PROVIDER_TOKENS)
 
         # 하위 호환: 메타데이터가 비어 있으면 파일명 규칙으로 폴백한다.
         filename = Path(str(image_path)).name.strip().lower()
@@ -1680,17 +1921,22 @@ class PlaywrightPublisher:
         }
 
     @staticmethod
-    def _has_selected_class(class_text: str) -> bool:
-        """클래스 문자열에 선택/활성(ON) 상태가 포함됐는지 검사한다."""
+    def _has_selected_class(class_text: str, *, selected_class_is_on: bool = True) -> bool:
+        """클래스 문자열에 AI 토글 ON 상태가 포함됐는지 검사한다."""
         normalized = f" {str(class_text or '').strip().lower()} "
-        return (
-            " se-is-selected " in normalized
-            or " is-selected " in normalized
-            or " is-on " in normalized
+        explicit_on = (
+            " is-on " in normalized
+            or " se-is-on " in normalized
             or " on " in normalized
             or " checked " in normalized
-            or " active " in normalized
+            or " is-checked " in normalized
+            or " se-is-checked " in normalized
         )
+        if explicit_on:
+            return True
+        if not selected_class_is_on:
+            return False
+        return " se-is-selected " in normalized or " is-selected " in normalized
 
     @staticmethod
     def _read_retention_limit(env_name: str, default: int) -> int:
@@ -1702,8 +1948,51 @@ class PlaywrightPublisher:
         except Exception:
             return max(1, int(default))
 
+    @staticmethod
+    def _read_timeout_ms(
+        env_name: str,
+        default: int,
+        min_value: int,
+        max_value: int,
+    ) -> int:
+        """밀리초 타임아웃 환경변수를 안전하게 읽는다."""
+        try:
+            raw = str(os.getenv(env_name, str(default))).strip()
+            value = int(raw)
+            return max(min_value, min(max_value, value))
+        except Exception:
+            return max(min_value, min(max_value, int(default)))
+
+    @staticmethod
+    def _read_bool_env(env_name: str, default: bool = False) -> bool:
+        """불리언 환경변수를 안전하게 읽는다."""
+        raw = os.getenv(env_name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _read_retry_count(
+        env_name: str,
+        default: int,
+        min_value: int,
+        max_value: int,
+    ) -> int:
+        """재시도 횟수 환경변수를 안전하게 읽는다."""
+        try:
+            raw = str(os.getenv(env_name, str(default))).strip()
+            value = int(raw)
+            return max(min_value, min(max_value, value))
+        except Exception:
+            return max(min_value, min(max_value, int(default)))
+
     @classmethod
-    def _is_ai_toggle_on_snapshot(cls, snapshot: Dict[str, Any]) -> bool:
+    def _is_ai_toggle_on_snapshot(
+        cls,
+        snapshot: Dict[str, Any],
+        *,
+        selected_class_is_on: bool = True,
+    ) -> bool:
         """토글 DOM 스냅샷을 기준으로 ON 상태를 판정한다."""
         class_fields = [
             str(snapshot.get("buttonClass", "")),
@@ -1711,7 +2000,7 @@ class PlaywrightPublisher:
             str(snapshot.get("markClass", "")),
             str(snapshot.get("toggleClass", "")),
         ]
-        if any(cls._has_selected_class(value) for value in class_fields):
+        if any(cls._has_selected_class(value, selected_class_is_on=selected_class_is_on) for value in class_fields):
             return True
 
         attr_fields = [
@@ -1909,12 +2198,17 @@ class PlaywrightPublisher:
         except Exception:
             return
 
-    async def _read_selected_image_ai_toggle_state(self, page) -> Dict[str, Any]:
+    async def _read_selected_image_ai_toggle_state(
+        self,
+        page,
+        *,
+        selected_class_is_on: bool = True,
+    ) -> Dict[str, Any]:
         """현재 선택된 이미지 컴포넌트의 AI 토글 상태를 읽는다."""
         try:
             payload = await page.evaluate(
                 """
-                () => {
+                ({ selectedClassIsOn }) => {
                   const components = Array.from(
                     document.querySelectorAll(
                       ".se-section-image, .se-component.se-image, [class*='se-section-image'], [class*='se-component-image'], [class*='se-image']"
@@ -1967,14 +2261,21 @@ class PlaywrightPublisher:
                     if (!node) return false;
                     const cls = ` ${String(node.className || "").toLowerCase()} `;
                     if (
-                      cls.includes(" se-is-selected ")
-                      || cls.includes(" is-selected ")
-                      || cls.includes(" is-on ")
+                      cls.includes(" is-on ")
                       || cls.includes(" se-is-on ")
                       || cls.includes(" on ")
-                      || cls.includes(" active ")
                       || cls.includes(" checked ")
-                      || cls.includes(" enabled ")
+                      || cls.includes(" is-checked ")
+                      || cls.includes(" se-is-checked ")
+                    ) {
+                      return true;
+                    }
+                    if (
+                      selectedClassIsOn
+                      && (
+                        cls.includes(" se-is-selected ")
+                        || cls.includes(" is-selected ")
+                      )
                     ) {
                       return true;
                     }
@@ -2012,11 +2313,15 @@ class PlaywrightPublisher:
                     sectionClass: String((section && section.className) || ""),
                   };
                 }
-                """
+                """,
+                {"selectedClassIsOn": bool(selected_class_is_on)},
             )
             if not isinstance(payload, dict):
                 return {"found": False, "on": False, "button_class": "", "section_class": ""}
-            normalized_on = bool(payload.get("on")) or self._is_ai_toggle_on_snapshot(payload)
+            normalized_on = bool(payload.get("on")) or self._is_ai_toggle_on_snapshot(
+                payload,
+                selected_class_is_on=bool(selected_class_is_on),
+            )
             return {
                 "found": bool(payload.get("found")),
                 "on": normalized_on,
@@ -2114,8 +2419,21 @@ class PlaywrightPublisher:
                 )
 
             if not should_toggle:
-                state = await self._read_selected_image_ai_toggle_state(page)
+                state = await self._read_selected_image_ai_toggle_state(
+                    page,
+                    selected_class_is_on=False,
+                )
                 actual_on = bool(state["on"]) if state["found"] else None
+                note = "skip_non_ai" if mode == "metadata" else "skip_mode_off"
+                if actual_on is True:
+                    attempts += 1
+                    turned_off = await self._ensure_ai_usage_toggle_off(page)
+                    state = await self._read_selected_image_ai_toggle_state(
+                        page,
+                        selected_class_is_on=False,
+                    )
+                    actual_on = bool(state["on"]) if state["found"] else False
+                    note = "off_repaired" if turned_off and actual_on is False else "off_repair_failed"
                 logger.info(
                     "AI 활용 설정 생략: %s (location=%s, kind=%s, provider=%s, actual_on=%s)",
                     image_path,
@@ -2132,7 +2450,7 @@ class PlaywrightPublisher:
                     provider=provider,
                     expected_on=False,
                     actual_on=actual_on,
-                    note="skip_non_ai" if mode == "metadata" else "skip_mode_off",
+                    note=note,
                     attempts=attempts,
                 )
                 return
@@ -2487,7 +2805,6 @@ class PlaywrightPublisher:
                           || cls.includes(" is-on ")
                           || cls.includes(" se-is-on ")
                           || cls.includes(" on ")
-                          || cls.includes(" active ")
                           || cls.includes(" checked ")
                           || cls.includes(" enabled ")
                         ) {
@@ -2871,6 +3188,38 @@ class PlaywrightPublisher:
             await asyncio.sleep(0.25)
         return False
 
+    async def _ensure_ai_usage_toggle_off(self, page) -> bool:
+        """AI 활용 설정 토글을 OFF 상태로 만든다."""
+        for _ in range(2):
+            try:
+                state = await self._read_selected_image_ai_toggle_state(
+                    page,
+                    selected_class_is_on=False,
+                )
+                if bool(state.get("found")) and not bool(state.get("on")):
+                    return True
+            except Exception:
+                pass
+
+            try:
+                changed = await self._toggle_ai_usage_from_selected_component_to_state(
+                    page,
+                    target_on=False,
+                    selected_class_is_on=False,
+                )
+                await asyncio.sleep(0.35)
+                if changed:
+                    state = await self._read_selected_image_ai_toggle_state(
+                        page,
+                        selected_class_is_on=False,
+                    )
+                    if bool(state.get("found")) and not bool(state.get("on")):
+                        return True
+            except Exception:
+                pass
+
+        return False
+
     async def _click_selected_image_ai_hotspot(self, page) -> bool:
         """선택 이미지의 우하단 AI 토글 예상 위치를 좌표 클릭한다."""
         try:
@@ -2900,6 +3249,110 @@ class PlaywrightPublisher:
         except Exception:
             return False
 
+    async def _toggle_ai_usage_from_selected_component_to_state(
+        self,
+        page,
+        *,
+        target_on: bool,
+        selected_class_is_on: bool = True,
+    ) -> bool:
+        """선택 이미지 카드 내부 AI 활용 토글을 목표 상태로 전환한다."""
+        try:
+            payload = await page.evaluate(
+                """
+                ({ targetOn, selectedClassIsOn }) => {
+                  const isOn = (node) => {
+                    if (!node) return false;
+                    const className = ` ${String(node.className || "").toLowerCase()} `;
+                    if (
+                      className.includes(" is-on ")
+                      || className.includes(" se-is-on ")
+                      || className.includes(" on ")
+                      || className.includes(" checked ")
+                      || className.includes(" is-checked ")
+                      || className.includes(" se-is-checked ")
+                    ) {
+                      return true;
+                    }
+                    if (
+                      selectedClassIsOn
+                      && (
+                        className.includes(" se-is-selected ")
+                        || className.includes(" is-selected ")
+                      )
+                    ) {
+                      return true;
+                    }
+                    const attrs = [
+                      String(node.getAttribute("aria-checked") || "").toLowerCase(),
+                      String(node.getAttribute("aria-pressed") || "").toLowerCase(),
+                      String(node.getAttribute("data-checked") || "").toLowerCase(),
+                    ];
+                    if (attrs.includes("true")) return true;
+                    const input = node.matches && node.matches("input[type='checkbox']")
+                      ? node
+                      : (node.querySelector ? node.querySelector("input[type='checkbox']") : null);
+                    return Boolean(input && input.checked);
+                  };
+                  const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === "none" || style.visibility === "hidden") return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                  };
+                  const dispatchMouse = (el) => {
+                    const events = ["pointerdown", "mousedown", "mouseup", "click"];
+                    for (const type of events) {
+                      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true }));
+                    }
+                  };
+
+                  const imageComponents = Array.from(
+                    document.querySelectorAll(
+                      ".se-section-image, .se-component.se-image, [class*='se-section-image'], [class*='se-component-image'], [class*='se-image']"
+                    )
+                  ).filter((el) => el.querySelector("img[src]"));
+                  if (imageComponents.length === 0) return { found: false, on: false };
+
+                  const selected = imageComponents.find((el) => /selected|focus|active/.test(String(el.className || "").toLowerCase()));
+                  const component = selected || imageComponents[imageComponents.length - 1];
+                  const markButton = component.querySelector(
+                    ".se-set-ai-mark-button:not([class*='wrapper']), [class*='ai-mark-button']:not([class*='wrapper'])"
+                  );
+                  const toggleButton = component.querySelector(".se-set-ai-mark-button-toggle, [class*='ai-mark-button-toggle']");
+                  const wrapper = component.querySelector(".se-set-ai-mark-button-wrapper, [class*='ai-mark-button-wrapper']");
+                  if (!markButton && !toggleButton && !wrapper) {
+                    return { found: false, on: false };
+                  }
+
+                  const currentOn = Boolean(isOn(markButton) || isOn(toggleButton) || isOn(wrapper));
+                  if (currentOn === Boolean(targetOn)) {
+                    return { found: true, on: currentOn };
+                  }
+
+                  const clickTargets = [toggleButton, wrapper, markButton].filter(Boolean);
+                  for (const target of clickTargets) {
+                    if (!isVisible(target)) continue;
+                    dispatchMouse(target);
+                    const nextOn = Boolean(isOn(markButton) || isOn(toggleButton) || isOn(wrapper) || isOn(target));
+                    if (nextOn === Boolean(targetOn)) {
+                      return { found: true, on: nextOn };
+                    }
+                  }
+
+                  return { found: true, on: Boolean(isOn(markButton) || isOn(toggleButton) || isOn(wrapper)) };
+                }
+                """,
+                {
+                    "targetOn": bool(target_on),
+                    "selectedClassIsOn": bool(selected_class_is_on),
+                },
+            )
+            return bool(payload and payload.get("found") and bool(payload.get("on")) is bool(target_on))
+        except Exception:
+            return False
+
     async def _toggle_ai_usage_from_selected_component(self, page) -> bool:
         """선택된 이미지 카드 내부의 AI 활용 토글을 직접 ON으로 전환한다."""
         try:
@@ -2914,7 +3367,6 @@ class PlaywrightPublisher:
                       || className.includes(" is-selected ")
                       || className.includes(" is-on ")
                       || className.includes(" on ")
-                      || className.includes(" active ")
                     ) {
                       return true;
                     }
@@ -3145,7 +3597,7 @@ class PlaywrightPublisher:
                   const hasOnClass = (el) => {
                     if (!el) return false;
                     const className = String(el.className || "").toLowerCase();
-                    return /(on|active|checked|selected|enabled|is-on)/.test(className);
+                    return /(\\bis-on\\b|\\bon\\b|checked|enabled|se-is-selected|is-selected)/.test(className);
                   };
                   const hasCheckedInput = (el) => {
                     if (!el) return false;

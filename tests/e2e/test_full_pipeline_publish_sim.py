@@ -168,6 +168,7 @@ def test_full_pipeline_publish_sim(tmp_path: Path):
     """온보딩 Voice Profile + Safety Guard + 발행 직전 payload 덤프를 E2E로 검증한다."""
     db_path = tmp_path / "full_pipeline_e2e.db"
     store = JobStore(str(db_path), config=JobConfig(max_llm_calls_per_job=20))
+    store.set_system_setting("telegram_draft_approval_enabled", "false")
 
     # 온보딩에서 저장된 페르소나(질문지+MBTI 혼합 결과)를 DB에 주입한다.
     voice_profile = {
@@ -218,11 +219,20 @@ def test_full_pipeline_publish_sim(tmp_path: Path):
     draft = _build_long_content(title)
     seo_refined = f"{draft}\n실전 적용 순서는 환경 측정 → 키캡/축 점검 → 일주일 검증입니다.\n"
     rewritten_with_fact_drift = seo_refined.replace("42%", "55%")
+    pre_analysis_json = (
+        '{"reader_current_knowledge":"키보드 축/배열 기본 지식 보유",'
+        '"reader_misconceptions":["비싼 키보드면 무조건 좋다"],'
+        '"reader_top_questions":["어떤 축이 업무에 맞는가","소음은 얼마나 줄일 수 있는가","예산 대비 체감차이는?"],'
+        '"emotional_curve":{"opening_emotion":"호기심","turning_point":"체험 비교","closing_emotion":"확신"},'
+        '"recommended_structure":[{"h2":"핵심 결론","role":"문제정의"},{"h2":"체크리스트","role":"실행"}]}'
+    )
     fake_outputs = [
+        pre_analysis_json,
         draft,
         seo_refined,
         '{"score": 91, "issues": [], "summary": "quality pass"}',
         rewritten_with_fact_drift,
+        seo_refined,
         '{"thumbnail":{"prompt":"키보드 썸네일","concept":"키보드 책상"},'
         '"content_images":[{"prompt":"타건 장면","concept":"손과 키보드","after_section":"핵심 결론","type":"illustration"}]}',
     ]
@@ -269,4 +279,3 @@ def test_full_pipeline_publish_sim(tmp_path: Path):
 
     assert updated.quality_snapshot.get("pipeline_layers", {}).get("voice_rewrite_applied") is False
     print("ALL PASSED: full pipeline publish simulation")
-

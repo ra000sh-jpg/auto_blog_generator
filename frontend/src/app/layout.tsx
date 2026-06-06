@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import UpdateButton from "@/components/update-button";
+import { NAV_LABEL } from "@/lib/labels";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Auto Blog Dashboard",
+  title: "자동 블로그 대시보드",
   description: "FastAPI + Next.js 기반 자동 블로그 대시보드",
 };
 
@@ -22,25 +22,24 @@ export default function RootLayout({
               <div className="font-[family-name:var(--font-heading)] text-lg font-semibold tracking-tight">
                 Auto Blog Control
               </div>
-              <nav className="flex items-center gap-2 text-sm font-medium sm:gap-3">
-                <UpdateButton />
+              <nav className="flex flex-wrap items-center gap-2 text-sm font-medium sm:gap-3">
                 <Link
                   href="/"
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 transition hover:border-slate-400"
                 >
-                  Dashboard
+                  {NAV_LABEL.dashboard}
                 </Link>
                 <Link
                   href="/jobs"
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 transition hover:border-slate-400"
                 >
-                  Jobs
+                  {NAV_LABEL.jobs}
                 </Link>
                 <Link
                   href="/settings"
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 transition hover:border-slate-400"
                 >
-                  Settings
+                  {NAV_LABEL.settings}
                 </Link>
               </nav>
             </div>

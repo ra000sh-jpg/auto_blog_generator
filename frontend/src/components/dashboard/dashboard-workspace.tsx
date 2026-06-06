@@ -181,12 +181,12 @@ export function DashboardWorkspace({
                             {tab === "magic" ? (
                                 <>
                                     <Zap className="h-3 w-3" />
-                                    Magic Input
+                                    빠른 입력
                                 </>
                             ) : (
                                 <>
                                     <BookOpen className="h-3 w-3" />
-                                    Idea Vault
+                                    아이디어 창고
                                     {(ideaVaultStats?.pending ?? 0) > 0 && (
                                         <span className="ml-0.5 rounded-full bg-purple-500 px-1.5 text-white text-xs">
                                             {ideaVaultStats?.pending}
@@ -223,7 +223,7 @@ export function DashboardWorkspace({
                         {advancedOpen && (
                             <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4 sm:grid-cols-2">
                                 <label className="block">
-                                    <span className="mb-1 block text-xs font-medium text-slate-600">Persona</span>
+                                    <span className="mb-1 block text-xs font-medium text-slate-600">페르소나</span>
                                     <select
                                         value={advancedPersonaId}
                                         onChange={(e) => setAdvancedPersonaId(e.target.value)}
@@ -237,7 +237,7 @@ export function DashboardWorkspace({
                                     </select>
                                 </label>
                                 <label className="block">
-                                    <span className="mb-1 block text-xs font-medium text-slate-600">Topic</span>
+                                    <span className="mb-1 block text-xs font-medium text-slate-600">토픽</span>
                                     <select
                                         value={advancedTopicMode}
                                         onChange={(e) => setAdvancedTopicMode(e.target.value)}
@@ -251,7 +251,7 @@ export function DashboardWorkspace({
                                     </select>
                                 </label>
                                 <label className="block">
-                                    <span className="mb-1 block text-xs font-medium text-slate-600">Scheduled At</span>
+                                    <span className="mb-1 block text-xs font-medium text-slate-600">예약 시각</span>
                                     <input
                                         type="datetime-local"
                                         value={advancedScheduleAt}
@@ -260,7 +260,7 @@ export function DashboardWorkspace({
                                     />
                                 </label>
                                 <label className="block">
-                                    <span className="mb-1 block text-xs font-medium text-slate-600">Keywords Override</span>
+                                    <span className="mb-1 block text-xs font-medium text-slate-600">키워드 지정</span>
                                     <input
                                         value={advancedKeywordsText}
                                         onChange={(e) => setAdvancedKeywordsText(e.target.value)}
@@ -269,7 +269,7 @@ export function DashboardWorkspace({
                                     />
                                 </label>
                                 <label className="block sm:col-span-2">
-                                    <span className="mb-1 block text-xs font-medium text-slate-600">Category Override</span>
+                                    <span className="mb-1 block text-xs font-medium text-slate-600">카테고리 지정</span>
                                     <input
                                         value={advancedCategory}
                                         onChange={(e) => setAdvancedCategory(e.target.value)}

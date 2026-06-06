@@ -80,6 +80,7 @@ class NaverPublisher(BasePublisher):
         image_points: Optional[List["ImageInsertionPoint"]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
         return await self._publisher.publish(
             title=title,
@@ -90,6 +91,7 @@ class NaverPublisher(BasePublisher):
             image_points=image_points,
             tags=tags,
             category=category,
+            publish_mode=publish_mode,
         )
 
     async def test_connection(self) -> bool:

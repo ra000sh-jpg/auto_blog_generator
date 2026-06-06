@@ -79,6 +79,10 @@ export default function EngineSettingsCard({
     const [trafficFeedbackStrongMode, setTrafficFeedbackStrongMode] = useState(
         Boolean(initialRouterSettings.settings.traffic_feedback_strong_mode)
     );
+    const [vlmEnabled, setVlmEnabled] = useState(Boolean(initialRouterSettings.settings.vlm_enabled));
+    const [vlmModel, setVlmModel] = useState(
+        String(initialRouterSettings.settings.vlm_model || "meta/llama-3.2-90b-vision-instruct")
+    );
     const [imagesPerPostMin, setImagesPerPostMin] = useState(
         Math.max(0, Math.min(4, Number(initialRouterSettings.settings.images_per_post_min || 0)))
     );
@@ -93,6 +97,9 @@ export default function EngineSettingsCard({
     );
     const [imageModelMatrix, setImageModelMatrix] = useState<Array<Record<string, unknown>>>(
         initialRouterSettings.matrix.image_models || []
+    );
+    const [vlmModelMatrix, setVlmModelMatrix] = useState<Array<Record<string, unknown>>>(
+        initialRouterSettings.matrix.vlm_models || []
     );
 
     const [routerQuote, setRouterQuote] = useState<RouterQuoteResponse | null>({
@@ -178,6 +185,10 @@ export default function EngineSettingsCard({
         return map;
     }, [categoryAllocations]);
 
+    const hasNvidiaKey = useMemo(() => {
+        return Boolean(textApiKeys["nvidia"] || textApiMasks["nvidia"]);
+    }, [textApiKeys, textApiMasks]);
+
     const parserModelLabel = useMemo(() => {
         const role = routerQuote?.roles?.parser;
         if (!role || typeof role !== "object") return "-";
@@ -226,6 +237,8 @@ export default function EngineSettingsCard({
                     image_topic_quota_overrides: imageTopicQuotaOverrides,
                     traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                     image_enabled: imageEnabled,
+                    vlm_enabled: vlmEnabled,
+                    vlm_model: vlmModel,
                     images_per_post: imagesPerPostMax,
                     images_per_post_min: imagesPerPostMin,
                     images_per_post_max: imagesPerPostMax,
@@ -266,7 +279,7 @@ export default function EngineSettingsCard({
             }
         }, 350);
         return () => clearTimeout(timer);
-    }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageAiEngine, imageTopicQuotaOverrides, trafficFeedbackStrongMode, imageEnabled, imagesPerPostMin, imagesPerPostMax]);
+    }, [strategyMode, textApiKeys, imageApiKeys, imageEngine, imageAiEngine, imageTopicQuotaOverrides, trafficFeedbackStrongMode, imageEnabled, vlmEnabled, vlmModel, imagesPerPostMin, imagesPerPostMax]);
 
     function handleTextKeyChange(keyId: string, value: string) {
         setTextApiKeys((prev) => ({ ...prev, [keyId]: value }));
@@ -314,6 +327,8 @@ export default function EngineSettingsCard({
                 image_topic_quota_overrides: finalOverrides,
                 traffic_feedback_strong_mode: trafficFeedbackStrongMode,
                 image_enabled: imageEnabled,
+                vlm_enabled: vlmEnabled,
+                vlm_model: vlmModel,
                 images_per_post: imagesPerPostMax,
                 images_per_post_min: imagesPerPostMin,
                 images_per_post_max: imagesPerPostMax,
@@ -328,12 +343,15 @@ export default function EngineSettingsCard({
             setImageTopicQuotaOverrides((saved.settings.image_topic_quota_overrides as Record<string, string>) || {});
             setDirtyTopicKeys(new Set());
             setTrafficFeedbackStrongMode(Boolean(saved.settings.traffic_feedback_strong_mode));
+            setVlmEnabled(Boolean(saved.settings.vlm_enabled));
+            setVlmModel(String(saved.settings.vlm_model || "meta/llama-3.2-90b-vision-instruct"));
             setImagesPerPostMin(Math.max(0, Math.min(4, Number(saved.settings.images_per_post_min || 0))));
             setImagesPerPostMax(Math.max(0, Math.min(4, Number(
                 saved.settings.images_per_post_max ?? saved.settings.images_per_post ?? 1
             ))));
             setTextModelMatrix(saved.matrix.text_models || []);
             setImageModelMatrix(saved.matrix.image_models || []);
+            setVlmModelMatrix(saved.matrix.vlm_models || []);
             setCompetitionState(saved.competition || competitionState);
             setChallengerModel(String(saved.competition?.challenger_model || challengerModel));
             setRouterQuote((prev) => ({
@@ -449,6 +467,54 @@ export default function EngineSettingsCard({
                         <p className="mt-2 text-[11px] text-slate-400">
                             설계/분석/다듬기 단계는 자동으로 저가 모델을 우선 사용하며, 월 비용은 일일 편수 기준으로 계산됩니다.
                         </p>
+                        {hasNvidiaKey && (
+                            <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                <p className="text-[11px] text-emerald-700">
+                                    <strong>NVIDIA 이용권 감지</strong> — 품질 92–94점 모델(Llama 3.3 70B · DeepSeek R1 · Nemotron 70B)이 무료로 사용 가능합니다.
+                                    <strong> 균형 또는 품질우선 모드를 선택해도 텍스트 비용은 동일하게 0원</strong>입니다.
+                                </p>
+                                <div className="mt-2 rounded-md border border-emerald-200 bg-white/70 px-2 py-2">
+                                    <label className="flex items-center gap-2 text-[11px] text-emerald-800">
+                                        <input
+                                            type="checkbox"
+                                            checked={vlmEnabled}
+                                            onChange={(event) => setVlmEnabled(event.target.checked)}
+                                            className="h-3.5 w-3.5 rounded border-emerald-400"
+                                        />
+                                        발행 후 시각 품질 자동 평가 (NVIDIA VLM)
+                                    </label>
+                                    {vlmEnabled && (
+                                        <div className="mt-2">
+                                            <p className="mb-1 text-[10px] text-emerald-700">VLM 모델</p>
+                                            <input
+                                                type="text"
+                                                value={vlmModel}
+                                                onChange={(event) => setVlmModel(event.target.value)}
+                                                list="vlm-model-options"
+                                                className="w-full rounded-md border border-emerald-300 bg-white px-2 py-1 text-[11px] text-slate-700"
+                                                placeholder="meta/llama-3.2-90b-vision-instruct"
+                                            />
+                                            <datalist id="vlm-model-options">
+                                                {vlmModelMatrix.map((item) => {
+                                                    const model = String(item.model || "").trim();
+                                                    if (!model) return null;
+                                                    const label = String(item.label || model).trim();
+                                                    const status = String(item.status || "").trim();
+                                                    const optionLabel = status ? `${label} (${status})` : label;
+                                                    return (
+                                                        <option
+                                                            key={`${String(item.provider || "")}:${model}`}
+                                                            value={model}
+                                                            label={optionLabel}
+                                                        />
+                                                    );
+                                                })}
+                                            </datalist>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     <div className="grid gap-3 sm:grid-cols-2">

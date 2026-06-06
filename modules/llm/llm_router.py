@@ -6,16 +6,19 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ..automation.job_store import JobStore
+from .. import constants
 from ..constants import DEFAULT_FALLBACK_CATEGORY
 from ..config import LLMConfig
+from .vlm_router import VLM_MODEL_MATRIX
 
 if TYPE_CHECKING:
     from ..automation.job_store import Job
 
-USD_TO_KRW = 1350.0
+USD_TO_KRW = 1400.0
 
 # 토큰 사용량은 역할별 평균치(보수적 추정)
 TOKEN_BUDGET = {
@@ -62,7 +65,7 @@ class ImageModelSpec:
     category: str
 
 
-# 가격 기준일: 2026-02-27
+# 가격 기준일: 2026-06-05
 # 출처:
 #   DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
 #   Gemini: https://ai.google.dev/gemini-api/docs/pricing
@@ -72,6 +75,16 @@ class ImageModelSpec:
 #   Groq/Cerebras: 무료 Tier (rate limit 적용)
 TEXT_MODEL_MATRIX: List[TextModelSpec] = [
     # Qwen (DashScope)
+    TextModelSpec(
+        provider="qwen",
+        model="qwen-flash",
+        label="Qwen Flash",
+        key_id="qwen",
+        input_cost_per_1m_usd=0.05,
+        output_cost_per_1m_usd=0.40,
+        quality_score=80,
+        speed_score=95,
+    ),
     TextModelSpec(
         provider="qwen",
         model="qwen-turbo",
@@ -105,22 +118,42 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
     # DeepSeek
     TextModelSpec(
         provider="deepseek",
-        model="deepseek-chat",
-        label="DeepSeek Chat",
+        model="deepseek-v4-flash",
+        label="DeepSeek V4 Flash",
         key_id="deepseek",
-        input_cost_per_1m_usd=0.28,
-        output_cost_per_1m_usd=0.42,
+        input_cost_per_1m_usd=0.14,
+        output_cost_per_1m_usd=0.28,
+        quality_score=88,
+        speed_score=92,
+    ),
+    TextModelSpec(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        label="DeepSeek V4 Pro",
+        key_id="deepseek",
+        input_cost_per_1m_usd=0.435,
+        output_cost_per_1m_usd=0.87,
+        quality_score=94,
+        speed_score=78,
+    ),
+    TextModelSpec(
+        provider="deepseek",
+        model="deepseek-chat",
+        label="DeepSeek Chat (legacy alias)",
+        key_id="deepseek",
+        input_cost_per_1m_usd=0.14,
+        output_cost_per_1m_usd=0.28,
         quality_score=86,
         speed_score=88,
     ),
     TextModelSpec(
         provider="deepseek",
         model="deepseek-reasoner",
-        label="DeepSeek Reasoner",
+        label="DeepSeek Reasoner (legacy alias)",
         key_id="deepseek",
-        input_cost_per_1m_usd=0.28,
-        output_cost_per_1m_usd=0.42,
-        quality_score=92,
+        input_cost_per_1m_usd=0.14,
+        output_cost_per_1m_usd=0.28,
+        quality_score=90,
         speed_score=75,
     ),
     # Gemini
@@ -219,7 +252,7 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
     ),
     TextModelSpec(
         provider="groq",
-        model="llama-4-scout-17b-16e-instruct",
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
         label="Groq Llama-4 Scout (무료)",
         key_id="groq",
         input_cost_per_1m_usd=0.0,
@@ -236,6 +269,19 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         output_cost_per_1m_usd=0.0,
         quality_score=76,
         speed_score=97,
+    ),
+    # NVIDIA NIM (12개월 이용권 활용)
+    # deepseek-ai/deepseek-r1 → 410 Gone (2026-03 서비스 종료)
+    # nvidia/llama-3.1-nemotron-70b-instruct → 404 (삭제됨)
+    TextModelSpec(
+        provider="nvidia",
+        model="meta/llama-3.3-70b-instruct",
+        label="NVIDIA Llama 3.3 70B",
+        key_id="nvidia",
+        input_cost_per_1m_usd=0.0,  # 이용권 기반 무료로 간주
+        output_cost_per_1m_usd=0.0,
+        quality_score=93,
+        speed_score=92,
     ),
 ]
 
@@ -282,6 +328,7 @@ DEFAULT_TEXT_KEYS = {
     "claude": "ANTHROPIC_API_KEY",
     "groq": "GROQ_API_KEY",
     "cerebras": "CEREBRAS_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
 }
 
 DEFAULT_IMAGE_KEYS = {
@@ -296,6 +343,13 @@ DEFAULT_IMAGE_ENGINE = "pexels"
 DEFAULT_IMAGES_PER_POST = 1
 DEFAULT_IMAGES_PER_POST_MIN = 0
 DEFAULT_IMAGES_PER_POST_MAX = 4
+DEFAULT_COST_STRICT_MODE = True
+DEFAULT_COST_FREE_ONLY_FALLBACK = True
+DEFAULT_COST_MAX_FALLBACK_USD_PER_1M = 1.0
+DEFAULT_COST_RETRY_MAX_RETRIES = 6
+DEFAULT_COST_RETRY_BASE_DELAY_SEC = 2.0
+DEFAULT_COST_RETRY_MAX_DELAY_SEC = 20.0
+DEFAULT_COST_LOCK_QUALITY_PROVIDER = True
 DEFAULT_IMAGE_AI_QUOTA = "0"
 IMAGE_AI_QUOTA_VALUES = {"0", "1", "2", "3", "4", "all"}
 DEFAULT_IMAGE_AI_ENGINE = "together_flux"
@@ -330,6 +384,17 @@ def normalize_strategy_mode(raw_value: str) -> str:
     if value in {"quality", "best_quality", "hq"}:
         return "quality"
     return "cost"
+
+
+def normalize_vlm_strategy_setting(raw_value: Any, default: str = constants.VLM_DEFAULT_STRATEGY_MODE) -> str:
+    """VLM 전략 설정값(inherit/cost/balanced/quality)을 정규화한다."""
+    value = str(raw_value or "").strip().lower()
+    if value in {"inherit", "cost", "balanced", "quality"}:
+        return value
+    fallback = str(default or "").strip().lower()
+    if fallback in {"inherit", "cost", "balanced", "quality"}:
+        return fallback
+    return constants.VLM_DEFAULT_STRATEGY_MODE
 
 
 def normalize_image_ai_quota(raw_value: Any, default: str = DEFAULT_IMAGE_AI_QUOTA) -> str:
@@ -372,6 +437,19 @@ def _to_int(raw_value: Any, default: int, min_value: int, max_value: int) -> int
     return max(min_value, min(max_value, value))
 
 
+def _to_float(raw_value: Any, default: float, min_value: float, max_value: float) -> float:
+    """실수를 범위 내로 정규화한다."""
+    try:
+        value = float(raw_value)
+    except Exception:
+        value = float(default)
+    if value < min_value:
+        return float(min_value)
+    if value > max_value:
+        return float(max_value)
+    return float(value)
+
+
 def _parse_json_map(raw_value: str) -> Dict[str, str]:
     """JSON 객체 문자열을 dict[str, str]로 파싱한다."""
     text = str(raw_value or "").strip()
@@ -390,6 +468,26 @@ def _parse_json_map(raw_value: str) -> Dict[str, str]:
         if normalized_key:
             output[normalized_key] = normalized_value
     return output
+
+
+def _read_dotenv_values(path: Path = Path(".env")) -> Dict[str, str]:
+    """간단한 KEY=VALUE 형식의 .env 값을 읽는다."""
+    if not path.exists() or not path.is_file():
+        return {}
+    values: Dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            values[key] = value.strip().strip("\"'")
+    except Exception:
+        return {}
+    return values
 
 
 def _json_text(value: Dict[str, str]) -> str:
@@ -454,6 +552,13 @@ class LLMRouter:
         "router_strategy_mode",
         "router_text_api_keys",
         "router_image_api_keys",
+        "router_cost_strict_mode",
+        "router_cost_free_only_fallback",
+        "router_cost_max_fallback_usd_per_1m",
+        "router_cost_retry_max_retries",
+        "router_cost_retry_base_delay_sec",
+        "router_cost_retry_max_delay_sec",
+        "router_cost_lock_quality_provider",
         "router_image_engine",
         "router_image_ai_engine",
         "router_image_ai_quota",
@@ -469,6 +574,12 @@ class LLMRouter:
         "router_champion_switch_threshold",
         "router_registered_models",
         "router_champion_model",
+        "router_vlm_enabled",
+        "router_vlm_model",
+        "router_vlm_strategy_mode",
+        "router_vlm_eval_sampling_rate",
+        "router_vlm_quality_floor",
+        "router_vlm_max_cost_guard_krw",
         "fallback_category",
     )
 
@@ -487,18 +598,72 @@ class LLMRouter:
         if self.job_store:
             raw_settings = self.job_store.get_system_settings(list(self.SETTINGS_KEYS))
 
-        text_api_keys = _parse_json_map(raw_settings.get("router_text_api_keys", ""))
-        image_api_keys = _parse_json_map(raw_settings.get("router_image_api_keys", ""))
+        raw_text_key_setting = raw_settings.get("router_text_api_keys", "")
+        raw_image_key_setting = raw_settings.get("router_image_api_keys", "")
+        text_api_keys = _parse_json_map(raw_text_key_setting)
+        image_api_keys = _parse_json_map(raw_image_key_setting)
+        dotenv_values = _read_dotenv_values()
 
-        # DB 값이 비어 있으면 환경변수 키를 자동 반영한다.
-        for key_id, env_name in DEFAULT_TEXT_KEYS.items():
-            if not text_api_keys.get(key_id):
-                text_api_keys[key_id] = os.getenv(env_name, "").strip()
-        for key_id, env_name in DEFAULT_IMAGE_KEYS.items():
-            if not image_api_keys.get(key_id):
-                image_api_keys[key_id] = os.getenv(env_name, "").strip()
+        # DB 설정이 아예 비어 있을 때만 환경변수와 .env 키를 자동 반영한다.
+        if not str(raw_text_key_setting or "").strip():
+            for key_id, env_name in DEFAULT_TEXT_KEYS.items():
+                if not text_api_keys.get(key_id):
+                    text_api_keys[key_id] = (
+                        os.getenv(env_name, "").strip() or str(dotenv_values.get(env_name, "")).strip()
+                    )
+        if not str(raw_image_key_setting or "").strip():
+            for key_id, env_name in DEFAULT_IMAGE_KEYS.items():
+                if not image_api_keys.get(key_id):
+                    image_api_keys[key_id] = (
+                        os.getenv(env_name, "").strip() or str(dotenv_values.get(env_name, "")).strip()
+                    )
 
         strategy_mode = normalize_strategy_mode(raw_settings.get("router_strategy_mode", DEFAULT_STRATEGY_MODE))
+        cost_strict_mode = _to_bool(
+            raw_settings.get("router_cost_strict_mode", "true" if DEFAULT_COST_STRICT_MODE else "false"),
+            default=DEFAULT_COST_STRICT_MODE,
+        )
+        cost_free_only_fallback = _to_bool(
+            raw_settings.get(
+                "router_cost_free_only_fallback",
+                "true" if DEFAULT_COST_FREE_ONLY_FALLBACK else "false",
+            ),
+            default=DEFAULT_COST_FREE_ONLY_FALLBACK,
+        )
+        cost_max_fallback_usd_per_1m = _to_float(
+            raw_settings.get(
+                "router_cost_max_fallback_usd_per_1m",
+                str(DEFAULT_COST_MAX_FALLBACK_USD_PER_1M),
+            ),
+            default=DEFAULT_COST_MAX_FALLBACK_USD_PER_1M,
+            min_value=0.0,
+            max_value=100.0,
+        )
+        cost_retry_max_retries = _to_int(
+            raw_settings.get("router_cost_retry_max_retries", str(DEFAULT_COST_RETRY_MAX_RETRIES)),
+            default=DEFAULT_COST_RETRY_MAX_RETRIES,
+            min_value=1,
+            max_value=12,
+        )
+        cost_retry_base_delay_sec = _to_float(
+            raw_settings.get("router_cost_retry_base_delay_sec", str(DEFAULT_COST_RETRY_BASE_DELAY_SEC)),
+            default=DEFAULT_COST_RETRY_BASE_DELAY_SEC,
+            min_value=0.0,
+            max_value=30.0,
+        )
+        cost_retry_max_delay_sec = _to_float(
+            raw_settings.get("router_cost_retry_max_delay_sec", str(DEFAULT_COST_RETRY_MAX_DELAY_SEC)),
+            default=DEFAULT_COST_RETRY_MAX_DELAY_SEC,
+            min_value=0.0,
+            max_value=180.0,
+        )
+        cost_lock_quality_provider = _to_bool(
+            raw_settings.get(
+                "router_cost_lock_quality_provider",
+                "true" if DEFAULT_COST_LOCK_QUALITY_PROVIDER else "false",
+            ),
+            default=DEFAULT_COST_LOCK_QUALITY_PROVIDER,
+        )
         image_engine = str(raw_settings.get("router_image_engine", DEFAULT_IMAGE_ENGINE)).strip().lower()
         if not _find_image_model(image_engine):
             image_engine = DEFAULT_IMAGE_ENGINE
@@ -569,12 +734,45 @@ class LLMRouter:
         except Exception:
             registered_models = []
         champion_model = str(raw_settings.get("router_champion_model", "")).strip()
+        vlm_enabled = _to_bool(raw_settings.get("router_vlm_enabled", "false"), default=False)
+        vlm_model = str(raw_settings.get("router_vlm_model", constants.VLM_DEFAULT_MODEL)).strip()
+        if not vlm_model:
+            vlm_model = constants.VLM_DEFAULT_MODEL
+        vlm_strategy_mode = normalize_vlm_strategy_setting(
+            raw_settings.get("router_vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE),
+            default=constants.VLM_DEFAULT_STRATEGY_MODE,
+        )
+        vlm_eval_sampling_rate = _to_float(
+            raw_settings.get("router_vlm_eval_sampling_rate", str(constants.VLM_DEFAULT_EVAL_SAMPLING_RATE)),
+            default=constants.VLM_DEFAULT_EVAL_SAMPLING_RATE,
+            min_value=0.0,
+            max_value=1.0,
+        )
+        vlm_quality_floor = _to_float(
+            raw_settings.get("router_vlm_quality_floor", str(constants.VLM_DEFAULT_QUALITY_FLOOR)),
+            default=constants.VLM_DEFAULT_QUALITY_FLOOR,
+            min_value=0.0,
+            max_value=100.0,
+        )
+        vlm_max_cost_guard_krw = _to_float(
+            raw_settings.get("router_vlm_max_cost_guard_krw", str(constants.VLM_DEFAULT_MAX_COST_GUARD_KRW)),
+            default=constants.VLM_DEFAULT_MAX_COST_GUARD_KRW,
+            min_value=0.0,
+            max_value=100000.0,
+        )
         fallback_category = str(raw_settings.get("fallback_category", "")).strip() or DEFAULT_FALLBACK_CATEGORY
 
         return {
             "strategy_mode": strategy_mode,
             "text_api_keys": text_api_keys,
             "image_api_keys": image_api_keys,
+            "cost_strict_mode": cost_strict_mode,
+            "cost_free_only_fallback": cost_free_only_fallback,
+            "cost_max_fallback_usd_per_1m": cost_max_fallback_usd_per_1m,
+            "cost_retry_max_retries": cost_retry_max_retries,
+            "cost_retry_base_delay_sec": cost_retry_base_delay_sec,
+            "cost_retry_max_delay_sec": cost_retry_max_delay_sec,
+            "cost_lock_quality_provider": cost_lock_quality_provider,
             "image_engine": image_engine,
             "image_ai_engine": image_ai_engine,
             "image_ai_quota": image_ai_quota,
@@ -590,6 +788,12 @@ class LLMRouter:
             "champion_switch_threshold": champion_switch_threshold,
             "registered_models": registered_models,
             "champion_model": champion_model,
+            "vlm_enabled": vlm_enabled,
+            "vlm_model": vlm_model,
+            "vlm_strategy_mode": vlm_strategy_mode,
+            "vlm_eval_sampling_rate": vlm_eval_sampling_rate,
+            "vlm_quality_floor": vlm_quality_floor,
+            "vlm_max_cost_guard_krw": vlm_max_cost_guard_krw,
             "fallback_category": fallback_category,
         }
 
@@ -615,6 +819,60 @@ class LLMRouter:
 
         strategy_mode = normalize_strategy_mode(
             str(payload.get("strategy_mode", current["strategy_mode"])).strip()
+        )
+        cost_strict_mode = _to_bool(
+            payload.get("cost_strict_mode", current.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+            default=bool(current.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+        )
+        cost_free_only_fallback = _to_bool(
+            payload.get(
+                "cost_free_only_fallback",
+                current.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK),
+            ),
+            default=bool(current.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)),
+        )
+        cost_max_fallback_usd_per_1m = _to_float(
+            payload.get(
+                "cost_max_fallback_usd_per_1m",
+                current.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M),
+            ),
+            default=float(current.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)),
+            min_value=0.0,
+            max_value=100.0,
+        )
+        cost_retry_max_retries = _to_int(
+            payload.get(
+                "cost_retry_max_retries",
+                current.get("cost_retry_max_retries", DEFAULT_COST_RETRY_MAX_RETRIES),
+            ),
+            default=DEFAULT_COST_RETRY_MAX_RETRIES,
+            min_value=1,
+            max_value=12,
+        )
+        cost_retry_base_delay_sec = _to_float(
+            payload.get(
+                "cost_retry_base_delay_sec",
+                current.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC),
+            ),
+            default=float(current.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC)),
+            min_value=0.0,
+            max_value=30.0,
+        )
+        cost_retry_max_delay_sec = _to_float(
+            payload.get(
+                "cost_retry_max_delay_sec",
+                current.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC),
+            ),
+            default=float(current.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC)),
+            min_value=0.0,
+            max_value=180.0,
+        )
+        cost_lock_quality_provider = _to_bool(
+            payload.get(
+                "cost_lock_quality_provider",
+                current.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER),
+            ),
+            default=bool(current.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER)),
         )
         image_engine = str(payload.get("image_engine", current["image_engine"])).strip().lower()
         if not _find_image_model(image_engine):
@@ -669,6 +927,13 @@ class LLMRouter:
             "strategy_mode": strategy_mode,
             "text_api_keys": text_keys,
             "image_api_keys": image_keys,
+            "cost_strict_mode": cost_strict_mode,
+            "cost_free_only_fallback": cost_free_only_fallback,
+            "cost_max_fallback_usd_per_1m": cost_max_fallback_usd_per_1m,
+            "cost_retry_max_retries": cost_retry_max_retries,
+            "cost_retry_base_delay_sec": cost_retry_base_delay_sec,
+            "cost_retry_max_delay_sec": cost_retry_max_delay_sec,
+            "cost_lock_quality_provider": cost_lock_quality_provider,
             "image_engine": image_engine,
             "image_ai_engine": image_ai_engine,
             "image_ai_quota": image_ai_quota,
@@ -678,6 +943,42 @@ class LLMRouter:
             "images_per_post": images_per_post,
             "images_per_post_min": images_per_post_min,
             "images_per_post_max": images_per_post_max,
+            "vlm_enabled": _to_bool(
+                payload.get("vlm_enabled", current.get("vlm_enabled", False)),
+                default=bool(current.get("vlm_enabled", False)),
+            ),
+            "vlm_model": str(
+                payload.get("vlm_model", current.get("vlm_model", constants.VLM_DEFAULT_MODEL))
+            ).strip()
+            or str(current.get("vlm_model", constants.VLM_DEFAULT_MODEL)),
+            "vlm_strategy_mode": normalize_vlm_strategy_setting(
+                payload.get("vlm_strategy_mode", current.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE)),
+                default=current.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE),
+            ),
+            "vlm_eval_sampling_rate": _to_float(
+                payload.get(
+                    "vlm_eval_sampling_rate",
+                    current.get("vlm_eval_sampling_rate", constants.VLM_DEFAULT_EVAL_SAMPLING_RATE),
+                ),
+                default=float(current.get("vlm_eval_sampling_rate", constants.VLM_DEFAULT_EVAL_SAMPLING_RATE)),
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            "vlm_quality_floor": _to_float(
+                payload.get("vlm_quality_floor", current.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+                default=float(current.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+                min_value=0.0,
+                max_value=100.0,
+            ),
+            "vlm_max_cost_guard_krw": _to_float(
+                payload.get(
+                    "vlm_max_cost_guard_krw",
+                    current.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW),
+                ),
+                default=float(current.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW)),
+                min_value=0.0,
+                max_value=100000.0,
+            ),
         }
         # challenger_model: 빈 문자열이면 기존 값 유지, 값이 있으면 저장
         challenger_model_raw = str(payload.get("challenger_model", "")).strip()
@@ -690,6 +991,22 @@ class LLMRouter:
             self.job_store.set_system_setting("router_strategy_mode", strategy_mode)
             self.job_store.set_system_setting("router_text_api_keys", _json_text(text_keys))
             self.job_store.set_system_setting("router_image_api_keys", _json_text(image_keys))
+            self.job_store.set_system_setting("router_cost_strict_mode", "true" if cost_strict_mode else "false")
+            self.job_store.set_system_setting(
+                "router_cost_free_only_fallback",
+                "true" if cost_free_only_fallback else "false",
+            )
+            self.job_store.set_system_setting(
+                "router_cost_max_fallback_usd_per_1m",
+                str(cost_max_fallback_usd_per_1m),
+            )
+            self.job_store.set_system_setting("router_cost_retry_max_retries", str(cost_retry_max_retries))
+            self.job_store.set_system_setting("router_cost_retry_base_delay_sec", str(cost_retry_base_delay_sec))
+            self.job_store.set_system_setting("router_cost_retry_max_delay_sec", str(cost_retry_max_delay_sec))
+            self.job_store.set_system_setting(
+                "router_cost_lock_quality_provider",
+                "true" if cost_lock_quality_provider else "false",
+            )
             self.job_store.set_system_setting("router_image_engine", image_engine)
             self.job_store.set_system_setting("router_image_ai_engine", image_ai_engine)
             self.job_store.set_system_setting("router_image_ai_quota", image_ai_quota)
@@ -705,6 +1022,30 @@ class LLMRouter:
             self.job_store.set_system_setting("router_images_per_post", str(images_per_post))
             self.job_store.set_system_setting("router_images_per_post_min", str(images_per_post_min))
             self.job_store.set_system_setting("router_images_per_post_max", str(images_per_post_max))
+            self.job_store.set_system_setting(
+                "router_vlm_enabled",
+                "true" if bool(normalized.get("vlm_enabled", False)) else "false",
+            )
+            self.job_store.set_system_setting(
+                "router_vlm_model",
+                str(normalized.get("vlm_model", constants.VLM_DEFAULT_MODEL)),
+            )
+            self.job_store.set_system_setting(
+                "router_vlm_strategy_mode",
+                str(normalized.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE)),
+            )
+            self.job_store.set_system_setting(
+                "router_vlm_eval_sampling_rate",
+                str(normalized.get("vlm_eval_sampling_rate", constants.VLM_DEFAULT_EVAL_SAMPLING_RATE)),
+            )
+            self.job_store.set_system_setting(
+                "router_vlm_quality_floor",
+                str(normalized.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+            )
+            self.job_store.set_system_setting(
+                "router_vlm_max_cost_guard_krw",
+                str(normalized.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW)),
+            )
             if challenger_model_raw:
                 self.job_store.set_system_setting("router_challenger_model", challenger_model_raw)
             # TEXT_MODEL_MATRIX에서 사용 가능한 모델을 registered 목록에 병합한다.
@@ -780,6 +1121,11 @@ class LLMRouter:
             base = self._merge_preview_settings(base, overrides)
 
         strategy_mode = normalize_strategy_mode(base["strategy_mode"])
+        cost_strict_mode = bool(base.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE))
+        cost_free_only_fallback = bool(base.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK))
+        cost_max_fallback_usd_per_1m = float(
+            base.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)
+        )
         text_api_keys = dict(base["text_api_keys"])
         image_api_keys = dict(base["image_api_keys"])
         image_enabled = bool(base["image_enabled"])
@@ -794,16 +1140,10 @@ class LLMRouter:
             max_value=4,
         )
 
-        available_text_models = [
-            spec for spec in TEXT_MODEL_MATRIX if str(text_api_keys.get(spec.key_id, "")).strip()
-        ]
-        if not available_text_models:
-            # 사용 가능한 키가 없으면 환경 설정값으로 최소 라우팅 정보를 제공한다.
-            fallback_provider = str(self.llm_config.primary_provider).strip().lower()
-            fallback_model = str(self.llm_config.primary_model).strip()
-            fallback_spec = _find_text_model(fallback_provider, fallback_model)
-            if fallback_spec:
-                available_text_models = [fallback_spec]
+        available_text_models = self._available_text_specs(
+            text_api_keys=text_api_keys,
+            registered_models=list(base.get("registered_models", [])),
+        )
 
         parser_spec = self._pick_role_model(available_text_models, strategy_mode, role="parser")
         quality_spec = self._pick_role_model(available_text_models, strategy_mode, role="quality_step")
@@ -814,12 +1154,18 @@ class LLMRouter:
             pool=available_text_models,
             strategy_mode=strategy_mode,
             max_size=3,
+            cost_strict_mode=cost_strict_mode,
+            cost_free_only_fallback=cost_free_only_fallback,
+            cost_max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
         )
         voice_fallbacks = self._build_fallback_candidates(
             selected=voice_spec,
             pool=available_text_models,
             strategy_mode=strategy_mode,
             max_size=2,
+            cost_strict_mode=cost_strict_mode,
+            cost_free_only_fallback=cost_free_only_fallback,
+            cost_max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
         )
 
         parser_role_payload = self._role_payload(parser_spec, strategy_mode, "parser")
@@ -893,6 +1239,10 @@ class LLMRouter:
         parser_model = str(parser_role.get("model", "")).strip()
         saved = self.get_saved_settings()
         text_keys = saved["text_api_keys"]
+        available_specs = self._available_text_specs(
+            text_api_keys=dict(text_keys),
+            registered_models=list(saved.get("registered_models", [])),
+        )
 
         if parser_provider and parser_model:
             chain.append(
@@ -904,7 +1254,7 @@ class LLMRouter:
             )
 
         # 파서는 speed/비용 중심으로 보조 체인을 추가한다.
-        for spec in sorted(TEXT_MODEL_MATRIX, key=lambda item: (-item.speed_score, item.avg_cost_per_1k_usd)):
+        for spec in sorted(available_specs, key=lambda item: (-item.speed_score, item.avg_cost_per_1k_usd)):
             api_key = str(text_keys.get(spec.key_id, "")).strip()
             if not api_key:
                 continue
@@ -957,6 +1307,25 @@ class LLMRouter:
             "parser_step": role_to_runtime(parser),
             "quality_step": role_to_runtime(quality),
             "voice_step": role_to_runtime(voice),
+            "cost_controls": {
+                "strict_mode": bool(saved.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+                "free_only_fallback": bool(
+                    saved.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)
+                ),
+                "max_fallback_usd_per_1m": float(
+                    saved.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)
+                ),
+                "retry_max_retries": int(saved.get("cost_retry_max_retries", DEFAULT_COST_RETRY_MAX_RETRIES)),
+                "retry_base_delay_sec": float(
+                    saved.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC)
+                ),
+                "retry_max_delay_sec": float(
+                    saved.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC)
+                ),
+                "lock_quality_provider": bool(
+                    saved.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER)
+                ),
+            },
             "estimate": planned["estimate"],
             "competition": self.get_competition_state(slot_type=selected_slot_type),
         }
@@ -971,7 +1340,10 @@ class LLMRouter:
         planned = self.build_plan(overrides=overrides)
         saved = self.get_saved_settings()
         text_keys = saved["text_api_keys"]
-        available_specs = self._available_text_specs(text_keys)
+        available_specs = self._available_text_specs(
+            text_api_keys=text_keys,
+            registered_models=list(saved.get("registered_models", [])),
+        )
         strategy_mode = str(planned["strategy_mode"]).strip().lower()
 
         parser_role = planned["roles"]["parser"]
@@ -988,6 +1360,13 @@ class LLMRouter:
             eval_model_today=saved.get("eval_model_today", ""),
             eval_min_samples=saved.get("eval_min_samples", 5),
             champion_model=saved.get("champion_model", ""),
+            cost_strict_mode=bool(saved.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+            cost_free_only_fallback=bool(
+                saved.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)
+            ),
+            cost_max_fallback_usd_per_1m=float(
+                saved.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)
+            ),
         )
         if selected_quality_spec:
             quality_role = self._role_payload(selected_quality_spec, strategy_mode, "quality_step")
@@ -996,6 +1375,13 @@ class LLMRouter:
                 pool=available_specs,
                 strategy_mode=strategy_mode,
                 max_size=3,
+                cost_strict_mode=bool(saved.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+                cost_free_only_fallback=bool(
+                    saved.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)
+                ),
+                cost_max_fallback_usd_per_1m=float(
+                    saved.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)
+                ),
             )
             quality_role["fallback_chain"] = [self._model_payload(spec) for spec in fallback_chain]
 
@@ -1026,6 +1412,25 @@ class LLMRouter:
             "parser_step": role_to_runtime(parser_role),
             "quality_step": role_to_runtime(quality_role),
             "voice_step": role_to_runtime(voice_role),
+            "cost_controls": {
+                "strict_mode": bool(saved.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+                "free_only_fallback": bool(
+                    saved.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)
+                ),
+                "max_fallback_usd_per_1m": float(
+                    saved.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)
+                ),
+                "retry_max_retries": int(saved.get("cost_retry_max_retries", DEFAULT_COST_RETRY_MAX_RETRIES)),
+                "retry_base_delay_sec": float(
+                    saved.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC)
+                ),
+                "retry_max_delay_sec": float(
+                    saved.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC)
+                ),
+                "lock_quality_provider": bool(
+                    saved.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER)
+                ),
+            },
             "estimate": planned["estimate"],
             "competition": self.get_competition_state(slot_type=selected_slot_type),
         }
@@ -1045,6 +1450,23 @@ class LLMRouter:
                     key: mask_secret(value) if value else ""
                     for key, value in saved["image_api_keys"].items()
                 },
+                "cost_strict_mode": bool(saved.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+                "cost_free_only_fallback": bool(
+                    saved.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)
+                ),
+                "cost_max_fallback_usd_per_1m": float(
+                    saved.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)
+                ),
+                "cost_retry_max_retries": int(saved.get("cost_retry_max_retries", DEFAULT_COST_RETRY_MAX_RETRIES)),
+                "cost_retry_base_delay_sec": float(
+                    saved.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC)
+                ),
+                "cost_retry_max_delay_sec": float(
+                    saved.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC)
+                ),
+                "cost_lock_quality_provider": bool(
+                    saved.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER)
+                ),
                 "image_engine": saved["image_engine"],
                 "image_ai_engine": saved.get("image_ai_engine", DEFAULT_IMAGE_AI_ENGINE),
                 "image_ai_quota": saved.get("image_ai_quota", DEFAULT_IMAGE_AI_QUOTA),
@@ -1054,6 +1476,19 @@ class LLMRouter:
                 "images_per_post": saved["images_per_post"],
                 "images_per_post_min": saved.get("images_per_post_min", DEFAULT_IMAGES_PER_POST_MIN),
                 "images_per_post_max": saved.get("images_per_post_max", DEFAULT_IMAGES_PER_POST_MAX),
+                "vlm_enabled": bool(saved.get("vlm_enabled", False)),
+                "vlm_model": str(saved.get("vlm_model", constants.VLM_DEFAULT_MODEL)),
+                "vlm_strategy_mode": normalize_vlm_strategy_setting(
+                    saved.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE),
+                    default=constants.VLM_DEFAULT_STRATEGY_MODE,
+                ),
+                "vlm_eval_sampling_rate": float(
+                    saved.get("vlm_eval_sampling_rate", constants.VLM_DEFAULT_EVAL_SAMPLING_RATE)
+                ),
+                "vlm_quality_floor": float(saved.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+                "vlm_max_cost_guard_krw": float(
+                    saved.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW)
+                ),
             },
             "quote": plan["estimate"],
             "roles": plan["roles"],
@@ -1061,6 +1496,7 @@ class LLMRouter:
             "matrix": {
                 "text_models": [self._model_payload(item) for item in TEXT_MODEL_MATRIX],
                 "image_models": [self._image_payload(item) for item in IMAGE_MODEL_MATRIX],
+                "vlm_models": self._vlm_matrix_payload(saved),
             },
         }
 
@@ -1105,6 +1541,60 @@ class LLMRouter:
             "strategy_mode": normalize_strategy_mode(overrides.get("strategy_mode", current["strategy_mode"])),
             "text_api_keys": dict(current["text_api_keys"]),
             "image_api_keys": dict(current["image_api_keys"]),
+            "cost_strict_mode": _to_bool(
+                overrides.get("cost_strict_mode", current.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+                default=bool(current.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
+            ),
+            "cost_free_only_fallback": _to_bool(
+                overrides.get(
+                    "cost_free_only_fallback",
+                    current.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK),
+                ),
+                default=bool(current.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)),
+            ),
+            "cost_max_fallback_usd_per_1m": _to_float(
+                overrides.get(
+                    "cost_max_fallback_usd_per_1m",
+                    current.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M),
+                ),
+                default=float(current.get("cost_max_fallback_usd_per_1m", DEFAULT_COST_MAX_FALLBACK_USD_PER_1M)),
+                min_value=0.0,
+                max_value=100.0,
+            ),
+            "cost_retry_max_retries": _to_int(
+                overrides.get(
+                    "cost_retry_max_retries",
+                    current.get("cost_retry_max_retries", DEFAULT_COST_RETRY_MAX_RETRIES),
+                ),
+                default=DEFAULT_COST_RETRY_MAX_RETRIES,
+                min_value=1,
+                max_value=12,
+            ),
+            "cost_retry_base_delay_sec": _to_float(
+                overrides.get(
+                    "cost_retry_base_delay_sec",
+                    current.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC),
+                ),
+                default=float(current.get("cost_retry_base_delay_sec", DEFAULT_COST_RETRY_BASE_DELAY_SEC)),
+                min_value=0.0,
+                max_value=30.0,
+            ),
+            "cost_retry_max_delay_sec": _to_float(
+                overrides.get(
+                    "cost_retry_max_delay_sec",
+                    current.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC),
+                ),
+                default=float(current.get("cost_retry_max_delay_sec", DEFAULT_COST_RETRY_MAX_DELAY_SEC)),
+                min_value=0.0,
+                max_value=180.0,
+            ),
+            "cost_lock_quality_provider": _to_bool(
+                overrides.get(
+                    "cost_lock_quality_provider",
+                    current.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER),
+                ),
+                default=bool(current.get("cost_lock_quality_provider", DEFAULT_COST_LOCK_QUALITY_PROVIDER)),
+            ),
             "image_engine": str(overrides.get("image_engine", current["image_engine"])).strip().lower(),
             "image_ai_engine": "",
             "image_ai_quota": normalize_image_ai_quota(
@@ -1123,6 +1613,40 @@ class LLMRouter:
             "images_per_post": images_per_post_max,
             "images_per_post_min": images_per_post_min,
             "images_per_post_max": images_per_post_max,
+            "vlm_enabled": _to_bool(
+                overrides.get("vlm_enabled", current.get("vlm_enabled", False)),
+                default=bool(current.get("vlm_enabled", False)),
+            ),
+            "vlm_model": str(overrides.get("vlm_model", current.get("vlm_model", constants.VLM_DEFAULT_MODEL))).strip()
+            or str(current.get("vlm_model", constants.VLM_DEFAULT_MODEL)),
+            "vlm_strategy_mode": normalize_vlm_strategy_setting(
+                overrides.get("vlm_strategy_mode", current.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE)),
+                default=current.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE),
+            ),
+            "vlm_eval_sampling_rate": _to_float(
+                overrides.get(
+                    "vlm_eval_sampling_rate",
+                    current.get("vlm_eval_sampling_rate", constants.VLM_DEFAULT_EVAL_SAMPLING_RATE),
+                ),
+                default=float(current.get("vlm_eval_sampling_rate", constants.VLM_DEFAULT_EVAL_SAMPLING_RATE)),
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            "vlm_quality_floor": _to_float(
+                overrides.get("vlm_quality_floor", current.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+                default=float(current.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+                min_value=0.0,
+                max_value=100.0,
+            ),
+            "vlm_max_cost_guard_krw": _to_float(
+                overrides.get(
+                    "vlm_max_cost_guard_krw",
+                    current.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW),
+                ),
+                default=float(current.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW)),
+                min_value=0.0,
+                max_value=100000.0,
+            ),
         }
         has_explicit_ai_engine = "image_ai_engine" in overrides
         merged["image_ai_engine"] = str(
@@ -1158,18 +1682,81 @@ class LLMRouter:
             merged["image_topic_quota_overrides"] = normalized_topic_overrides
         return merged
 
-    def _available_text_specs(self, text_api_keys: Dict[str, str]) -> List[TextModelSpec]:
+    def _available_text_specs(
+        self,
+        text_api_keys: Dict[str, str],
+        registered_models: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[TextModelSpec]:
         """현재 사용 가능한 텍스트 모델 스펙을 반환한다."""
-        available_specs = [
+        available_specs: List[TextModelSpec] = [
             spec for spec in TEXT_MODEL_MATRIX if str(text_api_keys.get(spec.key_id, "")).strip()
         ]
+        if registered_models:
+            # 운영자가 비활성(active=false)로 표시한 모델은 라우팅 후보에서 제외한다.
+            available_specs = [
+                spec for spec in available_specs
+                if self._is_spec_enabled_by_registry(spec=spec, registered_models=registered_models)
+            ]
         if available_specs:
             return available_specs
 
         fallback_provider = str(self.llm_config.primary_provider).strip().lower()
         fallback_model = str(self.llm_config.primary_model).strip()
         fallback_spec = _find_text_model(fallback_provider, fallback_model)
-        return [fallback_spec] if fallback_spec else []
+        if not fallback_spec:
+            return []
+        if registered_models and not self._is_spec_enabled_by_registry(
+            spec=fallback_spec,
+            registered_models=registered_models,
+        ):
+            return []
+        return [fallback_spec]
+
+    def _is_spec_enabled_by_registry(
+        self,
+        *,
+        spec: TextModelSpec,
+        registered_models: List[Dict[str, Any]],
+    ) -> bool:
+        """registered_models 활성 상태로 spec 사용 가능 여부를 판정한다."""
+        normalized_provider = str(spec.provider).strip().lower()
+        normalized_model = str(spec.model).strip().lower()
+        normalized_with_provider = f"{normalized_provider}:{normalized_model}"
+        normalized_suffix = normalized_model.split("/")[-1]
+
+        matched_active: Optional[bool] = None
+        matched_priority = -1
+        provider_entries: List[Dict[str, Any]] = []
+
+        for item in registered_models:
+            raw_model_id = str(item.get("model_id", "")).strip().lower()
+            if not raw_model_id:
+                continue
+            raw_provider = str(item.get("provider", "")).strip().lower()
+            if raw_provider == normalized_provider:
+                provider_entries.append(item)
+
+            # provider가 지정된 엔트리는 더 높은 우선순위로 판정한다.
+            priority = 2 if raw_provider else 1
+            if raw_provider and raw_provider != normalized_provider:
+                continue
+
+            is_match = (
+                raw_model_id == normalized_model
+                or raw_model_id == normalized_with_provider
+                or raw_model_id.split("/")[-1] == normalized_suffix
+            )
+            if not is_match:
+                continue
+
+            if priority >= matched_priority:
+                matched_priority = priority
+                matched_active = bool(item.get("active", True))
+
+        if matched_active is None:
+            # registered_models가 비어 있지 않다면 운영자가 명시한 allowlist로 해석한다.
+            return False
+        return matched_active
 
     def _normalize_category_name(self, value: str) -> str:
         """카테고리 비교를 위해 공백/대소문자를 정규화한다."""
@@ -1191,12 +1778,30 @@ class LLMRouter:
         try:
             kst = timezone(timedelta(hours=9))
             today_key = datetime.now(kst).strftime("%Y-%m-%d")
+            # 오늘 이미 eval 슬롯을 1회 배정했다면, 성공 여부와 무관하게 main으로 전환한다.
+            claimed_date = str(
+                self.job_store.get_system_setting("router_eval_claimed_date", "")
+            ).strip()
+            if claimed_date == today_key:
+                return "main"
             today_eval_count = self.job_store.get_today_eval_job_count(today_key)
             if int(today_eval_count) >= 1:
                 return "main"
         except Exception:
             return "main"
         return "eval"
+
+    def _mark_eval_slot_claimed(self, *, job: "Job") -> None:
+        """오늘 eval 슬롯 배정 여부를 기록한다."""
+        if not self.job_store:
+            return
+        try:
+            kst = timezone(timedelta(hours=9))
+            today_key = datetime.now(kst).strftime("%Y-%m-%d")
+            self.job_store.set_system_setting("router_eval_claimed_date", today_key)
+            self.job_store.set_system_setting("router_eval_claimed_job_id", str(job.job_id))
+        except Exception:
+            return
 
     def _find_text_model_by_model_id(
         self,
@@ -1219,6 +1824,14 @@ class LLMRouter:
             if spec.model.lower() == normalized:
                 return spec
 
+        # 구형 모델 ID(예: llama-4-scout...)로 저장된 값을
+        # 정규 모델 ID(meta-llama/llama-4-scout...)와 호환 매칭한다.
+        normalized_suffix = normalized.split("/")[-1]
+        for spec in available_specs:
+            spec_model = spec.model.lower()
+            if spec_model.split("/")[-1] == normalized_suffix:
+                return spec
+
         for spec in available_specs:
             candidate = f"{spec.provider}:{spec.model}".lower()
             if candidate == normalized:
@@ -1235,14 +1848,18 @@ class LLMRouter:
         eval_model_today: str,
         eval_min_samples: int,
         champion_model: str,
+        cost_strict_mode: bool = DEFAULT_COST_STRICT_MODE,
+        cost_free_only_fallback: bool = DEFAULT_COST_FREE_ONLY_FALLBACK,
+        cost_max_fallback_usd_per_1m: float = DEFAULT_COST_MAX_FALLBACK_USD_PER_1M,
     ) -> Tuple[Optional[TextModelSpec], str]:
         """전략 모드와 eval 슬롯을 반영해 quality_step 모델을 결정한다."""
-        del strategy_mode
         slot_type = self._resolve_job_slot_type(
             job=job,
             eval_model_today=eval_model_today,
             eval_min_samples=eval_min_samples,
         )
+        selected_slot_type = "main"
+        selected_spec: Optional[TextModelSpec] = None
 
         if slot_type == "eval":
             eval_spec = self._find_text_model_by_model_id(
@@ -1250,23 +1867,52 @@ class LLMRouter:
                 available_specs=available_specs,
             )
             if eval_spec:
-                return eval_spec, "eval"
+                selected_spec = eval_spec
+                selected_slot_type = "eval"
+                # strict 정책으로 eval 모델이 걸러지면 eval 슬롯 소진 처리하지 않는다.
+                coerced_eval = self._coerce_cost_strict_quality_spec(
+                    preferred_spec=selected_spec,
+                    available_specs=available_specs,
+                    strategy_mode=strategy_mode,
+                    cost_strict_mode=cost_strict_mode,
+                    cost_free_only_fallback=cost_free_only_fallback,
+                    cost_max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
+                )
+                if coerced_eval and coerced_eval.provider == eval_spec.provider and coerced_eval.model == eval_spec.model:
+                    self._mark_eval_slot_claimed(job=job)
+                    return coerced_eval, selected_slot_type
+                selected_spec = None
+                selected_slot_type = "main"
             slot_type = "main"
 
-        if slot_type == "main":
+        if slot_type == "main" and selected_spec is None:
             specialist = self._find_topic_specialist_model(job=job, available_specs=available_specs)
             if specialist:
-                return specialist, "main_specialist"
+                selected_spec = specialist
+                selected_slot_type = "main_specialist"
 
-        if slot_type == "main" and champion_model:
+        if slot_type == "main" and selected_spec is None and champion_model:
             champion_spec = self._find_text_model_by_model_id(
                 model_id=champion_model,
                 available_specs=available_specs,
             )
             if champion_spec:
-                return champion_spec, "main"
+                selected_spec = champion_spec
+                selected_slot_type = "main"
 
-        return base_spec, "main"
+        if selected_spec is None:
+            selected_spec = base_spec
+            selected_slot_type = "main"
+
+        selected_spec = self._coerce_cost_strict_quality_spec(
+            preferred_spec=selected_spec,
+            available_specs=available_specs,
+            strategy_mode=strategy_mode,
+            cost_strict_mode=cost_strict_mode,
+            cost_free_only_fallback=cost_free_only_fallback,
+            cost_max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
+        )
+        return selected_spec, selected_slot_type
 
     def _resolve_topic_mode_from_job(self, job: "Job") -> str:
         """작업 텍스트 문맥에서 topic_mode를 추정한다."""
@@ -1279,6 +1925,8 @@ class LLMRouter:
             return "it"
         if any(token in merged for token in ("육아", "아이", "부모", "가정", "교육", "parenting")):
             return "parenting"
+        if any(token in merged for token in ("건강", "의학", "의료", "운동", "수면", "식단", "health")):
+            return "health"
         return "cafe"
 
     def _find_topic_specialist_model(
@@ -1362,6 +2010,74 @@ class LLMRouter:
                 return item
         return by_cost[0]
 
+    def _is_cost_strict_active(self, *, strategy_mode: str, cost_strict_mode: bool) -> bool:
+        """가성비 strict 모드 활성 여부를 반환한다."""
+        return str(strategy_mode).strip().lower() == "cost" and bool(cost_strict_mode)
+
+    def _is_free_spec(self, spec: TextModelSpec) -> bool:
+        """모델이 무료 티어인지 판정한다."""
+        return float(spec.input_cost_per_1m_usd) == 0.0 and float(spec.output_cost_per_1m_usd) == 0.0
+
+    def _spec_avg_cost_per_1m_usd(self, spec: TextModelSpec) -> float:
+        """모델의 평균 단가(USD/1M)를 계산한다."""
+        return (float(spec.input_cost_per_1m_usd) + float(spec.output_cost_per_1m_usd)) / 2.0
+
+    def _filter_cost_strict_fallback_candidates(
+        self,
+        *,
+        candidates: List[TextModelSpec],
+        free_only: bool,
+        max_fallback_usd_per_1m: float,
+    ) -> List[TextModelSpec]:
+        """가성비 strict 정책에 맞게 fallback 후보를 필터링한다."""
+        if not candidates:
+            return []
+
+        free_candidates = [item for item in candidates if self._is_free_spec(item)]
+        if free_candidates:
+            return free_candidates
+
+        safe_cap = max(0.0, float(max_fallback_usd_per_1m or 0.0))
+        low_cost_candidates = [
+            item for item in candidates if self._spec_avg_cost_per_1m_usd(item) <= safe_cap
+        ]
+        if low_cost_candidates:
+            return low_cost_candidates
+
+        if free_only:
+            # 무료 우선 모드라도 무료 키가 전부 비어 있으면 완전 실패를 피하기 위해 원본 후보를 유지한다.
+            return candidates
+        return candidates
+
+    def _coerce_cost_strict_quality_spec(
+        self,
+        *,
+        preferred_spec: Optional[TextModelSpec],
+        available_specs: List[TextModelSpec],
+        strategy_mode: str,
+        cost_strict_mode: bool,
+        cost_free_only_fallback: bool,
+        cost_max_fallback_usd_per_1m: float,
+    ) -> Optional[TextModelSpec]:
+        """가성비 strict 정책으로 quality_step 모델을 보정한다."""
+        if not self._is_cost_strict_active(strategy_mode=strategy_mode, cost_strict_mode=cost_strict_mode):
+            return preferred_spec
+
+        pool = self._filter_cost_strict_fallback_candidates(
+            candidates=list(available_specs),
+            free_only=cost_free_only_fallback,
+            max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
+        )
+        if not pool:
+            return preferred_spec
+
+        if preferred_spec and any(
+            item.provider == preferred_spec.provider and item.model == preferred_spec.model for item in pool
+        ):
+            return preferred_spec
+
+        return self._pick_role_model(pool, "cost", role="quality_step") or preferred_spec
+
     def _build_fallback_candidates(
         self,
         *,
@@ -1369,6 +2085,9 @@ class LLMRouter:
         pool: List[TextModelSpec],
         strategy_mode: str,
         max_size: int,
+        cost_strict_mode: bool = DEFAULT_COST_STRICT_MODE,
+        cost_free_only_fallback: bool = DEFAULT_COST_FREE_ONLY_FALLBACK,
+        cost_max_fallback_usd_per_1m: float = DEFAULT_COST_MAX_FALLBACK_USD_PER_1M,
     ) -> List[TextModelSpec]:
         """선택 모델을 제외한 fallback 후보를 계산한다."""
         if not selected:
@@ -1381,22 +2100,35 @@ class LLMRouter:
         if not candidates:
             return []
 
-        if strategy_mode == "quality":
+        if strategy_mode in {"quality", "balanced"}:
+            # quality/balanced 모드: 품질 근접도 우선
+            # 동일 provider는 품질이 같을 때 다른 provider보다 뒤로 밀림(key=1 vs 0)
+            # → provider 단위 장애(key 정지 등) 시 early escape 용이
             ordered = sorted(
                 candidates,
                 key=lambda item: (
                     abs(item.quality_score - selected.quality_score),
+                    1 if item.provider == selected.provider else 0,
                     item.avg_cost_per_1k_usd,
                 ),
             )
         else:
+            # cost 모드: 비용 절대값 오름차순 (무료 → 저가 순)
+            # 동일 provider도 비용 동점 시 뒤로 밀림
             ordered = sorted(
                 candidates,
                 key=lambda item: (
-                    abs(item.avg_cost_per_1k_usd - selected.avg_cost_per_1k_usd),
+                    item.avg_cost_per_1k_usd,
+                    1 if item.provider == selected.provider else 0,
                     abs(item.quality_score - selected.quality_score),
                 ),
             )
+            if self._is_cost_strict_active(strategy_mode=strategy_mode, cost_strict_mode=cost_strict_mode):
+                ordered = self._filter_cost_strict_fallback_candidates(
+                    candidates=ordered,
+                    free_only=cost_free_only_fallback,
+                    max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
+                )
         return ordered[: max(0, max_size)]
 
     def _estimate(
@@ -1542,7 +2274,7 @@ class LLMRouter:
     def _provider_to_key_id(self, provider: str) -> str:
         """provider명을 key_id로 변환한다."""
         normalized = str(provider or "").strip().lower()
-        if normalized in {"qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras"}:
+        if normalized in {"qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras", "nvidia"}:
             return normalized
         return "qwen"
 
@@ -1592,6 +2324,119 @@ class LLMRouter:
             "category": spec.category,
         }
 
+    def _vlm_matrix_payload(self, saved_settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """VLM 카탈로그(우선) 또는 static matrix(폴백)를 UI 포맷으로 반환한다."""
+        text_keys = dict(saved_settings.get("text_api_keys", {}))
+        usd_to_krw = self._resolve_vlm_usd_to_krw()
+        rows: List[Dict[str, Any]] = []
+
+        list_fn = getattr(self.job_store, "list_vlm_catalog_entries", None) if self.job_store else None
+        if callable(list_fn):
+            try:
+                rows = list_fn(limit=1000)
+            except Exception:
+                rows = []
+
+        if rows:
+            payload: List[Dict[str, Any]] = []
+            for row in rows:
+                provider = str(row.get("provider", "")).strip().lower()
+                model = str(row.get("model", "")).strip()
+                key_id = str(row.get("key_id", provider)).strip().lower() or provider
+                if not provider or not model:
+                    continue
+                currency = str(row.get("currency", "USD") or "USD").strip().upper()
+                input_cost_per_1m = float(row.get("input_cost_per_1m", 0.0) or 0.0)
+                output_cost_per_1m = float(row.get("output_cost_per_1m", 0.0) or 0.0)
+                payload.append(
+                    {
+                        "provider": provider,
+                        "client_provider": str(row.get("client_provider", f"{provider}_vlm")).strip().lower(),
+                        "model": model,
+                        "label": str(row.get("label", model)).strip() or model,
+                        "key_id": key_id,
+                        "status": str(row.get("status", "discovered")).strip().lower(),
+                        "supports_image": bool(row.get("supports_image", True)),
+                        "include_in_competition": bool(row.get("include_in_competition", False)),
+                        "quality_score": float(row.get("quality_score", 0.0) or 0.0),
+                        "reliability_score": float(row.get("reliability_score", 0.0) or 0.0),
+                        "scoring_bias_offset": float(row.get("scoring_bias_offset", 0.0) or 0.0),
+                        "input_cost_per_1m": input_cost_per_1m,
+                        "output_cost_per_1m": output_cost_per_1m,
+                        "currency": currency,
+                        "estimated_cost_krw": self._estimate_vlm_cost_krw(
+                            input_cost_per_1m=input_cost_per_1m,
+                            output_cost_per_1m=output_cost_per_1m,
+                            currency=currency,
+                            usd_to_krw=usd_to_krw,
+                        ),
+                        "key_configured": bool(str(text_keys.get(key_id, "")).strip()),
+                        "source": "catalog",
+                    }
+                )
+            if payload:
+                return payload
+
+        fallback_payload: List[Dict[str, Any]] = []
+        for spec in VLM_MODEL_MATRIX:
+            fallback_payload.append(
+                {
+                    "provider": spec.provider,
+                    "client_provider": spec.client_provider,
+                    "model": spec.model,
+                    "label": spec.label,
+                    "key_id": spec.key_id,
+                    "status": "static",
+                    "supports_image": bool(spec.supports_image),
+                    "include_in_competition": False,
+                    "quality_score": float(spec.quality_score),
+                    "reliability_score": float(spec.reliability_score),
+                    "scoring_bias_offset": float(spec.scoring_bias_offset),
+                    "input_cost_per_1m": float(spec.input_cost_per_1m_usd),
+                    "output_cost_per_1m": float(spec.output_cost_per_1m_usd),
+                    "currency": "USD",
+                    "estimated_cost_krw": self._estimate_vlm_cost_krw(
+                        input_cost_per_1m=float(spec.input_cost_per_1m_usd),
+                        output_cost_per_1m=float(spec.output_cost_per_1m_usd),
+                        currency="USD",
+                        usd_to_krw=usd_to_krw,
+                    ),
+                    "key_configured": bool(str(text_keys.get(spec.key_id, "")).strip()),
+                    "source": "static_matrix",
+                }
+            )
+        return fallback_payload
+
+    def _resolve_vlm_usd_to_krw(self) -> float:
+        """VLM 단가 환산에 사용할 USD->KRW 환율을 반환한다."""
+        default_rate = float(constants.VLM_DEFAULT_USD_TO_KRW)
+        if not self.job_store:
+            return default_rate
+        raw = str(self.job_store.get_system_setting("vlm_usd_to_krw", str(default_rate))).strip()
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = default_rate
+        return parsed if parsed > 0 else default_rate
+
+    def _estimate_vlm_cost_krw(
+        self,
+        *,
+        input_cost_per_1m: float,
+        output_cost_per_1m: float,
+        currency: str,
+        usd_to_krw: float,
+    ) -> float:
+        """VLM 평가 1회(추정 토큰)당 KRW 비용을 계산한다."""
+        estimated_cost = (
+            (float(constants.VLM_ROUTER_EST_INPUT_TOKENS) / 1_000_000.0) * max(0.0, float(input_cost_per_1m))
+            + (float(constants.VLM_ROUTER_EST_OUTPUT_TOKENS) / 1_000_000.0) * max(0.0, float(output_cost_per_1m))
+        )
+        normalized_currency = str(currency or "USD").strip().upper()
+        if normalized_currency == "KRW":
+            return round(estimated_cost, 4)
+        return round(estimated_cost * max(1.0, float(usd_to_krw)), 4)
+
 
 def provider_label(name: str) -> str:
     """알림 메시지용 provider 라벨."""
@@ -1601,5 +2446,8 @@ def provider_label(name: str) -> str:
         "gemini": "Gemini",
         "openai": "OpenAI",
         "claude": "Claude",
+        "groq": "Groq",
+        "cerebras": "Cerebras",
+        "nvidia": "NVIDIA",
     }
     return mapping.get(str(name).strip().lower(), name)

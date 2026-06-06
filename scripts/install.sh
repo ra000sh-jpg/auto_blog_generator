@@ -300,12 +300,19 @@ cat > "${FRONTEND_PLIST}" <<PLIST
 </plist>
 PLIST
 
-launchctl unload "${SERVER_PLIST}" >/dev/null 2>&1 || true
-launchctl unload "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
-launchctl unload "${FRONTEND_PLIST}" >/dev/null 2>&1 || true
-launchctl load "${SERVER_PLIST}"
-launchctl load "${SCHEDULER_PLIST}"
-launchctl load "${FRONTEND_PLIST}"
+GUI_DOMAIN="gui/$(id -u)"
+
+register_launch_agent() {
+  local label="$1"
+  local plist="$2"
+  launchctl bootout "${GUI_DOMAIN}/${label}" >/dev/null 2>&1 || true
+  launchctl enable "${GUI_DOMAIN}/${label}" >/dev/null 2>&1 || true
+  launchctl bootstrap "${GUI_DOMAIN}" "${plist}"
+}
+
+register_launch_agent "com.autoblog.server" "${SERVER_PLIST}"
+register_launch_agent "com.autoblog.scheduler" "${SCHEDULER_PLIST}"
+register_launch_agent "com.autoblog.frontend" "${FRONTEND_PLIST}"
 
 step "CLI 심볼릭 링크 등록"
 CLI_SOURCE="${PROJECT_DIR}/scripts/auto-blog"
@@ -313,8 +320,8 @@ CLI_TARGET="/usr/local/bin/auto-blog"
 if ln -sf "${CLI_SOURCE}" "${CLI_TARGET}" 2>/dev/null; then
   echo "✓ /usr/local/bin/auto-blog 링크 생성 완료"
 else
-  echo "권한이 필요하여 sudo로 링크를 생성합니다."
-  sudo ln -sf "${CLI_SOURCE}" "${CLI_TARGET}"
+  echo "⚠️ /usr/local/bin/auto-blog 링크 생성은 권한이 없어 건너뜁니다."
+  echo "   대신 ${CLI_SOURCE} 를 직접 실행하면 됩니다."
 fi
 
 echo "✅ 설치 완료! http://localhost:3000 에서 접속하세요."

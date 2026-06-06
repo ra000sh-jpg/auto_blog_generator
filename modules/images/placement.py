@@ -253,11 +253,13 @@ def convert_markdown_for_naver_editor(content: str) -> str:
     마크다운 문법을 시각적으로 구분 가능한 형태로 변환한다.
 
     변환 규칙:
-    - ## 헤딩 → 빈 줄 + 텍스트 + 빈 줄 (시각적 구분)
+    - #/## 헤딩 → 빈 줄 + 텍스트 + 빈 줄 (시각적 구분)
     - **강조** → 텍스트만 (마크다운 제거)
     - - 리스트 → • 불릿
     - 1. 번호 → 1. 유지
     - 이미지 마크다운 → 제거 (별도 처리)
+    - | 표 행 → 표 이미지 또는 읽기 쉬운 텍스트 블록
+    - [TABLE_N] 마커 → 보존 (create_naver_editor_content에서 처리)
 
     Args:
         content: 마크다운 콘텐츠
@@ -267,10 +269,29 @@ def convert_markdown_for_naver_editor(content: str) -> str:
     """
     result = content
 
+    # 0. [TABLE_N] 마커를 임시 플레이스홀더로 보호 (이후 단계에서 변형 방지)
+    #    밑줄(_)이 기울임 regex에 걸리지 않도록 @ 기반 플레이스홀더 사용
+    table_markers: List[str] = re.findall(r"\[TABLE_\d+\]", result)
+    for idx, marker in enumerate(table_markers):
+        result = result.replace(marker, f"@@TBLMARK{idx}@@", 1)
+
+    # 0b. 렌더링되지 못한 마크다운 표는 네이버에서 raw pipe가 보이지 않도록
+    #     사람이 읽기 쉬운 텍스트 블록으로 바꾼다.
+    result = _convert_markdown_tables_to_plain_blocks(result)
+
     # 1. 이미지 마크다운 제거 (![alt](path) 형식)
     result = re.sub(r"!\[[^\]]*\]\([^)]+\)\s*", "", result)
 
-    # 2. H2 헤딩: ## 제목 → \n\n■ 제목\n\n (시각적 구분)
+    # 1b. 비정상 표 행 제거 (0b에서 처리하지 못한 잔여 | 행)
+    result = re.sub(r"^[ \t]*\|.*\|[ \t]*$", "", result, flags=re.MULTILINE)
+
+    # 2. H1/H2/H3 헤딩: 네이버에서 raw # 문법이 보이지 않도록 변환
+    result = re.sub(
+        r"^#\s+(.+)$",
+        r"\n\n◆ \1\n",
+        result,
+        flags=re.MULTILINE,
+    )
     result = re.sub(
         r"^##\s+(.+)$",
         r"\n\n■ \1\n",
@@ -278,10 +299,16 @@ def convert_markdown_for_naver_editor(content: str) -> str:
         flags=re.MULTILINE,
     )
 
-    # 3. H3 헤딩: ### 제목 → \n▶ 제목\n
     result = re.sub(
         r"^###\s+(.+)$",
         r"\n▶ \1\n",
+        result,
+        flags=re.MULTILINE,
+    )
+
+    result = re.sub(
+        r"^#{4,6}\s+(.+)$",
+        r"\n▷ \1\n",
         result,
         flags=re.MULTILINE,
     )
@@ -309,7 +336,107 @@ def convert_markdown_for_naver_editor(content: str) -> str:
     # 10. 앞뒤 공백 정리
     result = result.strip()
 
+    # 11. [TABLE_N] 마커 복원
+    for idx, marker in enumerate(table_markers):
+        result = result.replace(f"@@TBLMARK{idx}@@", marker)
+
     return result
+
+
+def _convert_markdown_tables_to_plain_blocks(content: str) -> str:
+    """마크다운 표를 네이버용 읽기 쉬운 텍스트 블록으로 변환한다."""
+    lines = content.splitlines()
+    converted: List[str] = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if not _looks_like_table_line(line):
+            converted.append(line)
+            index += 1
+            continue
+
+        block: List[str] = []
+        while index < len(lines) and _looks_like_table_line(lines[index]):
+            block.append(lines[index])
+            index += 1
+
+        headers, rows = _parse_plain_markdown_table(block)
+        if not headers or not rows:
+            converted.extend(block)
+            continue
+
+        converted.extend(_format_plain_table_block(headers, rows))
+
+    return "\n".join(converted)
+
+
+def _looks_like_table_line(line: str) -> bool:
+    """파이프 기반 마크다운 표 행 후보인지 판별한다."""
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _is_table_separator(cells: List[str]) -> bool:
+    """마크다운 표 구분선 행인지 판별한다."""
+    if not cells:
+        return False
+    for cell in cells:
+        normalized = cell.replace(":", "").replace("-", "").strip()
+        if normalized:
+            return False
+    return any("-" in cell for cell in cells)
+
+
+def _split_table_cells(line: str) -> List[str]:
+    """마크다운 표 한 줄을 셀 목록으로 나눈다."""
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _parse_plain_markdown_table(lines: List[str]) -> Tuple[List[str], List[List[str]]]:
+    """마크다운 표 행 목록을 헤더와 데이터 행으로 파싱한다."""
+    parsed_rows: List[List[str]] = []
+    for line in lines:
+        cells = _split_table_cells(line)
+        if _is_table_separator(cells):
+            continue
+        if any(cell for cell in cells):
+            parsed_rows.append(cells)
+
+    if len(parsed_rows) < 2:
+        return [], []
+    return parsed_rows[0], parsed_rows[1:]
+
+
+def _format_plain_table_block(headers: List[str], rows: List[List[str]]) -> List[str]:
+    """표 데이터를 블로그 문장형 텍스트로 정리한다."""
+    normalized_headers = [header.strip() or f"항목 {idx + 1}" for idx, header in enumerate(headers)]
+    first_header = normalized_headers[0].replace(" ", "")
+    use_first_column_as_label = first_header in {"구분", "항목", "기준", "분류"}
+
+    output: List[str] = [f"[표] {' / '.join(normalized_headers)}"]
+    for row in rows:
+        padded = [cell.strip() for cell in row]
+        if len(padded) < len(normalized_headers):
+            padded.extend([""] * (len(normalized_headers) - len(padded)))
+
+        if use_first_column_as_label and padded:
+            label = padded[0] or "항목"
+            output.append(label)
+            for header, value in zip(normalized_headers[1:], padded[1:]):
+                if value:
+                    output.append(f"- {header}: {value}")
+            continue
+
+        pairs = [
+            f"{header}: {value}"
+            for header, value in zip(normalized_headers, padded)
+            if value
+        ]
+        if pairs:
+            output.append("- " + " / ".join(pairs))
+
+    return output
 
 
 def create_naver_editor_content(
@@ -317,15 +444,17 @@ def create_naver_editor_content(
     thumbnail_path: Optional[str] = None,
     content_image_paths: Optional[List[str]] = None,
     image_concepts: Optional[List[str]] = None,
+    table_image_paths: Optional[List[str]] = None,
     min_gap_chars: int = 400,
 ) -> Tuple[str, List[ImageInsertionPoint]]:
     """마크다운을 네이버 에디터용 텍스트로 변환하고 이미지 삽입 위치를 반환한다.
 
     Args:
-        content: 마크다운 콘텐츠
+        content: 마크다운 콘텐츠 ([TABLE_N] 마커 포함 가능)
         thumbnail_path: 썸네일 이미지 경로
         content_image_paths: 본문 이미지 경로 목록
         image_concepts: 이미지 설명 (alt 텍스트용)
+        table_image_paths: 표 PNG 이미지 경로 목록 (TABLE_0, TABLE_1, ...)
         min_gap_chars: 이미지 사이 최소 간격 (문자 수)
 
     Returns:
@@ -413,6 +542,25 @@ def create_naver_editor_content(
     for pos, marker, _ in markers_to_insert:
         # 마커는 빈 줄로 감싸 단독 배치 (콜라주 방지용 단락 분리)
         result = result[:pos] + f"\n\n{marker}\n\n" + result[pos:]
+
+    # 5. [TABLE_N] 마커 → [IMG_N] 마커로 변환 (표 이미지를 일반 이미지로 등록)
+    table_image_paths = table_image_paths or []
+    for table_idx, table_path in enumerate(table_image_paths):
+        table_marker = f"[TABLE_{table_idx}]"
+        if table_marker in result:
+            img_marker = f"[IMG_{img_index}]"
+            result = result.replace(table_marker, img_marker, 1)
+            insertion_points.append(ImageInsertionPoint(
+                index=img_index,
+                path=table_path,
+                marker=img_marker,
+                section_hint=f"표 {table_idx + 1}",
+                is_thumbnail=False,
+            ))
+            img_index += 1
+
+    # 처리 못한 잔여 [TABLE_N] 마커 제거
+    result = re.sub(r"\[TABLE_\d+\]", "", result)
 
     return result, insertion_points
 

@@ -10,75 +10,169 @@ FRONTEND_PLIST="${LAUNCH_AGENTS_DIR}/com.autoblog.frontend.plist"
 SERVER_LABEL="com.autoblog.server"
 SCHEDULER_LABEL="com.autoblog.scheduler"
 FRONTEND_LABEL="com.autoblog.frontend"
+GUI_DOMAIN="gui/$(id -u)"
 
 usage() {
   cat <<USAGE
-사용법: auto-blog <command>
+사용법: auto-blog <command> [target]
 
 명령어:
-  start    서비스 시작 (server + scheduler + frontend)
-  stop     서비스 중지 (server + scheduler + frontend)
-  restart  서비스 재시작
-  update   업데이트 스크립트 실행
-  status   서비스 상태 + 현재 커밋 표시
-  logs     최신 로그 tail -f
+  start     서비스 시작
+  stop      서비스 중지
+  restart   서비스 재시작
+  update    업데이트 스크립트 실행
+  status    서비스 상태 + HTTP 응답 + 현재 커밋 표시
+  logs      최신 로그 tail -f
+
+target:
+  all        server + scheduler + frontend (기본값)
+  server     FastAPI 서버만
+  scheduler  스케줄러만
+  frontend   Next.js 프론트만
 USAGE
 }
 
 start_services() {
-  echo "🔧 서비스 시작..."
-  if [[ -f "${SERVER_PLIST}" ]]; then
-    launchctl load "${SERVER_PLIST}" >/dev/null 2>&1 || true
-  fi
-  if [[ -f "${SCHEDULER_PLIST}" ]]; then
-    launchctl load "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
-  fi
-  if [[ -f "${FRONTEND_PLIST}" ]]; then
-    launchctl load "${FRONTEND_PLIST}" >/dev/null 2>&1 || true
-  fi
-  echo "✅ 시작 완료"
+  local target="${1:-all}"
+  echo "서비스 시작: ${target}"
+  for label in $(target_labels "${target}" "start"); do
+    start_service "${label}" "$(plist_for_label "${label}")"
+  done
+  echo "시작 요청 완료"
 }
 
 stop_services() {
-  echo "🔧 서비스 중지..."
-  if [[ -f "${SERVER_PLIST}" ]]; then
-    launchctl unload "${SERVER_PLIST}" >/dev/null 2>&1 || true
+  local target="${1:-all}"
+  echo "서비스 중지: ${target}"
+  for label in $(target_labels "${target}" "stop"); do
+    stop_service "${label}"
+  done
+  echo "중지 요청 완료"
+}
+
+target_labels() {
+  local target="${1:-all}"
+  local mode="${2:-start}"
+  case "${target}" in
+    all)
+      if [[ "${mode}" == "stop" ]]; then
+        echo "${FRONTEND_LABEL} ${SCHEDULER_LABEL} ${SERVER_LABEL}"
+      else
+        echo "${SERVER_LABEL} ${SCHEDULER_LABEL} ${FRONTEND_LABEL}"
+      fi
+      ;;
+    server)
+      echo "${SERVER_LABEL}"
+      ;;
+    scheduler)
+      echo "${SCHEDULER_LABEL}"
+      ;;
+    frontend)
+      echo "${FRONTEND_LABEL}"
+      ;;
+    *)
+      echo "알 수 없는 target입니다: ${target}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+plist_for_label() {
+  local label="$1"
+  case "${label}" in
+    "${SERVER_LABEL}") echo "${SERVER_PLIST}" ;;
+    "${SCHEDULER_LABEL}") echo "${SCHEDULER_PLIST}" ;;
+    "${FRONTEND_LABEL}") echo "${FRONTEND_PLIST}" ;;
+    *)
+      echo "알 수 없는 label입니다: ${label}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+start_service() {
+  local label="$1"
+  local plist="$2"
+  if [[ ! -f "${plist}" ]]; then
+    echo "${label}: plist 없음 (${plist})"
+    return
   fi
-  if [[ -f "${SCHEDULER_PLIST}" ]]; then
-    launchctl unload "${SCHEDULER_PLIST}" >/dev/null 2>&1 || true
+  if ! launchctl enable "${GUI_DOMAIN}/${label}" >/dev/null 2>&1; then
+    echo "${label}: enable 실패 또는 이미 활성화됨"
   fi
-  if [[ -f "${FRONTEND_PLIST}" ]]; then
-    launchctl unload "${FRONTEND_PLIST}" >/dev/null 2>&1 || true
+  if ! launchctl print "${GUI_DOMAIN}/${label}" >/dev/null 2>&1; then
+    if ! launchctl bootstrap "${GUI_DOMAIN}" "${plist}" >/dev/null 2>&1; then
+      echo "${label}: bootstrap 실패"
+    fi
   fi
-  echo "✅ 중지 완료"
+  if ! launchctl kickstart -k "${GUI_DOMAIN}/${label}" >/dev/null 2>&1; then
+    echo "${label}: kickstart 실패"
+  fi
+}
+
+stop_service() {
+  local label="$1"
+  if ! launchctl bootout "${GUI_DOMAIN}/${label}" >/dev/null 2>&1; then
+    echo "${label}: 이미 중지되었거나 bootout 실패"
+  fi
+}
+
+service_status() {
+  local label="$1"
+  if launchctl print "${GUI_DOMAIN}/${label}" 2>/dev/null | grep -q "state = running"; then
+    echo "running"
+  else
+    echo "stopped"
+  fi
 }
 
 status_services() {
-  local server_status scheduler_status frontend_status commit_hash
+  local server_status scheduler_status frontend_status commit_hash build_id
 
-  if launchctl list | grep -q "${SERVER_LABEL}"; then
-    server_status="running"
-  else
-    server_status="stopped"
-  fi
-
-  if launchctl list | grep -q "${SCHEDULER_LABEL}"; then
-    scheduler_status="running"
-  else
-    scheduler_status="stopped"
-  fi
-
-  if launchctl list | grep -q "${FRONTEND_LABEL}"; then
-    frontend_status="running"
-  else
-    frontend_status="stopped"
-  fi
+  server_status="$(service_status "${SERVER_LABEL}")"
+  scheduler_status="$(service_status "${SCHEDULER_LABEL}")"
+  frontend_status="$(service_status "${FRONTEND_LABEL}")"
 
   commit_hash="$(cd "${PROJECT_DIR}" && git rev-parse --short HEAD)"
+  build_id="$(read_build_id)"
   echo "server: ${server_status}"
   echo "scheduler: ${scheduler_status}"
   echo "frontend: ${frontend_status}"
+  echo "api_http: $(http_check "http://127.0.0.1:8000/api/health")"
+  echo "frontend_http: $(http_check "http://127.0.0.1:3000")"
+  echo "frontend_port: $(port_owner 3000)"
+  echo "api_port: $(port_owner 8000)"
   echo "commit: ${commit_hash}"
+  echo "frontend_build: ${build_id}"
+}
+
+http_check() {
+  local url="$1"
+  if curl -fsS --max-time 8 "${url}" >/dev/null 2>&1; then
+    echo "ok"
+  else
+    echo "fail"
+  fi
+}
+
+read_build_id() {
+  local build_file="${PROJECT_DIR}/frontend/.next/BUILD_ID"
+  if [[ -f "${build_file}" ]]; then
+    head -n 1 "${build_file}"
+  else
+    echo "missing"
+  fi
+}
+
+port_owner() {
+  local port="$1"
+  local owner
+  owner="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 "/" $2}' || true)"
+  if [[ -n "${owner}" ]]; then
+    echo "${owner}"
+  else
+    echo "none"
+  fi
 }
 
 tail_latest_log() {
@@ -93,17 +187,18 @@ tail_latest_log() {
 }
 
 command_name="${1:-}"
+target_name="${2:-all}"
 
 case "${command_name}" in
   start)
-    start_services
+    start_services "${target_name}"
     ;;
   stop)
-    stop_services
+    stop_services "${target_name}"
     ;;
   restart)
-    stop_services
-    start_services
+    stop_services "${target_name}"
+    start_services "${target_name}"
     ;;
   update)
     bash "${PROJECT_DIR}/scripts/update.sh"

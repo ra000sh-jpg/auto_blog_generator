@@ -94,6 +94,24 @@ class JobDetailResponse(BaseModel):
     topic_mode: str = ""
 
 
+class CancelJobResponse(BaseModel):
+    """작업 취소 응답."""
+
+    ok: bool
+    job_id: str
+    status: str
+    message: str
+    released_idea_locks: int = 0
+
+
+class BulkDeleteJobsResponse(BaseModel):
+    """작업 일괄 삭제 응답."""
+
+    ok: bool
+    deleted: int
+    message: str
+
+
 def _serialize_job(job: Job) -> Dict[str, Any]:
     """Job dataclass를 API 응답용 dict로 변환한다."""
     payload = asdict(job)
@@ -243,3 +261,77 @@ def get_job_detail(
             detail=f"작업을 찾을 수 없습니다: {job_id}",
         )
     return JobDetailResponse(**_serialize_job(job))
+
+
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=CancelJobResponse,
+    summary="대기 작업 취소",
+)
+def cancel_job(
+    job_id: str,
+    job_store: JobStore = Depends(get_job_store),
+) -> CancelJobResponse:
+    """취소 가능한 작업을 cancelled 상태로 전환한다."""
+    result = job_store.cancel_job_by_user(job_id)
+    if not bool(result.get("ok", False)):
+        reason = str(result.get("reason", "")).strip()
+        if reason == "not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"작업을 찾을 수 없습니다: {job_id}",
+            )
+
+        if reason == "invalid_status":
+            current_status = str(result.get("current_status") or "").strip() or "unknown"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "현재 상태에서는 취소할 수 없습니다. "
+                    f"status={current_status}, "
+                    "cancelable=queued,retry_wait,ready_to_publish"
+                ),
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="작업 취소에 실패했습니다.",
+        )
+
+    return CancelJobResponse(
+        ok=True,
+        job_id=job_id,
+        status=job_store.STATUS_CANCELLED,
+        message="작업을 취소했습니다.",
+        released_idea_locks=int(result.get("released_idea_locks", 0)),
+    )
+
+
+@router.delete(
+    "/jobs/bulk",
+    response_model=BulkDeleteJobsResponse,
+    summary="작업 일괄 삭제",
+)
+def bulk_delete_jobs(
+    statuses: str = Query(
+        default="failed,cancelled",
+        description="삭제할 상태 목록 (쉼표 구분). 실행 중인 작업은 보호됩니다.",
+    ),
+    channel_id: Optional[str] = Query(
+        default=None,
+        description="특정 채널 ID로 필터링 (미설정 시 전체)",
+    ),
+    job_store: JobStore = Depends(get_job_store),
+) -> BulkDeleteJobsResponse:
+    """failed, cancelled 등 비활성 상태의 작업을 일괄 삭제한다.
+
+    실행 중(running) 또는 대기 중(queued, retry_wait, ready_to_publish) 작업은
+    상태와 무관하게 삭제되지 않는다.
+    """
+    status_list = [s.strip() for s in statuses.split(",") if s.strip()]
+    deleted = job_store.bulk_delete_jobs(statuses=status_list, channel_id=channel_id)
+    return BulkDeleteJobsResponse(
+        ok=True,
+        deleted=deleted,
+        message=f"{deleted}개 작업을 삭제했습니다.",
+    )

@@ -6,6 +6,7 @@ import asyncio
 from collections import Counter
 import json
 import logging
+import os
 import random
 import re
 import uuid
@@ -32,6 +33,7 @@ from .scheduler_workers import (
     image_collector_worker_loop,
     memory_worker_loop,
     publisher_worker_loop,
+    telegram_update_poll_loop,
 )
 from .time_utils import parse_iso
 from . import scheduler_cycles
@@ -119,6 +121,7 @@ class SchedulerService:
         memory_threshold_percent: float = 88.0,
         generator_poll_seconds: int = DEFAULT_GENERATOR_POLL_SECONDS,
         publisher_poll_seconds: int = DEFAULT_PUBLISHER_POLL_SECONDS,
+        telegram_update_poll_seconds: int = constants.DEFAULT_TELEGRAM_UPDATE_POLL_SECONDS,
         random_seed: Optional[int] = None,
         notifier: Optional["TelegramNotifier"] = None,
         api_only_mode: bool = False,
@@ -150,6 +153,7 @@ class SchedulerService:
         self.memory_threshold_percent = max(1.0, memory_threshold_percent)
         self.generator_poll_seconds = max(5, generator_poll_seconds)
         self.publisher_poll_seconds = max(5, publisher_poll_seconds)
+        self.telegram_update_poll_seconds = max(5, telegram_update_poll_seconds)
         self.random_seed = random_seed
         self.notifier = notifier
         self.api_only_mode = bool(api_only_mode)
@@ -157,6 +161,7 @@ class SchedulerService:
         self._scheduler: Any = None
         self._generator_task: Optional[asyncio.Task[None]] = None
         self._publisher_task: Optional[asyncio.Task[None]] = None
+        self._telegram_update_task: Optional[asyncio.Task[None]] = None
         self._image_collector_task: Optional[asyncio.Task[None]] = None
         self._memory_worker_task: Optional[asyncio.Task[None]] = None
         self._memory_event_queue: Optional[asyncio.Queue[Any]] = None
@@ -238,6 +243,14 @@ class SchedulerService:
                     replace_existing=True,
                     misfire_grace_time=600,
                 )
+                self._scheduler.add_job(
+                    self._run_feedback_rule_maintenance,
+                    cron_trigger(minute=10),
+                    id="feedback_rule_maintenance",
+                    name="자동 피드백 규칙 유지보수",
+                    replace_existing=True,
+                    misfire_grace_time=600,
+                )
 
         if self.job_store:
             self._scheduler.add_job(
@@ -260,9 +273,61 @@ class SchedulerService:
                 self._run_auto_champion_switch,
                 cron_trigger(hour=2, minute=0),
                 id="auto_champion_switch",
-                name="챔피언 모델 자동 교체 점검",
+                name="챔피언 모델 추천 점검",
                 replace_existing=True,
                 misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+            self._scheduler.add_job(
+                self._run_text_model_discovery_sync,
+                cron_trigger(
+                    hour=constants.TEXT_MODEL_SCHED_DISCOVERY_HOUR,
+                    minute=constants.TEXT_MODEL_SCHED_DISCOVERY_MINUTE,
+                ),
+                id="text_model_discovery_sync",
+                name="텍스트 모델 카탈로그 동기화",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+            self._scheduler.add_job(
+                self._run_vlm_discovery_sync,
+                cron_trigger(
+                    hour=constants.VLM_SCHED_DISCOVERY_HOUR,
+                    minute=constants.VLM_SCHED_DISCOVERY_MINUTE,
+                ),
+                id="vlm_discovery_sync",
+                name="VLM 카탈로그 동기화",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+            self._scheduler.add_job(
+                self._run_vlm_pricing_sync,
+                cron_trigger(
+                    hour=constants.VLM_SCHED_PRICING_HOUR,
+                    minute=constants.VLM_SCHED_PRICING_MINUTE,
+                ),
+                id="vlm_pricing_sync",
+                name="VLM 가격 동기화",
+                replace_existing=True,
+                misfire_grace_time=self.MISFIRE_GRACE_TIME,
+            )
+            self._scheduler.add_job(
+                self._run_vlm_validation_sync,
+                cron_trigger(
+                    hour=constants.VLM_SCHED_VALIDATION_HOURS,
+                    minute=constants.VLM_SCHED_VALIDATION_MINUTE,
+                ),
+                id="vlm_validation_sync",
+                name="VLM 검증 사이클",
+                replace_existing=True,
+                misfire_grace_time=7200,
+            )
+            self._scheduler.add_job(
+                self._run_macro_source_sync,
+                cron_trigger(hour="6,18", minute=35),
+                id="macro_source_sync",
+                name="정부 매크로 자료 동기화",
+                replace_existing=True,
+                misfire_grace_time=7200,
             )
 
         if self.idea_vault_collector:
@@ -322,7 +387,14 @@ class SchedulerService:
                 extra={
                     "generator_poll_seconds": self.generator_poll_seconds,
                     "publisher_poll_seconds": self.publisher_poll_seconds,
+                    "telegram_update_poll_seconds": self.telegram_update_poll_seconds,
                 },
+            )
+
+        if self.job_store:
+            self._telegram_update_task = asyncio.create_task(
+                self._telegram_update_poll_loop(),
+                name="scheduler-telegram-update-poll",
             )
 
         asyncio.create_task(self._run_startup_catchup())
@@ -332,10 +404,12 @@ class SchedulerService:
         if self.api_only_mode:
             await self._cancel_task(self._generator_task)
             await self._cancel_task(self._publisher_task)
+            await self._cancel_task(self._telegram_update_task)
             await self._cancel_task(self._image_collector_task)
             await self._cancel_task(self._memory_worker_task)
             self._generator_task = None
             self._publisher_task = None
+            self._telegram_update_task = None
             self._image_collector_task = None
             self._memory_worker_task = None
             self._memory_event_queue = None
@@ -350,10 +424,12 @@ class SchedulerService:
 
         await self._cancel_task(self._generator_task)
         await self._cancel_task(self._publisher_task)
+        await self._cancel_task(self._telegram_update_task)
         await self._cancel_task(self._image_collector_task)
         await self._cancel_task(self._memory_worker_task)
         self._generator_task = None
         self._publisher_task = None
+        self._telegram_update_task = None
         self._image_collector_task = None
         self._memory_worker_task = None
         self._memory_event_queue = None
@@ -382,6 +458,10 @@ class SchedulerService:
     async def _publisher_worker_loop(self) -> None:
         """시간 분포 기반 발행 워커 루프."""
         await publisher_worker_loop(self)
+
+    async def _telegram_update_poll_loop(self) -> None:
+        """텔레그램 버튼/수정본 메시지 폴링 워커 루프."""
+        await telegram_update_poll_loop(self)
 
     async def _image_collector_worker_loop(self) -> None:
         """텔레그램 반자동 이미지 수집 워커 루프."""
@@ -427,6 +507,21 @@ class SchedulerService:
     async def _run_feedback_analysis(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_feedback_analysis(self, *args, **kwargs)
 
+    async def _run_feedback_rule_maintenance(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_feedback_rule_maintenance(self, *args, **kwargs)
+
+    async def _run_vlm_discovery_sync(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_vlm_discovery_sync(self, *args, **kwargs)
+
+    async def _run_text_model_discovery_sync(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_text_model_discovery_sync(self, *args, **kwargs)
+
+    async def _run_vlm_pricing_sync(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_vlm_pricing_sync(self, *args, **kwargs)
+
+    async def _run_vlm_validation_sync(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_run_vlm_validation_sync(self, *args, **kwargs)
+
     async def _run_sub_job_catchup(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_sub_job_catchup(self, *args, **kwargs)
 
@@ -441,6 +536,9 @@ class SchedulerService:
 
     async def _run_daily_target_check(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_daily_target_check(self, *args, **kwargs)
+
+    async def _collect_telegram_pending_updates(self, *args, **kwargs):
+        return await scheduler_cycles.cycle_collect_telegram_pending_updates(self, *args, **kwargs)
 
     async def _run_draft_prefetch(self, *args, **kwargs):
         return await scheduler_cycles.cycle_run_draft_prefetch(self, *args, **kwargs)
@@ -488,6 +586,50 @@ class SchedulerService:
 
     async def _run_auto_champion_switch(self, *args, **kwargs):
         return await scheduler_cycles.cycle_auto_champion_switch(self, *args, **kwargs)
+
+    async def _run_macro_source_sync(self) -> None:
+        """정부기관 매크로 자료를 주기적으로 수집하고 검토 메시지를 보낸다."""
+        if not self.job_store:
+            return
+
+        def _run() -> Dict[str, Any]:
+            from ..macro.pipeline import MacroPipeline
+            from ..macro.reference_verifier import MacroReferenceVerifier
+
+            source = os.environ.get("MACRO_SOURCE", "MOTIE").strip() or "MOTIE"
+            try:
+                limit = int(os.environ.get("MACRO_SOURCE_SYNC_LIMIT", "3") or "3")
+            except Exception:
+                limit = 3
+            allow_network = os.environ.get("MACRO_ENABLE_NETWORK_VERIFICATION", "").strip().lower() in {"1", "true", "yes"}
+            pipeline = MacroPipeline(
+                job_store=self.job_store,
+                notifier=self.notifier,
+                reference_verifier=MacroReferenceVerifier(allow_network=allow_network),
+            )
+            return pipeline.run_once(
+                source=source,
+                limit=max(1, min(10, limit)),
+                send_telegram=bool(self.notifier and getattr(self.notifier, "enabled", False)),
+            )
+
+        try:
+            result = await asyncio.to_thread(_run)
+            self.job_store.set_system_setting("macro_last_sync_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            self.job_store.set_system_setting("macro_last_sync_source", str(result.get("source", "")))
+            self.job_store.set_system_setting("macro_last_sync_discovered", str(result.get("discovered", 0)))
+            self.job_store.set_system_setting("macro_last_sync_analyzed", str(result.get("analyzed", 0)))
+            logger.info(
+                "Macro source sync completed",
+                extra={
+                    "source": result.get("source"),
+                    "discovered": result.get("discovered"),
+                    "analyzed": result.get("analyzed"),
+                },
+            )
+        except Exception as exc:
+            logger.error("Macro source sync failed: %s", exc, exc_info=True)
+            self.job_store.set_system_setting("macro_last_sync_error", str(exc))
 
     def _get_configured_daily_target(self, *args, **kwargs):
         return scheduler_cycles.cycle_get_configured_daily_target(self, *args, **kwargs)

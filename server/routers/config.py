@@ -123,6 +123,7 @@ def get_config(
         TopicModeOption(value="parenting", label="Parenting"),
         TopicModeOption(value="it", label="IT"),
         TopicModeOption(value="finance", label="Finance"),
+        TopicModeOption(value="health", label="Health"),
         TopicModeOption(value="economy", label="Economy (Alias)"),
     ]
 

@@ -12,8 +12,10 @@ def write_yaml(path: Path, payload):
         yaml.safe_dump(payload, file, allow_unicode=True)
 
 
-def test_load_default_config(tmp_path: Path):
+def test_load_default_config(tmp_path: Path, monkeypatch):
     """default.yaml만 있을 때 기본 설정을 읽는지 검증한다."""
+    monkeypatch.delenv("PIPELINE_MAX_LLM_CALLS_PER_JOB", raising=False)
+
     config_dir = tmp_path / "config"
     write_yaml(
         config_dir / "default.yaml",

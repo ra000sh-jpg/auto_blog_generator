@@ -51,6 +51,57 @@ def test_ai_toggle_snapshot_detects_off_when_no_signal():
     assert PlaywrightPublisher._is_ai_toggle_on_snapshot(snapshot) is False
 
 
+def test_ai_toggle_snapshot_does_not_treat_active_only_as_on():
+    """active/focus 계열 클래스만으로는 AI 활용 ON으로 오판하지 않아야 한다."""
+    snapshot = {
+        "buttonClass": "se-set-ai-mark-button-wrapper active",
+        "wrapperClass": "se-set-ai-mark-button-wrapper active",
+        "markClass": "se-set-ai-mark-button active",
+        "toggleClass": "se-set-ai-mark-button-toggle active",
+        "buttonAriaChecked": "",
+        "buttonAriaPressed": "",
+        "buttonDataActive": "",
+        "buttonChecked": None,
+        "toggleAriaChecked": "",
+        "toggleAriaPressed": "",
+        "toggleDataActive": "",
+        "toggleChecked": None,
+        "wrapperAriaChecked": "",
+        "wrapperAriaPressed": "",
+        "wrapperDataActive": "",
+        "wrapperChecked": None,
+    }
+    assert PlaywrightPublisher._is_ai_toggle_on_snapshot(snapshot) is False
+
+
+def test_ai_toggle_snapshot_can_treat_selected_as_ambiguous_for_manual_images():
+    """수동 이미지 검사에서는 selected 클래스만으로 ON이라고 단정하지 않아야 한다."""
+    snapshot = {
+        "buttonClass": "se-set-ai-mark-button-wrapper",
+        "wrapperClass": "se-set-ai-mark-button-wrapper",
+        "markClass": "se-set-ai-mark-button se-is-selected",
+        "toggleClass": "se-set-ai-mark-button-toggle se-is-selected",
+        "buttonAriaChecked": "",
+        "buttonAriaPressed": "",
+        "buttonDataActive": "",
+        "buttonChecked": None,
+        "toggleAriaChecked": "",
+        "toggleAriaPressed": "",
+        "toggleDataActive": "",
+        "toggleChecked": None,
+        "wrapperAriaChecked": "",
+        "wrapperAriaPressed": "",
+        "wrapperDataActive": "",
+        "wrapperChecked": None,
+    }
+
+    assert PlaywrightPublisher._is_ai_toggle_on_snapshot(snapshot) is True
+    assert PlaywrightPublisher._is_ai_toggle_on_snapshot(
+        snapshot,
+        selected_class_is_on=False,
+    ) is False
+
+
 def test_ai_toggle_alert_message_includes_summary_counts():
     """텔레그램 경고 메시지에 사전/사후검증 요약 수치가 포함되어야 한다."""
 

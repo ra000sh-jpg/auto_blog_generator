@@ -170,7 +170,7 @@ async def create_job_from_magic_input(
 
     raw_topic = request.topic_mode_override or parse_payload.topic_mode
     topic_mode = normalize_topic_mode(raw_topic)
-    if topic_mode not in {"cafe", "parenting", "it", "finance"}:
+    if topic_mode not in {"cafe", "parenting", "it", "finance", "health"}:
         topic_mode = "cafe"
 
     seed_keywords = _normalize_keywords(request.keywords_override or parse_payload.seed_keywords)

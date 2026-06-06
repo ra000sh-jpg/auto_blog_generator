@@ -10,6 +10,7 @@ from modules.automation.job_store import JobConfig, JobStore
 from modules.automation.pipeline_service import PipelineService
 from modules.automation.time_utils import now_utc
 from modules.automation.worker import Worker, WorkerConfig
+from modules.images.placement import convert_markdown_for_naver_editor
 from modules.seo.quality_gate import QualityGateResult
 from modules.uploaders.playwright_publisher import PlaywrightPublisher, PublishResult
 
@@ -40,6 +41,7 @@ class DummyPublisher:
         image_points: Optional[List] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
         self.last_payload = {
             "title": title,
@@ -50,6 +52,7 @@ class DummyPublisher:
             "image_points": list(image_points or []),
             "tags": list(tags or []),
             "category": category or "",
+            "publish_mode": publish_mode or "",
         }
         self.called += 1
         if self.success:
@@ -103,6 +106,511 @@ def schedule_and_claim(store: JobStore, job_id: str = "job-1"):
     jobs = store.claim_due_jobs(limit=1, now_override=scheduled_at)
     assert len(jobs) == 1
     return jobs[0]
+
+
+def test_convert_markdown_table_to_naver_plain_text():
+    """표 이미지 렌더링이 불가능해도 raw Markdown 표가 노출되지 않아야 한다."""
+    raw = (
+        "## 손실을 마주하는 연습, 작은 실수에서 얻은 기준\n\n"
+        "| 구분 | 배움 중심 접근 | 수익 중심 접근 |\n"
+        "| --- | --- | --- |\n"
+        "| 손실 경험 시 반응 | 금액보다 결정 과정을 먼저 점검한다 | 손실 자체를 실패로 인식하고 회피하려 한다 |\n"
+        "| 기록의 목적 | 감정이 개입된 순간을 기준으로 삼는다 | 수익률이나 진입가 위주로 숫자만 적어둔다 |\n"
+    )
+
+    converted = convert_markdown_for_naver_editor(raw)
+
+    assert "##" not in converted
+    assert "| 구분 |" not in converted
+    assert "| --- |" not in converted
+    assert "■ 손실을 마주하는 연습" in converted
+    assert "[표] 구분 / 배움 중심 접근 / 수익 중심 접근" in converted
+    assert "• 배움 중심 접근: 금액보다 결정 과정을 먼저 점검한다" in converted
+
+
+def test_ready_payload_markdown_table_is_normalized_before_publish(tmp_path: Path):
+    """ready_to_publish에 원문 Markdown이 들어와도 발행 직전에 네이버용으로 보정한다."""
+    store = build_store(tmp_path, "ready_markdown_table.db")
+    job = schedule_and_claim(store, "ready-markdown-table-job")
+    raw_content = (
+        "## 손실을 마주하는 연습, 작은 실수에서 얻은 기준\n\n"
+        "| 구분 | 배움 중심 접근 | 수익 중심 접근 |\n"
+        "| --- | --- | --- |\n"
+        "| 손실 경험 시 반응 | 금액보다 결정 과정을 먼저 점검한다 | 손실 자체를 실패로 인식하고 회피하려 한다 |\n\n"
+        "이 표는 투자 기록을 함께 공부하기 위한 기준입니다."
+    )
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "표 변환 테스트",
+            "content": raw_content,
+            "images": [],
+            "image_points": [],
+            "tags": [],
+            "category": "",
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._image_output_dir = str(tmp_path / "images")
+    pipeline._summary_card_enabled = True
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is True
+
+    published_content = str(publisher.last_payload["content"])
+    assert "##" not in published_content
+    assert "| 구분 |" not in published_content
+    assert "| --- |" not in published_content
+    assert "■ 손실을 마주하는 연습" in published_content
+    assert ("[IMG_" in published_content) or ("[표]" in published_content)
+
+
+def test_ready_payload_attaches_summary_card_before_publish(tmp_path: Path):
+    """발행 직전 본문 요약 카드 PNG가 자동으로 첨부되어야 한다."""
+    store = build_store(tmp_path, "ready_summary_card.db")
+    job = schedule_and_claim(store, "ready-summary-card-job")
+    raw_content = (
+        "오늘은 시장이 흔들릴 때 어떤 기준으로 공부를 이어갈지 정리해봅니다.\n\n"
+        "## 시장 전망보다 먼저 마주해야 하는 오해\n"
+        "투자 초심자는 정보가 부족해서만 흔들리는 것이 아니라 작은 손실에도 일상이 흔들릴 수 있습니다. "
+        "그래서 저는 먼저 계좌 숫자보다 몸과 마음의 반응을 기록해보려 합니다.\n\n"
+        "## 초기 자산 배분, 왜 첫 번째 경계선인가\n"
+        "자산 배분은 수익률을 높이는 기술이라기보다 평범한 하루를 지키는 틀입니다. "
+        "생활비와 투자금을 분리하면 예측이 틀린 날에도 다음 선택을 천천히 할 수 있습니다.\n\n"
+        "## 손실을 마주하는 연습\n"
+        "작은 손실에서 감정 반응을 적어보면 나에게 맞는 손실 한도를 조금씩 발견할 수 있습니다. "
+        "이 과정은 누군가를 가르치기보다 함께 공부하는 기록에 가깝습니다. "
+        "시장을 이기겠다는 마음보다, 다음에도 같은 실수를 줄이겠다는 마음이 오래 남는 기준이 됩니다.\n"
+    )
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "요약 카드 테스트",
+            "content": raw_content,
+            "images": [],
+            "image_sources": {},
+            "image_points": [],
+            "tags": [],
+            "category": "",
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._image_output_dir = str(tmp_path / "images")
+    pipeline._summary_card_enabled = True
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is True
+
+    payload = publisher.last_payload
+    assert "[IMG_" in str(payload["content"])
+    summary_points = [
+        point
+        for point in payload["image_points"]
+        if getattr(point, "section_hint", "") == "요약 카드"
+    ]
+    assert len(summary_points) == 1
+    summary_path = Path(summary_points[0].path)
+    assert summary_path.exists()
+    assert payload["image_sources"][str(summary_path)]["provider"] == "summary_card_renderer"
+
+
+def test_ready_payload_attaches_market_chart_before_publish(tmp_path: Path):
+    """시장 스냅샷이 있는 ready payload는 그래프 PNG를 자동 첨부해야 한다."""
+    store = build_store(tmp_path, "ready_market_chart.db")
+    job = schedule_and_claim(store, "ready-market-chart-job")
+    raw_content = (
+        "오늘은 미장 전 지표를 보면서 제가 어떤 기준으로 공부할지 정리해봅니다.\n\n"
+        "■ 숫자보다 먼저 확인할 질문\n\n"
+        "지표가 모두 같은 방향을 말하는 날은 드뭅니다. 그래서 저는 수익 예측보다 먼저 "
+        "나에게 필요한 확인 질문을 적어보려고 합니다.\n\n"
+        "■ 변동률은 결론이 아니라 출발점\n\n"
+        "SPY와 QQQ, BTC의 움직임은 서로 다른 시장의 온도를 보여줍니다. "
+        "다만 이 숫자만 보고 바로 매매 결론을 내리기보다, 오늘 어떤 조건이 깨지는지 함께 보려 합니다.\n"
+    )
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "시장 그래프 테스트",
+            "content": raw_content,
+            "images": [],
+            "image_sources": {},
+            "image_points": [],
+            "tags": [],
+            "category": "",
+            "seo_snapshot": {
+                "market_snapshot": {
+                    "slot": "us_preopen",
+                    "scope": "us",
+                    "data_points": [
+                        {"symbol": "SPY", "source": "Stooq", "value": 624.1, "change_percent": 0.72},
+                        {"symbol": "QQQ", "source": "Stooq", "value": 542.3, "change_percent": -0.35},
+                        {"symbol": "BTC", "source": "CoinGecko", "value": 104200.0, "change_percent": 1.8},
+                    ],
+                }
+            },
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._image_output_dir = str(tmp_path / "images")
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = True
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is True
+
+    payload = publisher.last_payload
+    assert "[IMG_" in str(payload["content"])
+    chart_points = [
+        point
+        for point in payload["image_points"]
+        if getattr(point, "section_hint", "") == "시장 그래프"
+    ]
+    assert len(chart_points) == 1
+    chart_path = Path(chart_points[0].path)
+    assert chart_path.exists()
+    assert payload["image_sources"][str(chart_path)]["provider"] == "market_chart_renderer"
+
+
+def test_ready_payload_applies_visual_sidecar_before_publish(tmp_path: Path):
+    """발행 직전 FreeLLMAPI 시각자료 사이드카가 payload를 보강해야 한다."""
+    store = build_store(tmp_path, "ready_visual_sidecar.db")
+    job = schedule_and_claim(store, "ready-visual-sidecar-job")
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "사이드카 테스트",
+            "content": "도입 문장입니다.\n\n■ 첫 번째 기준\n본문입니다.",
+            "image_sources": {},
+            "image_points": [],
+            "tags": [],
+            "category": "",
+            "quality_snapshot": {},
+            "seo_snapshot": {"topic_mode": "it"},
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+        visual_sidecar=DummyVisualSidecar(),
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is True
+
+    assert "[IMG_0]" in publisher.last_payload["content"]
+    assert publisher.last_payload["image_sources"]["data/images/sidecar_flowchart.png"] == {
+        "kind": "manual",
+        "provider": "freellmapi_visual_sidecar",
+        "renderer": "flowchart",
+    }
+    assert publisher.last_payload["image_points"][0].marker == "[IMG_0]"
+
+
+def test_kr_preopen_auto_publish_passes_publish_mode_and_recommended_tags(tmp_path: Path):
+    """국장전 자동발행 조건을 통과하면 공개발행 모드와 5~8개 태그를 전달한다."""
+
+    store = build_store(tmp_path, "kr_preopen_auto_publish.db")
+    due_now = now_utc()
+    assert store.schedule_job(
+        job_id="kr-auto-publish-job",
+        title="전력설비주가 다시 주목받는 이유",
+        seed_keywords=["전력설비", "AI 데이터센터", "국장"],
+        platform="naver",
+        persona_id="P4",
+        scheduled_at=due_now,
+        tags=[
+            "market_daily",
+            "market_slot:kr_preopen",
+            "auto_publish:kr_preopen",
+            "publish_mode:publish",
+            "opportunity_score:88",
+        ],
+        category="경제 브리핑",
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=due_now)
+    assert len(claimed) == 1
+    assert store.save_prepared_payload(
+        "kr-auto-publish-job",
+        {
+            "title": "전력설비주가 다시 주목받는 이유",
+            "content": ("전력설비와 AI 데이터센터를 국장 전 기준으로 함께 공부합니다. " * 40).strip(),
+            "images": [],
+            "image_sources": {},
+            "image_points": [],
+            "tags": ["전력설비", "AI데이터센터", "국장전브리핑", "오늘의증시", "경제공부"],
+            "category": "경제 브리핑",
+            "quality_snapshot": {"score": 92},
+            "seo_snapshot": {
+                "market_snapshot": {
+                    "confidence_score": 0.72,
+                    "data_point_count": 2,
+                    "data_points": [
+                        {"symbol": "KOSPI", "source": "Stooq", "value": 2870.0},
+                        {"symbol": "USD/KRW", "source": "FRED", "value": 1365.0},
+                    ],
+                }
+            },
+        },
+    )
+    assert store.update_job_status("kr-auto-publish-job", store.STATUS_RUNNING)
+    job = store.get_job("kr-auto-publish-job")
+    assert job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(job)) is True
+
+    assert publisher.called == 1
+    assert publisher.last_payload["publish_mode"] == "publish"
+    assert 5 <= len(publisher.last_payload["tags"]) <= 8
+    assert "market_daily" not in publisher.last_payload["tags"]
+
+
+def test_kr_preopen_auto_publish_blocks_to_approval_when_score_low(tmp_path: Path):
+    """자동발행 조건 미달 시 공개발행하지 않고 승인 대기로 전환한다."""
+
+    store = build_store(tmp_path, "kr_preopen_auto_publish_block.db")
+    due_now = now_utc()
+    assert store.schedule_job(
+        job_id="kr-auto-block-job",
+        title="국장 전 고정 브리핑",
+        seed_keywords=["국장", "환율"],
+        platform="naver",
+        persona_id="P4",
+        scheduled_at=due_now,
+        tags=[
+            "market_daily",
+            "market_slot:kr_preopen",
+            "auto_publish:kr_preopen",
+            "publish_mode:publish",
+            "opportunity_score:30",
+        ],
+        category="경제 브리핑",
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=due_now)
+    assert len(claimed) == 1
+    assert store.save_prepared_payload(
+        "kr-auto-block-job",
+        {
+            "title": "국장 전 고정 브리핑",
+            "content": ("국장 전 시장 기준을 확인하는 글입니다. " * 40).strip(),
+            "images": [],
+            "image_points": [],
+            "tags": ["국장전브리핑", "오늘의증시", "환율", "경제공부", "시장체크"],
+            "category": "경제 브리핑",
+            "quality_snapshot": {"score": 90},
+            "seo_snapshot": {
+                "market_snapshot": {
+                    "confidence_score": 0.70,
+                    "data_point_count": 1,
+                    "data_points": [{"symbol": "KOSPI", "source": "Stooq", "value": 2870.0}],
+                }
+            },
+        },
+    )
+    assert store.update_job_status("kr-auto-block-job", store.STATUS_RUNNING)
+    job = store.get_job("kr-auto-block-job")
+    assert job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(job)) is False
+
+    updated = store.get_job("kr-auto-block-job")
+    assert updated is not None
+    assert updated.status == store.STATUS_AWAITING_APPROVAL
+    assert publisher.called == 0
+    saved_payload = store.load_prepared_payload("kr-auto-block-job")
+    guard = saved_payload["quality_snapshot"]["auto_publish_guard"]
+    assert guard["status"] == "blocked"
+    assert any("글감 기회 점수" in reason for reason in guard["reasons"])
+
+
+def test_kr_preopen_auto_publish_blocks_investment_recommendation_words(tmp_path: Path):
+    """자동발행 조건이 좋아도 투자권유 표현이 있으면 승인 대기로 후퇴한다."""
+
+    store = build_store(tmp_path, "kr_preopen_auto_publish_forbidden.db")
+    due_now = now_utc()
+    assert store.schedule_job(
+        job_id="kr-auto-forbidden-job",
+        title="국장 전 확인 대상 브리핑",
+        seed_keywords=["국장", "환율"],
+        platform="naver",
+        persona_id="P4",
+        scheduled_at=due_now,
+        tags=[
+            "market_daily",
+            "market_slot:kr_preopen",
+            "auto_publish:kr_preopen",
+            "publish_mode:publish",
+            "opportunity_score:88",
+            "writing_strategy:market_preopen_scenario",
+        ],
+        category="경제 브리핑",
+    )
+    assert store.claim_due_jobs(limit=1, now_override=due_now)
+    assert store.save_prepared_payload(
+        "kr-auto-forbidden-job",
+        {
+            "title": "국장 전 확인 대상 브리핑",
+            "content": ("이 종목은 매수 추천 신호라는 식의 표현이 들어간 글입니다. " * 40).strip(),
+            "images": [],
+            "image_points": [],
+            "tags": ["국장전브리핑", "오늘의증시", "환율", "경제공부", "시장체크"],
+            "category": "경제 브리핑",
+            "quality_snapshot": {"score": 92},
+            "seo_snapshot": {
+                "market_snapshot": {
+                    "confidence_score": 0.70,
+                    "data_point_count": 1,
+                    "data_points": [{"symbol": "KOSPI", "source": "Stooq", "value": 2870.0}],
+                }
+            },
+        },
+    )
+    assert store.update_job_status("kr-auto-forbidden-job", store.STATUS_RUNNING)
+    job = store.get_job("kr-auto-forbidden-job")
+    assert job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(job)) is False
+
+    updated = store.get_job("kr-auto-forbidden-job")
+    assert updated is not None
+    assert updated.status == store.STATUS_AWAITING_APPROVAL
+    assert publisher.called == 0
+    saved_payload = store.load_prepared_payload("kr-auto-forbidden-job")
+    reasons = saved_payload["quality_snapshot"]["auto_publish_guard"]["reasons"]
+    assert any("투자 권유 위험 표현" in reason for reason in reasons)
+
+
+def test_kr_preopen_auto_publish_blocks_when_visual_validation_fails(tmp_path: Path):
+    """표/카드 텍스트 검수 실패가 있으면 자동 공개발행을 보류한다."""
+
+    store = build_store(tmp_path, "kr_preopen_visual_block.db")
+    due_now = now_utc()
+    assert store.schedule_job(
+        job_id="kr-auto-visual-block-job",
+        title="국장 전 반도체 수급 기준",
+        seed_keywords=["국장", "반도체"],
+        platform="naver",
+        persona_id="P4",
+        scheduled_at=due_now,
+        tags=[
+            "market_daily",
+            "market_slot:kr_preopen",
+            "auto_publish:kr_preopen",
+            "publish_mode:publish",
+            "opportunity_score:92",
+        ],
+        category="경제 브리핑",
+    )
+    claimed = store.claim_due_jobs(limit=1, now_override=due_now)
+    assert len(claimed) == 1
+    assert store.save_prepared_payload(
+        "kr-auto-visual-block-job",
+        {
+            "title": "국장 전 반도체 수급 기준",
+            "content": ("국장 전 시장 기준을 확인하는 글입니다. " * 40).strip(),
+            "images": [],
+            "image_points": [],
+            "tags": ["국장전브리핑", "오늘의증시", "반도체", "환율", "시장체크"],
+            "category": "경제 브리핑",
+            "quality_snapshot": {
+                "score": 92,
+                "visual_text_validation": {
+                    "passed": False,
+                    "issues": ["tables:table_0_row_1_trimmed"],
+                },
+            },
+            "seo_snapshot": {
+                "market_snapshot": {
+                    "confidence_score": 0.78,
+                    "data_point_count": 2,
+                    "data_points": [
+                        {"symbol": "KOSPI", "source": "Stooq", "value": 2870.0},
+                        {"symbol": "USD/KRW", "source": "FRED", "value": 1365.0},
+                    ],
+                }
+            },
+        },
+    )
+    assert store.update_job_status("kr-auto-visual-block-job", store.STATUS_RUNNING)
+    job = store.get_job("kr-auto-visual-block-job")
+    assert job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(job)) is False
+
+    updated = store.get_job("kr-auto-visual-block-job")
+    assert updated is not None
+    assert updated.status == store.STATUS_AWAITING_APPROVAL
+    assert publisher.called == 0
+    saved_payload = store.load_prepared_payload("kr-auto-visual-block-job")
+    guard = saved_payload["quality_snapshot"]["auto_publish_guard"]
+    assert guard["status"] == "blocked"
+    assert any("표/카드" in reason for reason in guard["reasons"])
 
 
 def test_pipeline_quality_retry_mask(tmp_path: Path):
@@ -214,46 +722,6 @@ def test_pipeline_already_published_skip(tmp_path: Path, monkeypatch: pytest.Mon
     assert publisher.called == 0
 
 
-def test_ready_payload_applies_visual_sidecar_before_publish(tmp_path: Path):
-    """발행 직전 FreeLLMAPI 시각자료 사이드카가 payload를 보강해야 한다."""
-    store = build_store(tmp_path, "ready_visual_sidecar.db")
-    job = schedule_and_claim(store, "ready-visual-sidecar-job")
-    assert store.save_prepared_payload(
-        job.job_id,
-        {
-            "title": "사이드카 테스트",
-            "content": "본문입니다.\n\n두 번째 문단입니다.",
-            "images": [],
-            "image_sources": {},
-            "image_points": [],
-            "tags": [],
-            "category": "",
-            "seo_snapshot": {"topic_mode": "it"},
-        },
-    )
-    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
-    running_job = store.get_job(job.job_id)
-    assert running_job is not None
-
-    publisher = DummyPublisher()
-    pipeline = PipelineService(
-        job_store=store,
-        publisher=publisher,
-        generate_fn=lambda _job: {},
-        visual_sidecar=DummyVisualSidecar(),
-    )
-
-    assert asyncio.run(pipeline.process_publication(running_job)) is True
-
-    assert "[IMG_0]" in publisher.last_payload["content"]
-    assert publisher.last_payload["image_sources"]["data/images/sidecar_flowchart.png"] == {
-        "kind": "manual",
-        "provider": "freellmapi_visual_sidecar",
-        "renderer": "flowchart",
-    }
-    assert getattr(publisher.last_payload["image_points"][0], "marker", "") == "[IMG_0]"
-
-
 def test_playwright_dry_run_returns_url(monkeypatch: pytest.MonkeyPatch):
     """DRY_RUN=true면 실제 브라우저 없이 URL을 반환하는지 검증."""
     monkeypatch.setenv("DRY_RUN", "true")
@@ -306,6 +774,7 @@ def test_pipeline_sub_job_uses_channel_publisher(
 ):
     """서브 잡은 채널 기반 퍼블리셔를 선택해서 발행해야 한다."""
     store = build_store(tmp_path, "sub_channel_publish.db")
+    store.set_system_setting("telegram_draft_approval_enabled", "false")
     channel_id = "channel-sub-1"
     assert store.insert_channel(
         {

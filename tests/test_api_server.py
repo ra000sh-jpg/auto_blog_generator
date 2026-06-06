@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Generator
 
 import pytest
@@ -87,6 +88,197 @@ def test_jobs_post_and_list(client: TestClient):
     assert list_payload["total"] == 1
     assert len(list_payload["items"]) == 1
     assert list_payload["items"][0]["title"] == "FastAPI 작업 생성 테스트"
+
+
+def test_ops_check_and_text_archive_index(client: TestClient):
+    """운영 점검과 텍스트 백업 인덱스를 조회할 수 있어야 한다."""
+    store = app.dependency_overrides[get_job_store]()
+    assert store.archive_post_text(
+        job_id="archive-test-1",
+        title="수정본 반영 테스트",
+        final_content="본문입니다.\n\n| 구분 | 값 |\n| --- | --- |\n| 이미지 | 1 |",
+        tags=["market_daily", "market_slot:kr_preopen"],
+        category="경제 공부와 투자 기록",
+        quality_snapshot={
+            "score": 87,
+            "manual_revision_applied": True,
+            "insight_quality": {"overall_score": 82},
+        },
+        image_manifest={"summary": "summary-card.png"},
+    )
+
+    check_response = client.get("/api/ops/check")
+    assert check_response.status_code == 200
+    check_payload = check_response.json()
+    assert "checks" in check_payload
+    assert any(item["key"] == "database" for item in check_payload["checks"])
+
+    backups_response = client.get("/api/ops/backups?limit=5")
+    assert backups_response.status_code == 200
+    backups_payload = backups_response.json()
+    assert backups_payload["items"][0]["title"] == "수정본 반영 테스트"
+    assert backups_payload["items"][0]["manual_revision_applied"] is True
+    assert backups_payload["items"][0]["image_count"] == 1
+
+    revisions_response = client.get("/api/ops/revisions?limit=5")
+    assert revisions_response.status_code == 200
+    revisions_payload = revisions_response.json()
+    assert len(revisions_payload["items"]) == 1
+
+
+def test_jobs_cancel_queued_success_without_idea_lock(client: TestClient):
+    """아이디어 연계가 없는 queued 작업도 정상 취소되어야 한다."""
+    create_response = client.post(
+        "/api/jobs",
+        json={
+            "title": "취소 테스트 queued",
+            "seed_keywords": ["cancel", "queued"],
+            "platform": "naver",
+            "persona_id": "P1",
+        },
+    )
+    assert create_response.status_code == 201
+    job_id = create_response.json()["job_id"]
+
+    cancel_response = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.json()
+    assert cancel_payload["ok"] is True
+    assert cancel_payload["status"] == "cancelled"
+    assert int(cancel_payload["released_idea_locks"]) == 0
+
+    detail_response = client.get(f"/api/jobs/{job_id}")
+    assert detail_response.status_code == 200
+    detail_payload = detail_response.json()
+    assert detail_payload["status"] == "cancelled"
+    assert detail_payload["error_code"] == "USER_CANCELLED"
+
+
+def test_jobs_cancel_retry_wait_and_ready_to_publish(client: TestClient):
+    """retry_wait/ready_to_publish 상태는 취소 가능해야 한다."""
+    store = app.dependency_overrides[get_job_store]()
+
+    retry_job_id = str(uuid.uuid4())
+    ready_job_id = str(uuid.uuid4())
+    assert store.schedule_job(
+        job_id=retry_job_id,
+        title="retry cancel",
+        seed_keywords=["retry"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at="2026-02-20T00:00:00Z",
+        status=store.STATUS_RETRY_WAIT,
+    )
+    assert store.schedule_job(
+        job_id=ready_job_id,
+        title="ready cancel",
+        seed_keywords=["ready"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at="2026-02-20T00:00:00Z",
+        status=store.STATUS_READY,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET next_retry_at = ? WHERE job_id = ?",
+            ("2026-02-20T00:30:00Z", retry_job_id),
+        )
+
+    retry_cancel = client.post(f"/api/jobs/{retry_job_id}/cancel")
+    assert retry_cancel.status_code == 200
+    ready_cancel = client.post(f"/api/jobs/{ready_job_id}/cancel")
+    assert ready_cancel.status_code == 200
+
+    retry_detail = client.get(f"/api/jobs/{retry_job_id}").json()
+    ready_detail = client.get(f"/api/jobs/{ready_job_id}").json()
+    assert retry_detail["status"] == "cancelled"
+    assert retry_detail["next_retry_at"] is None
+    assert ready_detail["status"] == "cancelled"
+
+
+def test_jobs_cancel_rejects_running_and_recancel(client: TestClient):
+    """취소 불가 상태와 재취소 요청은 409를 반환해야 한다."""
+    store = app.dependency_overrides[get_job_store]()
+
+    running_job_id = str(uuid.uuid4())
+    recancel_job_id = str(uuid.uuid4())
+    assert store.schedule_job(
+        job_id=running_job_id,
+        title="running job",
+        seed_keywords=["running"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at="2026-02-20T00:00:00Z",
+        status=store.STATUS_RUNNING,
+    )
+    assert store.schedule_job(
+        job_id=recancel_job_id,
+        title="recancel job",
+        seed_keywords=["queued"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at="2026-02-20T00:00:00Z",
+        status=store.STATUS_QUEUED,
+    )
+
+    running_cancel = client.post(f"/api/jobs/{running_job_id}/cancel")
+    assert running_cancel.status_code == 409
+    assert "cancelable=queued,retry_wait,ready_to_publish" in running_cancel.text
+
+    first_cancel = client.post(f"/api/jobs/{recancel_job_id}/cancel")
+    assert first_cancel.status_code == 200
+    second_cancel = client.post(f"/api/jobs/{recancel_job_id}/cancel")
+    assert second_cancel.status_code == 409
+    assert "status=cancelled" in second_cancel.text
+
+
+def test_jobs_cancel_releases_idea_vault_lock(client: TestClient):
+    """아이디어 창고에 연결된 queued 잡 취소 시 잠금이 해제되어야 한다."""
+    store = app.dependency_overrides[get_job_store]()
+    job_id = str(uuid.uuid4())
+    assert store.schedule_job(
+        job_id=job_id,
+        title="idea vault cancel",
+        seed_keywords=["idea"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at="2026-02-20T00:00:00Z",
+        status=store.STATUS_QUEUED,
+    )
+    inserted = store.add_idea_vault_items(
+        [
+            {
+                "raw_text": "취소 시 잠금 해제 테스트",
+                "mapped_category": "다양한 생각",
+                "topic_mode": "cafe",
+                "parser_used": "test",
+            }
+        ]
+    )
+    assert inserted == 1
+    claimed = store.claim_random_idea_vault_items([job_id])
+    assert len(claimed) == 1
+    claimed_id = int(claimed[0]["id"])
+
+    cancel_response = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.json()
+    assert int(cancel_payload["released_idea_locks"]) == 1
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT status, queued_job_id FROM idea_vault WHERE id = ?",
+            (claimed_id,),
+        ).fetchone()
+    assert row is not None
+    assert str(row["status"]) == store.IDEA_STATUS_PENDING
+    assert str(row["queued_job_id"]) == ""
+
+
+def test_jobs_cancel_returns_404_when_missing(client: TestClient):
+    """존재하지 않는 job_id 취소 요청은 404여야 한다."""
+    response = client.post("/api/jobs/not-found-job/cancel")
+    assert response.status_code == 404
 
 
 def test_metrics_returns_recent_rows(client: TestClient):
@@ -191,7 +383,7 @@ def test_config_readonly_masked_keys(
     assert persona_values == ["P1", "P2", "P3", "P4"]
 
     topic_values = [item["value"] for item in payload["topic_modes"]]
-    assert topic_values == ["cafe", "parenting", "it", "finance", "economy"]
+    assert topic_values == ["cafe", "parenting", "it", "finance", "health", "economy"]
 
 
 def test_onboarding_wizard_roundtrip(
@@ -522,6 +714,179 @@ def test_telegram_verify_requires_private_chat(
     assert verify_response.status_code == 409
 
 
+def test_telegram_webhook_callback_query_approve_feedback_candidate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """텔레그램 callback_query로 피드백 후보 승인 처리가 동작해야 한다."""
+    import server.routers.telegram_webhook as telegram_router
+
+    store = app.dependency_overrides[get_job_store]()
+    store.set_system_setting("telegram_bot_token", "123456789:ABCdef_token")
+    store.set_system_setting("telegram_chat_id", "777001")
+
+    candidate = None
+    for _ in range(5):
+        candidate = store.record_feedback_suggestion_observation(
+            suggestion_text="이미지와 본문 단락 사이 간격을 조금 더 넓히세요",
+            visual_score=79.0,
+        )
+    assert candidate is not None
+    assert candidate["status"] == "pending_approval"
+
+    prepared = store.prepare_feedback_candidate_notification(candidate["id"], callback_ttl_hours=24)
+    assert prepared is not None
+    callback_token = prepared["callback_token"]
+
+    answered: list[str] = []
+    replied: list[str] = []
+
+    async def _fake_answer_callback_query(
+        bot_token: str,
+        callback_query_id: str,
+        text: str,
+        *,
+        show_alert: bool = False,
+    ) -> None:
+        del bot_token, callback_query_id, show_alert
+        answered.append(text)
+
+    async def _fake_send_reply(bot_token: str, chat_id: int | str, text: str) -> None:
+        del bot_token, chat_id
+        replied.append(text)
+
+    monkeypatch.setattr(telegram_router, "_answer_callback_query", _fake_answer_callback_query)
+    monkeypatch.setattr(telegram_router, "_send_telegram_reply", _fake_send_reply)
+
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "cbq_001",
+                "data": f"afl:v1:a:{candidate['id']}:{callback_token}",
+                "message": {"chat": {"id": 777001, "type": "private"}},
+            }
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["callback_handled"] is True
+    assert payload["callback_action"] == "approve"
+    assert any("자동 반영" in text for text in answered)
+    assert any("다음 포스트부터 자동 반영" in text for text in replied)
+
+    active_rules = store.list_active_feedback_rules(limit=3)
+    assert len(active_rules) == 1
+
+    duplicate = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "cbq_002",
+                "data": f"afl:v1:a:{candidate['id']}:{callback_token}",
+                "message": {"chat": {"id": 777001, "type": "private"}},
+            }
+        },
+    )
+    assert duplicate.status_code == 200
+    duplicate_payload = duplicate.json()
+    assert duplicate_payload["callback_handled"] is False
+    assert duplicate_payload["reason"] == "already_handled"
+
+
+def test_telegram_webhook_callback_query_promotes_macro_candidate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """텔레그램 callback_query로 매크로 후보를 초안 생성 큐에 올릴 수 있어야 한다."""
+    import server.routers.telegram_webhook as telegram_router
+    from modules.macro.telegram_approval import build_callback_data
+
+    store = app.dependency_overrides[get_job_store]()
+    store.set_system_setting("telegram_bot_token", "123456789:ABCdef_token")
+    store.set_system_setting("telegram_chat_id", "777001")
+
+    document = store.upsert_macro_document(
+        {
+            "source": "MOTIE",
+            "title": "2026년 5월 수출입 동향",
+            "published_at": "2026-06-01",
+            "url": "https://example.test/motie",
+            "file_url": "",
+            "file_type": "html",
+            "attachments_json": [],
+            "status": "analyzed",
+            "hash": "macro-api-test-hash",
+        }
+    )
+    candidate = store.replace_macro_blog_candidates(
+        document["id"],
+        [
+            {
+                "title": "대미 수출 증가는 한국 경제에 어떤 의미를 줄까",
+                "angle": "미국 연결",
+                "target_reader": "미국 매크로와 한국 수출을 함께 보는 독자",
+                "outline_json": {"sections": ["대미 수출", "한국 ETF 관점"]},
+                "status": "needs_review",
+            }
+        ],
+    )[0]
+
+    answered: list[str] = []
+    replied: list[str] = []
+
+    async def _fake_answer_callback_query(
+        bot_token: str,
+        callback_query_id: str,
+        text: str,
+        *,
+        show_alert: bool = False,
+    ) -> None:
+        del bot_token, callback_query_id, show_alert
+        answered.append(text)
+
+    async def _fake_send_reply(
+        bot_token: str,
+        chat_id: int | str,
+        text: str,
+        *,
+        reply_markup=None,
+    ) -> None:
+        del bot_token, chat_id, reply_markup
+        replied.append(text)
+
+    monkeypatch.setattr(telegram_router, "_answer_callback_query", _fake_answer_callback_query)
+    monkeypatch.setattr(telegram_router, "_send_telegram_reply", _fake_send_reply)
+
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "macro_cbq_001",
+                "data": build_callback_data(action="promote", candidate_id=candidate["id"]),
+                "message": {"chat": {"id": 777001, "type": "private"}},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["callback_handled"] is True
+    assert payload["callback_action"] == "promote"
+    assert any("초안 생성 큐" in text for text in answered)
+    assert any("job_id:" in text for text in replied)
+
+    updated_candidate = store.get_macro_blog_candidate(candidate["id"])
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT title, tags FROM jobs WHERE title = ?",
+            (candidate["title"],),
+        ).fetchall()
+    assert updated_candidate["status"] == "approved"
+    assert len(rows) == 1
+    assert f"macro_candidate:{candidate['id']}" in rows[0]["tags"]
+
+
 def test_onboarding_persona_questionnaire_answers_apply_scores(client: TestClient):
     """질문지 응답이 있으면 슬라이더 대신 질문지 점수를 우선 반영해야 한다."""
     response = client.post(
@@ -775,6 +1140,12 @@ def test_router_settings_quote_and_save(client: TestClient):
     assert "matrix" in initial_payload
     assert "competition" in initial_payload
     assert len(initial_payload["matrix"]["text_models"]) >= 1
+    assert len(initial_payload["matrix"]["vlm_models"]) >= 1
+    first_vlm = initial_payload["matrix"]["vlm_models"][0]
+    assert "model" in first_vlm
+    assert "status" in first_vlm
+    assert "quality_score" in first_vlm
+    assert "estimated_cost_krw" in first_vlm
 
     quote = client.post(
         "/api/router-settings/quote",
@@ -851,6 +1222,35 @@ def test_router_settings_save_supports_image_ai_fields(client: TestClient):
     assert settings["image_topic_quota_overrides"]["it"] == "1"
     assert settings["image_topic_quota_overrides"]["cafe"] == "0"
     assert settings["traffic_feedback_strong_mode"] is True
+
+
+def test_router_settings_save_supports_vlm_fields(client: TestClient):
+    """VLM 토글/모델/전략 설정이 저장되어야 한다."""
+    response = client.post(
+        "/api/router-settings/save",
+        json={
+            "strategy_mode": "balanced",
+            "text_api_keys": {"nvidia": "nv-test-key"},
+            "image_api_keys": {"pexels": "pex-test-key"},
+            "image_engine": "pexels",
+            "image_enabled": True,
+            "images_per_post": 1,
+            "vlm_enabled": True,
+            "vlm_model": "meta/llama-3.2-90b-vision-instruct",
+            "vlm_strategy_mode": "inherit",
+            "vlm_eval_sampling_rate": 0.45,
+            "vlm_quality_floor": 70.0,
+            "vlm_max_cost_guard_krw": 25.0,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["settings"]["vlm_enabled"] is True
+    assert payload["settings"]["vlm_model"] == "meta/llama-3.2-90b-vision-instruct"
+    assert payload["settings"]["vlm_strategy_mode"] == "inherit"
+    assert payload["settings"]["vlm_eval_sampling_rate"] == 0.45
+    assert payload["settings"]["vlm_quality_floor"] == 70.0
+    assert payload["settings"]["vlm_max_cost_guard_krw"] == 25.0
 
 
 def test_router_quote_includes_ai_stock_image_count_split(client: TestClient):

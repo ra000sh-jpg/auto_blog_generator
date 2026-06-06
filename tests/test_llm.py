@@ -234,6 +234,220 @@ def test_quality_threshold_test_slot_uses_fallback_category(tmp_path: Path):
     assert result.quality_snapshot["quality_slot_type"] == "test"
 
 
+def test_quality_check_retries_with_simple_prompt_when_parse_fails():
+    """품질 JSON 파싱 실패 시 단순 프롬프트로 1회 재평가해야 한다."""
+    outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
+        "# 테스트\n\n## 본문\n\n초안 본문",
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        "전체적으로 괜찮지만 보강 여지가 있습니다.",  # JSON/점수 모두 없음 → 단순 프롬프트 재시도 유도
+        '{"score": 82, "issues": ["세부 사례 보강"], "summary": "양호"}',  # 단순 프롬프트 재시도 결과
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    generator = ContentGenerator(
+        client=FakeClaudeClient(outputs),
+        max_rewrites=0,
+    )
+    result = asyncio.run(generator.generate(build_job("quality-parse-fallback-job")))
+
+    assert result.quality_gate == "pass"
+    assert result.quality_snapshot["score"] == 82
+    assert any("JSON 형식으로만 답변" in call["user_prompt"] for call in generator.primary.calls)
+
+
+def test_quality_check_extracts_score_from_plain_text_response():
+    """비JSON 품질 응답에서도 점수 텍스트를 추출해 게이트를 판단해야 한다."""
+    outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
+        "# 테스트\n\n## 본문\n\n초안 본문",
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        "전반적으로 검토가 필요합니다.",  # 원본 응답: JSON/점수 없음
+        "최종 점수: 84/100. 전반적으로 양호합니다.",  # 재평가 응답: 비JSON 점수 텍스트
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    generator = ContentGenerator(
+        client=FakeClaudeClient(outputs),
+        max_rewrites=0,
+    )
+    result = asyncio.run(generator.generate(build_job("quality-text-score-job")))
+
+    assert result.quality_gate == "pass"
+    assert result.quality_snapshot["score"] == 84
+    assert any("JSON 형식으로만 답변" in call["user_prompt"] for call in generator.primary.calls)
+
+
+def test_quality_check_prefers_simple_json_over_plain_text_score():
+    """원본 응답에 점수 텍스트가 있어도 단순 JSON 재평가 결과를 우선해야 한다."""
+    outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
+        "# 테스트\n\n## 본문\n\n초안 본문",
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        "점수는 53점입니다. 개선이 필요합니다.",  # 원본 텍스트 점수(낮음)
+        '{"score": 82, "issues": ["구체성 보강"], "summary": "양호"}',  # 단순 재평가 점수(우선 반영)
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    generator = ContentGenerator(
+        client=FakeClaudeClient(outputs),
+        max_rewrites=0,
+    )
+    result = asyncio.run(generator.generate(build_job("quality-json-priority-job")))
+
+    assert result.quality_gate == "pass"
+    assert result.quality_snapshot["score"] == 82
+    assert any("JSON 형식으로만 답변" in call["user_prompt"] for call in generator.primary.calls)
+
+
+def test_quality_check_low_confidence_text_score_is_clamped_to_retry_mask_floor(tmp_path):
+    """재평가도 비JSON일 때 추출 점수는 retry_all로 떨어지지 않게 floor로 보정해야 한다.
+
+    실제 DB의 llm_retry_mask_floor 설정값에 영향받지 않도록 격리 DB를 사용한다.
+    """
+    outputs = [
+        '{"reader_current_knowledge":"기초 이해","reader_misconceptions":[],"reader_top_questions":[],"emotional_curve":{"opening_emotion":"호기심","turning_point":"전환","closing_emotion":"실행"},"recommended_structure":[]}',
+        "# 테스트\n\n## 본문\n\n초안 본문",
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        "전체적으로 검토가 필요합니다.",  # 원본 응답: JSON/점수 없음
+        "점수는 53점입니다. 전반적으로 개선 필요.",  # 재평가 응답: 점수 텍스트만 존재
+        "# 테스트\n\n## 본문\n\nSEO 반영 본문",
+        '{"thumbnail": {"prompt": "test thumbnail"}, "content_images": []}',
+    ]
+    # 격리 DB: system_settings에 floor 설정 없음 → 클래스 기본값(60) 사용
+    generator = ContentGenerator(
+        client=FakeClaudeClient(outputs),
+        max_rewrites=0,
+        db_path=str(tmp_path / "isolated.db"),
+    )
+    result = asyncio.run(generator.generate(build_job("quality-text-floor-job")))
+
+    assert result.quality_gate == "retry_mask"
+    assert result.quality_snapshot["score"] == ContentGenerator.QUALITY_RETRY_MASK_FLOOR
+
+
+def test_limit_exact_keyword_repetition_reduces_overuse():
+    """정확 구문 키워드가 과반복되면 후반부를 변주 표현으로 바꿔야 한다."""
+    generator = ContentGenerator(
+        client=FakeClaudeClient([]),
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+    )
+    content = (
+        "봄맞이 카페 인테리어는 중요해요. "
+        "봄맞이 카페 인테리어를 준비하면 좋아요. "
+        "봄맞이 카페 인테리어 사례를 보면 도움돼요. "
+        "봄맞이 카페 인테리어를 체크해보세요."
+    )
+
+    updated = generator._limit_exact_keyword_repetition(
+        content=content,
+        keywords=["봄맞이 카페 인테리어"],
+        max_exact_matches=2,
+    )
+
+    assert updated.lower().count("봄맞이 카페 인테리어") <= 2
+    assert updated != content
+
+
+def test_limit_exact_keyword_repetition_keeps_content_when_under_limit():
+    """반복 횟수가 임계치 이하면 원문을 유지해야 한다."""
+    generator = ContentGenerator(
+        client=FakeClaudeClient([]),
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+    )
+    content = "봄맞이 카페 인테리어를 준비해요. 카페 인테리어 방향을 정리해요."
+
+    updated = generator._limit_exact_keyword_repetition(
+        content=content,
+        keywords=["봄맞이 카페 인테리어"],
+        max_exact_matches=2,
+    )
+
+    assert updated == content
+
+
+def test_sanitize_meta_headings_and_normalize_h2_levels():
+    """메타 제목은 제거되고 H3/H4만 있는 구조는 H2로 정규화되어야 한다."""
+    generator = ContentGenerator(
+        client=FakeClaudeClient([]),
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+    )
+    content = "### 개선된 콘텐츠\n\n### 봄맞이 카페 인테리어 팁\n\n#### 실행 방법\n본문"
+
+    sanitized = generator._sanitize_meta_headings(content)
+    normalized = generator._normalize_heading_levels(sanitized)
+
+    assert "개선된 콘텐츠" not in normalized
+    assert "## 봄맞이 카페 인테리어 팁" in normalized
+    assert "## 실행 방법" in normalized
+
+
+def test_estimate_quality_score_fallback_returns_reasonable_score():
+    """점수 누락 시 구조 기반 휴리스틱 점수가 계산되어야 한다."""
+    generator = ContentGenerator(
+        client=FakeClaudeClient([]),
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+    )
+    content = (
+        "## 도입\n충분히 긴 설명 문장입니다.\n\n"
+        "## 실행 체크리스트\n- 항목 1\n- 항목 2\n\n"
+        "## 마무리\n정리 문장입니다."
+    )
+    score = generator._estimate_quality_score_fallback(
+        content=content,
+        keywords=["봄맞이 카페 인테리어"],
+        parsed={},
+        raw_text="",
+    )
+
+    assert score is not None
+    assert 55 <= score <= 88
+
+
+def test_compute_keyword_count_applies_semantic_floor():
+    """정확 일치가 0이어도 의미 포함이면 keyword_count는 최소 1이어야 한다."""
+    generator = ContentGenerator(
+        client=FakeClaudeClient([]),
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+    )
+    content = "초등 저학년 아이의 생활 습관을 함께 점검해요."
+
+    count = generator._compute_keyword_count(
+        content=content,
+        keywords=["초등 저학년 생활습관"],
+    )
+
+    assert count == 1
+
+
+def test_compute_keyword_count_returns_zero_when_no_semantic_hit():
+    """정확/의미 모두 없으면 keyword_count는 0이어야 한다."""
+    generator = ContentGenerator(
+        client=FakeClaudeClient([]),
+        enable_quality_check=False,
+        enable_seo_optimization=False,
+        enable_voice_rewrite=False,
+    )
+    content = "카페 원두 보관과 추출 온도에 대한 글입니다."
+
+    count = generator._compute_keyword_count(
+        content=content,
+        keywords=["초등 저학년 생활습관"],
+    )
+
+    assert count == 0
+
+
 def test_llm_generate_fn_compatible_with_pipeline(monkeypatch: pytest.MonkeyPatch):
     """PipelineService가 기대하는 결과 스키마를 반환하는지 검증한다."""
     import modules.llm as llm_module

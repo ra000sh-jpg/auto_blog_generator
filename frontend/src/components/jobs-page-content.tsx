@@ -16,17 +16,17 @@ export function JobsPageContent() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="font-[family-name:var(--font-heading)] text-2xl font-semibold tracking-tight">
-              Jobs
+              초안 승인과 임시저장 기록
             </h1>
             <p className="mt-1 text-sm text-slate-600">
-              예약/진행/완료 작업 리스트를 확인하고 새 작업을 추가합니다.
+              텔레그램 승인 대기, 수정 필요, 네이버 임시저장 결과를 우선 확인합니다.
             </p>
           </div>
           <Link
             href="/jobs/new"
             className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700"
           >
-            + 새 작업 예약
+            한 문장 예약
           </Link>
         </div>
       </section>

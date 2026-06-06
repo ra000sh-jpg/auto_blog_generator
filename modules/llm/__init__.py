@@ -37,6 +37,9 @@ def _build_generator(
         generation_plan = router.build_generation_plan()
     else:
         generation_plan = router.build_generation_plan_for_job(job=job)
+    cost_controls = dict(generation_plan.get("cost_controls", {}))
+    strategy_mode = str(generation_plan.get("strategy_mode", "cost")).strip().lower()
+    cost_strict_active = strategy_mode == "cost" and bool(cost_controls.get("strict_mode", False))
 
     def _build_client_from_spec(spec: Dict[str, Any]) -> Optional[Any]:
         provider = str(spec.get("provider", "")).strip().lower()
@@ -128,7 +131,7 @@ def _build_generator(
         notifier=notifier,
     )
     circuit_breaker.load_all_from_db(
-        ["qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras"]
+        ["qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras", "nvidia"]
     )
 
     web_search_client = None
@@ -161,6 +164,24 @@ def _build_generator(
                     )
     except Exception as exc:
         logger.warning("Web search client init failed: %s", exc)
+
+    naver_search_collector = None
+    try:
+        from ..collectors import NaverSearchCollector
+
+        candidate_collector = NaverSearchCollector()
+        if candidate_collector.enabled:
+            naver_search_collector = candidate_collector
+    except Exception as exc:
+        logger.warning("Naver search collector init skipped: %s", exc)
+
+    market_data_collector = None
+    try:
+        from ..market import MarketDataCollector
+
+        market_data_collector = MarketDataCollector()
+    except Exception as exc:
+        logger.warning("Market data collector init skipped: %s", exc)
 
     # ── 메모리 스토어 초기화 ──
     memory_store = None
@@ -197,7 +218,15 @@ def _build_generator(
         web_search_client=web_search_client,
         web_fetch_client=web_fetch_client,
         web_search_max_results=web_search_max_results,
+        naver_search_collector=naver_search_collector,
+        market_data_collector=market_data_collector,
         memory_store=memory_store,
+        strategy_mode=strategy_mode,
+        cost_strict_mode=cost_strict_active,
+        cost_retry_max_retries=int(cost_controls.get("retry_max_retries", 6) or 6),
+        cost_retry_base_delay_sec=float(cost_controls.get("retry_base_delay_sec", 2.0) or 2.0),
+        cost_retry_max_delay_sec=float(cost_controls.get("retry_max_delay_sec", 20.0) or 20.0),
+        cost_lock_quality_provider=bool(cost_controls.get("lock_quality_provider", True)),
     )
 
 

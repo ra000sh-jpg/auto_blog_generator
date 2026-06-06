@@ -66,6 +66,13 @@ export type JobsResponse = {
     created_at: string;
     updated_at: string;
     category: string;
+    tags?: string[];
+    result_url?: string;
+    error_code?: string;
+    error_message?: string;
+    quality_snapshot?: Record<string, unknown>;
+    prepared_payload?: Record<string, unknown>;
+    completed_at?: string;
   }>;
 };
 
@@ -76,6 +83,9 @@ export type CreateJobPayload = {
   persona_id: string;
   scheduled_at?: string;
   topic_mode: string;
+  category?: string;
+  max_retries?: number;
+  tags?: string[];
 };
 
 export type CreateJobResponse = {
@@ -86,6 +96,14 @@ export type CreateJobResponse = {
   persona_id: string;
   topic_mode: string;
   category: string;
+};
+
+export type CancelJobResponse = {
+  ok: boolean;
+  job_id: string;
+  status: string;
+  message: string;
+  released_idea_locks: number;
 };
 
 export type ApiKeyStatus = {
@@ -375,6 +393,13 @@ export type RouterSettingsPayload = {
   strategy_mode: string;
   text_api_keys: Record<string, string>;
   image_api_keys: Record<string, string>;
+  cost_strict_mode?: boolean;
+  cost_free_only_fallback?: boolean;
+  cost_max_fallback_usd_per_1m?: number;
+  cost_retry_max_retries?: number;
+  cost_retry_base_delay_sec?: number;
+  cost_retry_max_delay_sec?: number;
+  cost_lock_quality_provider?: boolean;
   image_engine: string;
   image_ai_engine?: string;
   image_ai_quota?: "0" | "1" | "2" | "3" | "4" | "all";
@@ -384,6 +409,12 @@ export type RouterSettingsPayload = {
   images_per_post: number;
   images_per_post_min?: number;
   images_per_post_max?: number;
+  vlm_enabled?: boolean;
+  vlm_model?: string;
+  vlm_strategy_mode?: "inherit" | "cost" | "balanced" | "quality";
+  vlm_eval_sampling_rate?: number;
+  vlm_quality_floor?: number;
+  vlm_max_cost_guard_krw?: number;
   challenger_model?: string;
 };
 
@@ -412,6 +443,13 @@ export type RouterSettingsResponse = {
     strategy_mode: string;
     text_api_keys_masked: Record<string, string>;
     image_api_keys_masked: Record<string, string>;
+    cost_strict_mode: boolean;
+    cost_free_only_fallback: boolean;
+    cost_max_fallback_usd_per_1m: number;
+    cost_retry_max_retries: number;
+    cost_retry_base_delay_sec: number;
+    cost_retry_max_delay_sec: number;
+    cost_lock_quality_provider: boolean;
     image_engine: string;
     image_ai_engine: string;
     image_ai_quota: string;
@@ -421,6 +459,12 @@ export type RouterSettingsResponse = {
     images_per_post: number;
     images_per_post_min: number;
     images_per_post_max: number;
+    vlm_enabled: boolean;
+    vlm_model: string;
+    vlm_strategy_mode: "inherit" | "cost" | "balanced" | "quality";
+    vlm_eval_sampling_rate: number;
+    vlm_quality_floor: number;
+    vlm_max_cost_guard_krw: number;
   };
   quote: RouterQuoteResponse["estimate"];
   roles: Record<string, Record<string, unknown>>;
@@ -439,6 +483,7 @@ export type RouterSettingsResponse = {
   matrix: {
     text_models: Array<Record<string, unknown>>;
     image_models: Array<Record<string, unknown>>;
+    vlm_models?: Array<Record<string, unknown>>;
   };
 };
 
@@ -456,6 +501,51 @@ export type JobDetailResponse = {
   updated_at: string;
   final_content?: string;
   error_message?: string;
+  quality_snapshot?: Record<string, unknown>;
+  seo_snapshot?: Record<string, unknown>;
+};
+
+export type OpsCheckItem = {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type OpsCheckResponse = {
+  ok: boolean;
+  checked_at: string;
+  monthly_cost_krw: number;
+  monthly_cost_warning_threshold_krw: number;
+  warnings: string[];
+  notified: boolean;
+  checks: OpsCheckItem[];
+};
+
+export type PostArchiveItem = {
+  job_id: string;
+  title: string;
+  slot: string;
+  category: string;
+  source_type: string;
+  review_status: string;
+  result_url: string;
+  quality_score: number;
+  insight_score: number;
+  manual_revision_applied: boolean;
+  content_length: number;
+  image_count: number;
+  table_count: number;
+  image_items: string[];
+  tags: string[];
+  final_content_preview: string;
+  final_content: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PostArchiveListResponse = {
+  items: PostArchiveItem[];
 };
 
 export type NaverConnectStatusResponse = {
@@ -614,7 +704,7 @@ async function requestJSON<T>(path: string, options: RequestOptions = {}): Promi
       } catch {
         detailMessage = "";
       }
-      const baseMessage = `API request failed (${response.status})`;
+      const baseMessage = `API 요청 실패 (${response.status})`;
       throw new Error(detailMessage ? `${baseMessage}: ${detailMessage}` : baseMessage);
     }
 
@@ -661,7 +751,7 @@ async function requestTextStream(
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
-      const baseMessage = `API request failed (${response.status})`;
+      const baseMessage = `API 요청 실패 (${response.status})`;
       throw new Error(errorText ? `${baseMessage}: ${errorText}` : baseMessage);
     }
 
@@ -701,11 +791,14 @@ export async function fetchHealth(): Promise<HealthResponse> {
   return requestJSON<HealthResponse>("/health");
 }
 
-export async function fetchJobs(page = 1, size = 20): Promise<JobsResponse> {
+export async function fetchJobs(page = 1, size = 20, status?: string): Promise<JobsResponse> {
   const query = new URLSearchParams({
     page: String(page),
     size: String(size),
   });
+  if (status) {
+    query.set("status", status);
+  }
   return requestJSON<JobsResponse>(`/jobs?${query.toString()}`);
 }
 
@@ -718,6 +811,27 @@ export async function createJob(payload: CreateJobPayload): Promise<CreateJobRes
     method: "POST",
     body: payload,
   });
+}
+
+export async function cancelJob(jobId: string): Promise<CancelJobResponse> {
+  return requestJSON<CancelJobResponse>(`/jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function fetchOpsCheck(notify = false): Promise<OpsCheckResponse> {
+  const query = new URLSearchParams({ notify: notify ? "true" : "false" });
+  return requestJSON<OpsCheckResponse>(`/ops/check?${query.toString()}`);
+}
+
+export async function fetchPostBackups(limit = 20): Promise<PostArchiveListResponse> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  return requestJSON<PostArchiveListResponse>(`/ops/backups?${query.toString()}`);
+}
+
+export async function fetchRevisionArchives(limit = 10): Promise<PostArchiveListResponse> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  return requestJSON<PostArchiveListResponse>(`/ops/revisions?${query.toString()}`);
 }
 
 export async function fetchConfig(): Promise<ConfigResponse> {
@@ -1036,6 +1150,7 @@ export type DashboardMetrics = {
   llm_cost_usd: number;
   llm_cost_krw: number;
   llm_total_calls: number;
+  avg_vlm_visual_score: number;
   score_per_won_trend: Array<{
     week_start: string;
     avg_score_per_won: number;

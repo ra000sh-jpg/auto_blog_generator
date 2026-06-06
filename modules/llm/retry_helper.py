@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 
 async def llm_retry(
     func: Callable[[], Awaitable[Any]],
     attempts: int,
     base_delay: float,
+    max_delay: Optional[float],
     logger: Any,
     provider: str,
 ) -> Any:
     """공통 선형 백오프 재시도 헬퍼."""
     safe_attempts = max(1, int(attempts or 1))
     safe_base_delay = max(0.0, float(base_delay or 0.0))
+
+    safe_max_delay = None if max_delay is None else max(0.0, float(max_delay))
 
     for attempt in range(1, safe_attempts + 1):
         try:
@@ -34,6 +37,8 @@ async def llm_retry(
             if (not retryable) or attempt >= safe_attempts:
                 raise
             delay = safe_base_delay * attempt
+            if safe_max_delay is not None:
+                delay = min(delay, safe_max_delay)
             if delay > 0:
                 await asyncio.sleep(delay)
 

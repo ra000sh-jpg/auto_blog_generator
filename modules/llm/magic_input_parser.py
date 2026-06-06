@@ -23,6 +23,7 @@ _TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "finance": ["주식", "경제", "재테크", "환율", "금리", "투자", "배당", "코인", "부동산"],
     "it": ["개발", "코딩", "ai", "자동화", "앱", "노션", "생산성", "it", "프로그래밍"],
     "parenting": ["육아", "아기", "아이", "딸", "아들", "가정", "교육", "유치원", "학습"],
+    "health": ["건강", "의학", "의료", "운동", "수면", "식단", "영양", "스트레스"],
     "cafe": ["카페", "맛집", "커피", "레시피", "디저트", "요리", "베이킹", "브런치", "식당"],
 }
 
@@ -32,6 +33,7 @@ _TOPIC_TO_PERSONA: Dict[str, str] = {
     "parenting": "P3",
     "finance": "P4",
     "economy": "P4",
+    "health": "P1",
 }
 
 _RELATIVE_DAY_OFFSETS: Dict[str, int] = {
@@ -176,7 +178,7 @@ class MagicInputParser:
         if provider_name == "qwen":
             return "qwen-plus"
         if provider_name == "deepseek":
-            return "deepseek-chat"
+            return "deepseek-v4-flash"
         return None
 
     async def _parse_with_client(
@@ -198,7 +200,7 @@ class MagicInputParser:
 - 키는 정확히 다음만 사용:
   title(string), seed_keywords(array), persona_id(string), topic_mode(string), schedule_time(string|null), confidence(number)
 - persona_id는 P1/P2/P3/P4 중 하나
-- topic_mode는 cafe/parenting/it/finance/economy 중 하나
+- topic_mode는 cafe/parenting/it/finance/economy/health 중 하나
 - schedule_time은 UTC ISO 8601 ("YYYY-MM-DDTHH:MM:SSZ") 형식 또는 null
 - seed_keywords는 1~5개
 - title은 8~80자
@@ -270,7 +272,7 @@ class MagicInputParser:
         if raw_persona_id not in {"P1", "P2", "P3", "P4"}:
             raw_persona_id = _TOPIC_TO_PERSONA.get(raw_topic_mode, "P1")
 
-        if raw_topic_mode not in {"cafe", "parenting", "it", "finance"}:
+        if raw_topic_mode not in {"cafe", "parenting", "it", "finance", "health"}:
             raw_topic_mode = "cafe"
 
         keywords: List[str] = []
@@ -573,6 +575,7 @@ class MagicInputParser:
                 "it": "IT/자동화",
                 "parenting": "육아",
                 "finance": "경제/재테크",
+                "health": "건강",
             }.get(topic_mode, "라이프")
             candidate = f"{topic_label} 인사이트 정리"
         return candidate[:80]

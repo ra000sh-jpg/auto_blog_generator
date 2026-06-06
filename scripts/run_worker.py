@@ -29,20 +29,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# .env 파일 자동 로드
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent.parent / ".env")
-except ImportError:
-    pass  # python-dotenv 미설치 시 환경변수 직접 설정 필요
-
 from modules.config import load_config
 from modules.logging_config import setup_logging
 from modules.metrics import MetricsStore
 from modules.automation.job_store import JobStore
+from modules.automation.notifier import TelegramNotifier
 from modules.automation.worker import Worker, WorkerConfig
 from modules.automation.pipeline_service import PipelineService, stub_generate_fn
 from modules.uploaders.playwright_publisher import PlaywrightPublisher
+
+
+def _load_env_file() -> None:
+    """CLI 실행 시에만 .env를 로드해 import 부작용을 막는다."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).parent.parent / ".env")
+    except ImportError:
+        pass  # python-dotenv 미설치 시 환경변수 직접 설정 필요
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,11 +81,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _bool_setting(raw: str, default: bool = False) -> bool:
+    """문자열 설정값을 bool로 변환한다."""
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _resolve_required_job_tag(store: JobStore) -> str | None:
+    """시장 자동 운영 모드에서 처리해야 할 필수 job 태그를 결정한다."""
+    configured = store.get_system_setting("scheduler_required_tag", "").strip()
+    if configured:
+        return configured
+
+    db_market_mode = store.get_system_setting("scheduler_market_daily_enabled", "").strip()
+    if db_market_mode:
+        market_mode_enabled = _bool_setting(db_market_mode, default=True)
+    else:
+        market_mode_enabled = _bool_setting(
+            os.getenv("SCHEDULER_MARKET_DAILY_ENABLED", "true"),
+            default=True,
+        )
+
+    return "market_daily" if market_mode_enabled else None
+
+
 async def _run_hybrid_mode_loop(
     mode: str,
     pipeline: PipelineService,
     poll_interval_sec: int,
     max_concurrent: int,
+    required_tag: str | None = None,
 ) -> None:
     """하이브리드 큐 모드(generator/publisher)를 단순 폴링으로 실행한다."""
     logger = logging.getLogger("run_worker")
@@ -91,11 +126,11 @@ async def _run_hybrid_mode_loop(
         for _ in range(max(1, max_concurrent)):
             try:
                 if mode == "generator":
-                    handled = await pipeline.prepare_next_pending_job()
+                    handled = await pipeline.prepare_next_pending_job(required_tag=required_tag)
                 elif mode == "publisher":
-                    handled = await pipeline.publish_next_ready_job()
+                    handled = await pipeline.publish_next_ready_job(required_tag=required_tag)
                 else:
-                    handled = await pipeline.run_next_pending_job()
+                    handled = await pipeline.run_next_pending_job(required_tag=required_tag)
             except Exception as exc:
                 logger.exception("Hybrid mode loop error: %s", exc)
                 handled = False
@@ -112,6 +147,7 @@ async def _run_hybrid_mode_loop(
 
 
 async def main_async(args: argparse.Namespace):
+    _load_env_file()
     app_config = load_config()
     if "PLAYWRIGHT_HEADLESS" not in os.environ:
         os.environ["PLAYWRIGHT_HEADLESS"] = "true" if app_config.publisher.headless else "false"
@@ -131,7 +167,9 @@ async def main_async(args: argparse.Namespace):
     # 컴포넌트 초기화
     store = JobStore(db_path=args.db)
     metrics_store = MetricsStore(db_path=args.db)
+    notifier = TelegramNotifier.from_env(db_path=store.db_path)
     publisher = PlaywrightPublisher(blog_id=blog_id or "dry-run")
+    required_tag = _resolve_required_job_tag(store)
 
     generate_fn = stub_generate_fn
     if args.use_llm:
@@ -197,6 +235,7 @@ async def main_async(args: argparse.Namespace):
         retry_backoff_base_sec=app_config.retry.backoff_base_sec,
         retry_backoff_max_sec=app_config.retry.backoff_max_sec,
         image_generator=image_generator,
+        notifier=notifier,
         quality_evaluator=quality_evaluator,
         memory_store=_worker_memory_store,
     )
@@ -204,6 +243,7 @@ async def main_async(args: argparse.Namespace):
     worker_config = WorkerConfig(
         poll_interval_sec=args.poll_interval,
         max_concurrent_jobs=args.max_concurrent,
+        required_tag=required_tag,
     )
 
     print(f"Worker 시작 (poll={args.poll_interval}s, concurrent={args.max_concurrent})")
@@ -211,6 +251,8 @@ async def main_async(args: argparse.Namespace):
     print(f"Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     print(f"Queue Mode: {args.mode}")
     print(f"Generate: {'LLM' if args.use_llm else 'STUB'}")
+    if required_tag:
+        print(f"Required tag: {required_tag}")
     print("종료: Ctrl+C")
     print()
 
@@ -233,6 +275,7 @@ async def main_async(args: argparse.Namespace):
                 pipeline=pipeline,
                 poll_interval_sec=args.poll_interval,
                 max_concurrent=args.max_concurrent,
+                required_tag=required_tag,
             )
     finally:
         if image_generator:
@@ -240,6 +283,7 @@ async def main_async(args: argparse.Namespace):
 
 
 def main():
+    _load_env_file()
     args = parse_args()
     app_config = load_config()
     setup_logging(

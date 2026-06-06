@@ -34,43 +34,56 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# LLM 모델별 단가 테이블 (USD per 1K tokens)
-# 입력(input) / 출력(output) 단가 모두 포함
+# LLM 프로바이더별 단가 테이블 (USD per 1K tokens)
+# 키: job_metrics.provider 에 기록되는 프로바이더 이름과 일치해야 함
+# 단가 기준: llm_router.py TextModelSpec 의 대표 모델 기준 (2026-02-27)
 # ---------------------------------------------------------------------------
 
 _USD_TO_KRW = 1_400  # 대략적 환율 (고정, 추후 외부 조회로 교체 가능)
 
-# metric_type 키워드 → (input_per_1k_usd, output_per_1k_usd)
+# provider 이름 → (input_per_1k_usd, output_per_1k_usd)
 LLM_PRICE_TABLE: Dict[str, tuple[float, float]] = {
-    # Qwen / Alibaba
+    # Qwen / Alibaba (대표: qwen-plus  0.40/1.20 per 1M)
     "qwen": (0.0004, 0.0012),
-    "qwen2": (0.0004, 0.0012),
-    "qwen3": (0.0004, 0.0012),
-    # DeepSeek
-    "deepseek": (0.00027, 0.0011),
-    # Groq (Llama 기반, 매우 저렴)
-    "groq": (0.00005, 0.00008),
-    "llama": (0.00005, 0.00008),
-    # Cerebras
-    "cerebras": (0.00006, 0.00011),
-    # OpenAI
-    "openai": (0.005, 0.015),
-    "gpt-4": (0.01, 0.03),
-    "gpt-3.5": (0.0005, 0.0015),
-    # Anthropic Claude
-    "claude": (0.003, 0.015),
-    # Google Gemini
-    "gemini": (0.00035, 0.00105),
-    # 기타 기본값
-    "default": (0.001, 0.002),
+    # DeepSeek (0.28/0.42 per 1M)
+    "deepseek": (0.00028, 0.00042),
+    # Google Gemini (대표: gemini-2.0-flash  0.10/0.40 per 1M)
+    "gemini": (0.0001, 0.0004),
+    # OpenAI (대표: gpt-4.1-mini  0.40/1.60 per 1M)
+    "openai": (0.0004, 0.0016),
+    # Anthropic Claude (대표: claude-haiku-3.5  0.80/4.00 per 1M)
+    "claude": (0.0008, 0.004),
+    # Groq (무료 Tier)
+    "groq": (0.0, 0.0),
+    # Cerebras (무료 Tier)
+    "cerebras": (0.0, 0.0),
+    # NVIDIA NIM (이용권 기반 무료 — credits 차감 없이 사용)
+    "nvidia": (0.0, 0.0),
+    "nvidia_vlm": (0.0, 0.0),
+    "gemini_vlm": (0.0001, 0.0004),
+    "groq_vlm": (0.00011, 0.00034),
+    "openai_vlm": (0.0004, 0.0016),
+    "qwen_vlm": (0.00011, 0.00034),
+    # 기타 기본값 (qwen-plus 수준)
+    "default": (0.0004, 0.0012),
 }
 
 
-def _lookup_price(metric_type: str) -> tuple[float, float]:
-    """metric_type 문자열에서 단가를 조회한다."""
-    lowered = metric_type.lower()
+def _lookup_price(provider: str) -> tuple[float, float]:
+    """provider 이름에서 단가를 조회한다.
+
+    job_metrics.provider 컬럼에 저장된 프로바이더 이름으로 조회한다.
+    정확 일치 → 부분 일치 → default 순으로 폴백한다.
+    """
+    lowered = (provider or "").lower().strip()
+    # 1) 정확 일치
+    if lowered in LLM_PRICE_TABLE:
+        return LLM_PRICE_TABLE[lowered]
+    # 2) 부분 일치 (provider 문자열이 키를 포함하거나 키가 포함된 경우)
     for key, price in LLM_PRICE_TABLE.items():
-        if key in lowered:
+        if key == "default":
+            continue
+        if key in lowered or lowered in key:
             return price
     return LLM_PRICE_TABLE["default"]
 
@@ -79,10 +92,10 @@ def _calc_llm_cost_usd(
     avg_input_tokens: float,
     avg_output_tokens: float,
     total_calls: int,
-    metric_type: str,
+    provider: str,
 ) -> float:
     """LLM 호출 비용을 USD로 계산한다."""
-    in_price, out_price = _lookup_price(metric_type)
+    in_price, out_price = _lookup_price(provider)
     cost = (avg_input_tokens / 1000 * in_price + avg_output_tokens / 1000 * out_price) * total_calls
     return cost
 
@@ -102,6 +115,7 @@ class MetricsSummaryData(BaseModel):
     llm_cost_usd: float = 0.0
     llm_cost_krw: int = 0
     llm_total_calls: int = 0
+    avg_vlm_visual_score: float = 0.0
     score_per_won_trend: List[Dict[str, Union[float, str]]] = Field(default_factory=list)
     champion_history: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -222,6 +236,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
     idea_vault_total = int(snapshot.get("idea_vault_total", 0))
     llm_rows = list(snapshot.get("llm_rows", []))
     trend_rows = list(snapshot.get("trend_rows", []))
+    avg_vlm_visual_score = float(snapshot.get("avg_vlm_visual_score", 0.0) or 0.0)
 
     total_cost_usd = 0.0
     total_llm_calls = 0
@@ -232,7 +247,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
             avg_input_tokens=float(row["avg_input"] or 0),
             avg_output_tokens=float(row["avg_output"] or 0),
             total_calls=calls,
-            metric_type=str(row["metric_type"]),
+            provider=str(row.get("provider") or ""),
         )
         total_cost_usd += cost
 
@@ -257,6 +272,7 @@ def _build_metrics(job_store: "JobStore") -> MetricsSummaryData:
         llm_cost_usd=round(total_cost_usd, 6),
         llm_cost_krw=total_cost_krw,
         llm_total_calls=total_llm_calls,
+        avg_vlm_visual_score=round(avg_vlm_visual_score, 2),
         score_per_won_trend=trend_payload,
         champion_history=champion_history,
     )

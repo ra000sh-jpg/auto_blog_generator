@@ -68,8 +68,9 @@ class TistoryPublisher(BasePublisher):
         image_points: Optional[List["ImageInsertionPoint"]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
-        del thumbnail, images, image_sources, image_points, category
+        del thumbnail, images, image_sources, image_points, category, publish_mode
 
         if os.getenv("DRY_RUN", "false").strip().lower() == "true":
             return PublishResult(

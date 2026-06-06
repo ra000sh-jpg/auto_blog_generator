@@ -300,7 +300,7 @@ export default function ChannelManagerCard() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-slate-600">Persona ID</span>
+            <span className="mb-1 block text-xs font-medium text-slate-600">페르소나 ID</span>
             <input
               type="text"
               value={createForm.personaId}

@@ -31,6 +31,9 @@ _PROMPT_TRANSLATE_SYSTEM = (
     "You are an expert at writing image generation prompts for FLUX diffusion models. "
     "Given a Korean blog post title and keywords, write a concise, vivid English image prompt "
     "(max 80 words) that captures the concept visually. "
+    "CRITICAL: The generated image must contain absolutely NO text, letters, words, numbers, "
+    "labels, captions, watermarks, or any written characters of any language. "
+    "Pure visual imagery only — no typography of any kind. "
     "Output only the prompt text, no explanation."
 )
 
@@ -39,8 +42,8 @@ _THUMBNAIL_TEMPLATE = (
     "Professional blog thumbnail illustration: {concept}. "
     "Modern flat design with vibrant colors, clean composition, "
     "centered subject with subtle background, "
-    "space for text overlay on left side, "
-    "high quality digital art, 4K resolution"
+    "no text, no letters, no words, no numbers, no captions, no watermarks, "
+    "pure visual imagery only, high quality digital art, 4K resolution"
 )
 
 _CONTENT_IMAGE_TEMPLATE = (
@@ -48,7 +51,8 @@ _CONTENT_IMAGE_TEMPLATE = (
     "Clean infographic style, soft pastel colors, "
     "educational visual, minimalist design, "
     "easy to understand diagram or scene, "
-    "professional quality, web-optimized"
+    "no text, no letters, no words, no numbers, no labels, no captions, "
+    "pure visual imagery only, professional quality, web-optimized"
 )
 
 
@@ -120,6 +124,7 @@ class ImageGenerator:
         "it": "mixed",              # 기술, IT → AI + 스톡 혼합
         "finance": "mixed",         # 금융, 차트 → AI + 스톡 혼합
         "economy": "mixed",         # finance 별칭
+        "health": "stock_first",    # 건강/습관 → 신뢰감 있는 실사 우선
     }
 
     def __init__(
@@ -200,6 +205,7 @@ class ImageGenerator:
         content_prompts: List[str] = []
 
         normalized_slots = self._normalize_image_slots(image_slots)
+        content_slots_for_query: List[Dict[str, Any]] = []
         if normalized_slots:
             thumbnail_slots = [slot for slot in normalized_slots if slot.get("slot_role") == "thumbnail"]
             if thumbnail_slots:
@@ -207,8 +213,8 @@ class ImageGenerator:
                 if thumbnail_concept:
                     thumbnail_prompt = await self._build_thumbnail_prompt_from_concept(thumbnail_concept)
 
-            content_slots = [slot for slot in normalized_slots if slot.get("slot_role") == "content"]
-            for raw_slot in content_slots[: self.max_content_images]:
+            content_slots_for_query = [slot for slot in normalized_slots if slot.get("slot_role") == "content"][: self.max_content_images]
+            for raw_slot in content_slots_for_query:
                 slot_prompt = str(raw_slot.get("prompt", "")).strip()
                 if slot_prompt:
                     content_prompts.append(await self._build_content_prompt(slot_prompt))
@@ -216,8 +222,10 @@ class ImageGenerator:
             for raw_prompt in image_prompts[: self.max_content_images]:
                 content_prompts.append(await self._build_content_prompt(raw_prompt))
 
-        # 키워드 기반 스톡 포토 검색어 준비
-        stock_queries = self._prepare_stock_queries(keywords, content_prompts)
+        # pexels_query 우선, 없으면 keyword 기반 스톡 포토 검색어 준비
+        stock_queries = self._prepare_stock_queries(
+            keywords, content_prompts, content_slots=content_slots_for_query
+        )
 
         if self.parallel:
             # 병렬 생성
@@ -347,6 +355,7 @@ class ImageGenerator:
         stock_queries = self._prepare_stock_queries(
             keywords=keywords,
             content_prompts=[str(slot.get("prompt", "")).strip() for slot in content_slots],
+            content_slots=content_slots,
         )
         content_query_map: Dict[str, str] = {}
         for idx, slot in enumerate(content_slots):
@@ -822,24 +831,31 @@ class ImageGenerator:
         self,
         keywords: List[str],
         content_prompts: List[str],
+        content_slots: Optional[List[Dict[str, Any]]] = None,
     ) -> List[str]:
-        """스톡 포토 검색에 최적화된 쿼리를 준비한다."""
-        queries = []
+        """스톡 포토 검색에 최적화된 쿼리를 준비한다.
 
-        # 키워드 기반 쿼리 (영어로 변환 권장)
+        content_slots에 pexels_query가 있으면 우선 사용한다.
+        없는 경우 keywords 기반으로 폴백한다.
+        """
+        queries = []
         keyword_query = " ".join(keywords[:3]) if keywords else ""
 
-        for prompt in content_prompts:
-            # 프롬프트에서 핵심 개념 추출
-            if ":" in prompt:
-                # "concept: description" 형식이면 concept 부분 사용
-                concept = prompt.split(":")[1].strip().split(".")[0]
-            else:
-                concept = prompt.split(",")[0].strip()
+        for idx, prompt in enumerate(content_prompts):
+            # 1순위: 슬롯에 LLM이 생성한 pexels_query 사용
+            if content_slots and idx < len(content_slots):
+                pexels_q = str(content_slots[idx].get("pexels_query", "")).strip()
+                if pexels_q:
+                    queries.append(pexels_q[:100])
+                    continue
 
-            # 키워드와 개념 조합
-            query = f"{keyword_query} {concept}".strip()
-            queries.append(query[:100])  # 너무 긴 쿼리 방지
+            # 2순위: keyword_query만 사용 (AI 프롬프트 텍스트는 버림)
+            if keyword_query:
+                queries.append(keyword_query[:100])
+            else:
+                # 3순위: AI 프롬프트에서 쉼표 앞 핵심만 추출
+                fallback = prompt.split(",")[0].strip()
+                queries.append(fallback[:100])
 
         return queries
 

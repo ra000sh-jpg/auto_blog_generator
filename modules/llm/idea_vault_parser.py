@@ -28,6 +28,7 @@ _TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "finance": ["경제", "주식", "재테크", "투자", "환율", "금리", "세금", "부동산", "코인"],
     "it": ["it", "개발", "코딩", "ai", "자동화", "앱", "생산성", "노션", "코드"],
     "parenting": ["육아", "아이", "아기", "학습", "가정", "부모", "유치원", "초등"],
+    "health": ["건강", "의학", "의료", "운동", "수면", "식단", "영양", "스트레스"],
     "cafe": ["카페", "맛집", "커피", "요리", "레시피", "디저트", "브런치", "리뷰"],
 }
 
@@ -138,7 +139,7 @@ class IdeaVaultBatchParser:
         if provider_name == "qwen":
             return "qwen-plus"
         if provider_name == "deepseek":
-            return "deepseek-chat"
+            return "deepseek-v4-flash"
         return None
 
     async def _parse_chunk_with_fallback(
@@ -182,7 +183,7 @@ class IdeaVaultBatchParser:
       "accepted": true,
       "normalized_text": "정제된 문장",
       "mapped_category": "카테고리 후보 중 하나",
-      "topic_mode": "cafe|it|parenting|finance|economy",
+      "topic_mode": "cafe|it|parenting|finance|economy|health",
       "reason": "reject 사유(허용 시 빈 문자열)"
     }}
   ]

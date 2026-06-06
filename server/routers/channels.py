@@ -163,9 +163,14 @@ def _infer_connection_failure_reason(channel: Dict[str, Any]) -> str:
     if platform == "naver":
         session_dir = str(auth.get("session_dir", "")).strip()
         if not session_dir:
-            return "missing_session_dir"
+            # NaverPublisher와 동일한 폴백 경로 적용
+            channel_id = str(channel.get("channel_id", "")).strip()
+            session_dir = f"data/sessions/naver_{channel_id or 'default'}"
         state_path = Path(session_dir) / "state.json"
         if not state_path.exists():
+            # 폴백 경로도 존재하지 않으면 session_dir 자체가 미설정된 것
+            if not str(auth.get("session_dir", "")).strip():
+                return "missing_session_dir"
             return "missing_state_file"
         return "naver_connection_failed"
 

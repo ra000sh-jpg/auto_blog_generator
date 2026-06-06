@@ -12,10 +12,11 @@ import uuid
 from datetime import date, datetime, time as time_obj, timedelta, timezone
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from .. import constants
 from ..constants import DEFAULT_FALLBACK_CATEGORY
-from .time_utils import parse_iso
+from .time_utils import now_utc, parse_iso
 
 if TYPE_CHECKING:
     from ..collectors.idea_vault_auto_collector import IdeaVaultAutoCollector
@@ -42,6 +43,11 @@ async def cycle_run_startup_catchup(service: "SchedulerService") -> None:
     await service._run_daily_model_eval()
     await service._run_auto_champion_switch()
     await service._run_feedback_analysis()
+    await service._run_feedback_rule_maintenance()
+    await service._run_text_model_discovery_sync()
+    await service._run_vlm_discovery_sync()
+    await service._run_vlm_pricing_sync()
+    await service._run_vlm_validation_sync()
     await service._run_sub_job_catchup()
     await service._run_sub_job_publish_catchup()
 
@@ -114,6 +120,259 @@ async def cycle_run_feedback_analysis(service: "SchedulerService") -> None:
             logger.info("Feedback analysis complete")
     except Exception as exc:
         logger.error("Feedback analysis failed: %s", exc)
+
+
+async def cycle_run_feedback_rule_maintenance(service: "SchedulerService") -> None:
+    """자동 피드백 후보 상태 정리 및 재알림/롤백 평가를 수행한다."""
+    if not service.job_store:
+        return
+
+    stale_timeout_hours = max(1, int(constants.FEEDBACK_PENDING_TIMEOUT_HOURS))
+    snooze_hours = max(1, int(constants.FEEDBACK_SNOOZE_REMIND_HOURS))
+    notify_limit = max(1, int(constants.FEEDBACK_CANDIDATE_BATCH_LIMIT))
+
+    stale_snoozed = 0
+    reopened = 0
+    try:
+        stale_snoozed = int(
+            service.job_store.auto_snooze_stale_feedback_candidates(
+                stale_hours=stale_timeout_hours,
+                remind_hours=snooze_hours,
+            )
+        )
+    except Exception as exc:
+        logger.warning("Feedback maintenance: stale snooze failed: %s", exc)
+
+    try:
+        reopened = int(service.job_store.reopen_due_snoozed_feedback_candidates(limit=notify_limit * 2))
+    except Exception as exc:
+        logger.warning("Feedback maintenance: reopen snoozed failed: %s", exc)
+
+    notified = 0
+    if service.notifier and getattr(service.notifier, "enabled", False):
+        list_fn = getattr(service.job_store, "list_feedback_candidates_to_notify", None)
+        notify_fn = getattr(service.pipeline_service, "_notify_feedback_candidate", None)
+        if callable(list_fn) and callable(notify_fn):
+            try:
+                pending_candidates = list_fn(limit=notify_limit)
+            except Exception:
+                pending_candidates = []
+            for candidate in pending_candidates:
+                try:
+                    notify_fn(candidate=candidate)
+                    notified += 1
+                except Exception:
+                    logger.debug("Feedback maintenance: candidate notify skipped", exc_info=True)
+
+    rollback_result = {"evaluated": 0, "kept": 0, "observed": 0, "rolled_back": 0}
+    try:
+        rollback_result = service.job_store.evaluate_feedback_rule_rollbacks(
+            min_posts=int(constants.FEEDBACK_DECISION_MIN_POSTS),
+            noise_floor=float(constants.FEEDBACK_NOISE_FLOOR),
+            keep_threshold=float(constants.FEEDBACK_KEEP_THRESHOLD),
+        )
+    except Exception as exc:
+        logger.warning("Feedback maintenance: rollback evaluation failed: %s", exc)
+
+    if any([
+        stale_snoozed > 0,
+        reopened > 0,
+        notified > 0,
+        int(rollback_result.get("rolled_back", 0)) > 0,
+    ]):
+        logger.info(
+            "Feedback maintenance complete",
+            extra={
+                "stale_snoozed": stale_snoozed,
+                "reopened": reopened,
+                "notified": notified,
+                "rollback": rollback_result,
+            },
+        )
+
+
+def _is_vlm_sync_due(service: "SchedulerService", *, setting_key: str, stale_hours: int) -> bool:
+    """마지막 동기화 시각 기반으로 실행 필요 여부를 계산한다."""
+    if not service.job_store:
+        return False
+    raw = str(service.job_store.get_system_setting(setting_key, "")).strip()
+    if not raw:
+        return True
+    try:
+        last_run = parse_iso(raw)
+    except Exception:
+        return True
+    elapsed = datetime.now(timezone.utc) - last_run
+    return elapsed >= timedelta(hours=max(1, int(stale_hours)))
+
+
+async def cycle_run_vlm_discovery_sync(service: "SchedulerService") -> None:
+    """VLM 카탈로그를 공식 매트릭스 기준으로 동기화한다."""
+    if not service.job_store:
+        return
+
+    stale_hours = max(1, int(constants.VLM_DISCOVERY_SYNC_STALE_HOURS))
+    if not _is_vlm_sync_due(
+        service,
+        setting_key="vlm_last_discovery_sync_at",
+        stale_hours=stale_hours,
+    ):
+        logger.debug("VLM discovery sync skipped: stale window not reached")
+        return
+
+    try:
+        from .vlm_discovery_worker import VLMDiscoveryWorker
+
+        worker = VLMDiscoveryWorker(job_store=service.job_store)
+        stats = worker.sync_catalog()
+        logger.info(
+            "VLM discovery sync complete: inserted=%d updated=%d unchanged=%d deprecated=%d",
+            int(stats.get("inserted", 0)),
+            int(stats.get("updated", 0)),
+            int(stats.get("unchanged", 0)),
+            int(stats.get("deprecated", 0)),
+        )
+    except Exception as exc:
+        logger.error("VLM discovery sync failed: %s", exc)
+
+
+async def cycle_run_text_model_discovery_sync(service: "SchedulerService") -> None:
+    """텍스트 모델 공식 카탈로그를 동기화한다."""
+    if not service.job_store:
+        return
+
+    stale_hours = max(1, int(constants.TEXT_MODEL_DISCOVERY_SYNC_STALE_HOURS))
+    if not _is_vlm_sync_due(
+        service,
+        setting_key="text_model_last_discovery_sync_at",
+        stale_hours=stale_hours,
+    ):
+        logger.debug("Text model discovery sync skipped: stale window not reached")
+        return
+
+    try:
+        from .text_model_discovery_worker import TextModelDiscoveryWorker
+
+        worker = TextModelDiscoveryWorker(job_store=service.job_store)
+        stats = worker.sync_catalog()
+        logger.info(
+            "Text model discovery sync complete: inserted=%d updated=%d unchanged=%d deprecated=%d failures=%d registered_added=%d",
+            int(stats.get("inserted", 0)),
+            int(stats.get("updated", 0)),
+            int(stats.get("unchanged", 0)),
+            int(stats.get("deprecated", 0)),
+            int(stats.get("source_failures", 0)),
+            int(stats.get("registered_added", 0)),
+        )
+    except Exception as exc:
+        logger.error("Text model discovery sync failed: %s", exc)
+
+
+async def cycle_run_vlm_pricing_sync(service: "SchedulerService") -> None:
+    """VLM 카탈로그 단가/환율 정보를 동기화한다."""
+    if not service.job_store:
+        return
+
+    stale_hours = max(1, int(constants.VLM_PRICING_SYNC_STALE_HOURS))
+    if not _is_vlm_sync_due(
+        service,
+        setting_key="vlm_last_price_sync_at",
+        stale_hours=stale_hours,
+    ):
+        logger.debug("VLM pricing sync skipped: stale window not reached")
+        return
+
+    raw_rate = str(
+        service.job_store.get_system_setting(
+            "vlm_usd_to_krw",
+            str(constants.VLM_DEFAULT_USD_TO_KRW),
+        )
+    ).strip()
+    try:
+        usd_to_krw = float(raw_rate)
+    except ValueError:
+        usd_to_krw = float(constants.VLM_DEFAULT_USD_TO_KRW)
+    if usd_to_krw <= 0:
+        usd_to_krw = float(constants.VLM_DEFAULT_USD_TO_KRW)
+
+    try:
+        from .vlm_pricing_worker import VLMPricingWorker
+
+        worker = VLMPricingWorker(job_store=service.job_store, usd_to_krw=usd_to_krw)
+        stats = worker.sync_prices()
+        logger.info(
+            "VLM pricing sync complete: changed=%d unchanged=%d skipped=%d fx=%.2f",
+            int(stats.get("changed", 0)),
+            int(stats.get("unchanged", 0)),
+            int(stats.get("skipped", 0)),
+            usd_to_krw,
+        )
+    except Exception as exc:
+        logger.error("VLM pricing sync failed: %s", exc)
+
+
+def _parse_bool_setting(raw_value: str, default: bool) -> bool:
+    """문자열 설정값을 bool로 파싱한다."""
+    value = str(raw_value or "").strip().lower()
+    if not value:
+        return bool(default)
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+async def cycle_run_vlm_validation_sync(service: "SchedulerService") -> None:
+    """discovered/shadow 상태 VLM 후보를 검증한다."""
+    if not service.job_store:
+        return
+
+    stale_hours = max(1, int(constants.VLM_VALIDATION_SYNC_STALE_HOURS))
+    if not _is_vlm_sync_due(
+        service,
+        setting_key="vlm_last_validation_sync_at",
+        stale_hours=stale_hours,
+    ):
+        logger.debug("VLM validation sync skipped: stale window not reached")
+        return
+
+    raw_limit = str(
+        service.job_store.get_system_setting(
+            "vlm_validation_candidate_limit",
+            str(constants.VLM_VALIDATION_CANDIDATE_LIMIT),
+        )
+    ).strip()
+    try:
+        candidate_limit = max(1, min(100, int(raw_limit)))
+    except ValueError:
+        candidate_limit = int(constants.VLM_VALIDATION_CANDIDATE_LIMIT)
+
+    auto_activate = _parse_bool_setting(
+        service.job_store.get_system_setting(
+            "vlm_validation_auto_activate",
+            "true" if constants.VLM_VALIDATION_AUTO_ACTIVATE else "false",
+        ),
+        default=constants.VLM_VALIDATION_AUTO_ACTIVATE,
+    )
+
+    try:
+        from .vlm_validation_worker import VLMValidationWorker
+
+        worker = VLMValidationWorker(job_store=service.job_store)
+        stats = worker.run_cycle(limit=candidate_limit, auto_activate=auto_activate)
+        service.job_store.set_system_setting("vlm_last_validation_sync_at", now_utc())
+        logger.info(
+            "VLM validation sync complete: moved_shadow=%d activated=%d rejected=%d observed=%d limit=%d auto_activate=%s",
+            int(stats.get("moved_shadow", 0)),
+            int(stats.get("activated", 0)),
+            int(stats.get("rejected", 0)),
+            int(stats.get("observed", 0)),
+            candidate_limit,
+            str(auto_activate).lower(),
+        )
+    except Exception as exc:
+        logger.error("VLM validation sync failed: %s", exc)
 
 
 
@@ -335,9 +594,7 @@ async def cycle_run_cost_efficiency_alert(service: "SchedulerService") -> None:
         return
 
     try:
-        snapshot = service.job_store.get_dashboard_metrics_snapshot(today=today_key)
-        llm_rows = list(snapshot.get("llm_rows", []))
-        total_calls = sum(int(row.get("total_calls", 0) or 0) for row in llm_rows)
+        total_calls = _count_today_llm_generation_calls(service, today_key=today_key)
     except Exception as exc:
         logger.warning("Cost efficiency alert stats read failed: %s", exc)
         return
@@ -361,6 +618,66 @@ async def cycle_run_cost_efficiency_alert(service: "SchedulerService") -> None:
             logger.info("Cost efficiency alert sent (llm_calls=%d)", total_calls)
     except Exception as exc:
         logger.warning("Cost efficiency alert send failed: %s", exc)
+
+
+def _count_today_llm_generation_calls(
+    service: "SchedulerService",
+    *,
+    today_key: str,
+) -> int:
+    """KST 기준 오늘 생성/문체 LLM 호출 수를 계산한다."""
+    if not service.job_store:
+        return 0
+
+    try:
+        local_tz = ZoneInfo(service.timezone_name)
+    except Exception:
+        local_tz = timezone(timedelta(hours=9))
+
+    start_local = datetime.strptime(today_key, "%Y-%m-%d").replace(tzinfo=local_tz)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with service.job_store.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(
+                COALESCE(
+                    NULLIF(CAST(json_extract(detail_json, '$.calls') AS INTEGER), 0),
+                    1
+                )
+            ), 0) AS total_calls
+            FROM job_metrics
+            WHERE created_at >= ?
+              AND created_at < ?
+              AND metric_type IN ('quality_step', 'voice_step')
+              AND (
+                provider != ''
+                OR input_tokens > 0
+                OR output_tokens > 0
+              )
+            """,
+            (start_utc, end_utc),
+        ).fetchone()
+    return int(row["total_calls"] or 0) if row else 0
+
+
+async def cycle_collect_telegram_pending_updates(service: "SchedulerService") -> int:
+    """텔레그램 getUpdates 폴백을 주기적으로 실행한다."""
+    if not service.job_store:
+        return 0
+    try:
+        from server.routers.telegram_webhook import collect_pending_updates
+    except Exception as exc:
+        logger.warning("Telegram update collector unavailable: %s", exc)
+        return 0
+
+    try:
+        return int(await collect_pending_updates(service.job_store))
+    except Exception as exc:
+        logger.warning("Telegram update collector failed: %s", exc)
+        return 0
 
 
 async def cycle_run_daily_target_check(service: "SchedulerService") -> None:
@@ -503,10 +820,14 @@ async def cycle_prepare_next_available_job(service: "SchedulerService", job_kind
     """파이프라인이 지원하는 방식으로 다음 초안을 생성한다."""
     prepare_fn = getattr(service.pipeline_service, "prepare_next_pending_job", None)
     if prepare_fn and callable(prepare_fn):
+        required_tag = _scheduler_required_job_tag(service)
         try:
-            return bool(await prepare_fn(job_kind=job_kind))
+            return bool(await prepare_fn(job_kind=job_kind, required_tag=required_tag))
         except TypeError:
-            return bool(await prepare_fn())
+            try:
+                return bool(await prepare_fn(job_kind=job_kind))
+            except TypeError:
+                return bool(await prepare_fn())
     return False
 
 
@@ -515,18 +836,39 @@ async def cycle_publish_next_available_job(service: "SchedulerService", job_kind
     """파이프라인이 지원하는 방식으로 다음 발행을 실행한다."""
     publish_fn = getattr(service.pipeline_service, "publish_next_ready_job", None)
     if publish_fn and callable(publish_fn):
+        required_tag = _scheduler_required_job_tag(service)
         try:
-            return bool(await publish_fn(job_kind=job_kind))
+            return bool(await publish_fn(job_kind=job_kind, required_tag=required_tag))
         except TypeError:
-            return bool(await publish_fn())
+            try:
+                return bool(await publish_fn(job_kind=job_kind))
+            except TypeError:
+                return bool(await publish_fn())
     run_fn = getattr(service.pipeline_service, "run_next_pending_job", None)
     if run_fn and callable(run_fn):
+        required_tag = _scheduler_required_job_tag(service)
         try:
-            return bool(await run_fn(job_kind=job_kind))
+            return bool(await run_fn(job_kind=job_kind, required_tag=required_tag))
         except TypeError:
-            return bool(await run_fn())
+            try:
+                return bool(await run_fn(job_kind=job_kind))
+            except TypeError:
+                return bool(await run_fn())
     return False
 
+
+
+def _scheduler_required_job_tag(service: "SchedulerService") -> Optional[str]:
+    """자동 워커가 처리할 필수 태그를 반환한다."""
+
+    raw = ""
+    if service.job_store:
+        raw = service.job_store.get_system_setting("scheduler_required_tag", "")
+    if str(raw or "").strip():
+        return str(raw).strip()
+    if _is_market_daily_publish_mode(service):
+        return "market_daily"
+    return None
 
 
 def cycle_is_publish_interval_ready(
@@ -643,10 +985,17 @@ def cycle_build_daily_publish_slots(service: "SchedulerService", target_date: da
     if local_tz is None:
         local_tz = timezone(timedelta(hours=9))
 
+    resolved_target = max(1, int(daily_target or service.daily_posts_target))
+    if _is_market_daily_publish_mode(service):
+        return _build_market_daily_publish_slots(
+            target_date=target_date,
+            local_tz=local_tz,
+            daily_target=resolved_target,
+        )
+
     anchor_hours = service._get_publish_anchor_hours()
     rng = service._build_rng_for_date(target_date)
     candidates: List[datetime] = []
-    resolved_target = max(1, int(daily_target or service.daily_posts_target))
 
     for index in range(resolved_target):
         if index < len(anchor_hours):
@@ -699,6 +1048,46 @@ def cycle_build_daily_publish_slots(service: "SchedulerService", target_date: da
 
     return candidates
 
+
+
+def _is_market_daily_publish_mode(service: "SchedulerService") -> bool:
+    """시장 브리핑 고정 발행 슬롯 모드 여부를 반환한다."""
+
+    raw = ""
+    if service.job_store:
+        raw = service.job_store.get_system_setting("scheduler_market_daily_enabled", "")
+    if not str(raw or "").strip():
+        import os
+
+        raw = os.getenv("SCHEDULER_MARKET_DAILY_ENABLED", "true")
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _build_market_daily_publish_slots(
+    *,
+    target_date: date,
+    local_tz: Any,
+    daily_target: int,
+) -> List[datetime]:
+    """시장 브리핑 운영용 고정 발행 슬롯을 반환한다."""
+
+    from ..market import get_us_preopen_kst
+
+    fixed_slots = sorted(
+        [
+            datetime.combine(target_date, time_obj(hour=8, minute=10), tzinfo=local_tz),
+            datetime.combine(target_date, time_obj(hour=18, minute=30), tzinfo=local_tz),
+            get_us_preopen_kst(target_date).astimezone(local_tz),
+        ]
+    )
+    if daily_target <= len(fixed_slots):
+        return fixed_slots[:daily_target]
+
+    extended = list(fixed_slots)
+    last_slot = extended[-1]
+    for index in range(daily_target - len(fixed_slots)):
+        extended.append(last_slot + timedelta(minutes=70 * (index + 1)))
+    return sorted(extended)
 
 
 def _normalize_model_id(value: str) -> str:
@@ -773,6 +1162,9 @@ async def cycle_run_daily_model_eval(service: "SchedulerService") -> None:
     selected = candidates[0]
     service.job_store.set_system_setting("router_eval_model_today", str(selected["model_id"]))
     service.job_store.set_system_setting("router_eval_last_run_date", today_key)
+    # 새 eval 모델을 선정하면 당일 배정 플래그를 초기화한다.
+    service.job_store.set_system_setting("router_eval_claimed_date", "")
+    service.job_store.set_system_setting("router_eval_claimed_job_id", "")
     logger.info(
         "Daily eval model selected: %s (samples=%d)",
         selected["model_id"],
@@ -888,6 +1280,46 @@ async def cycle_auto_champion_switch(service: "SchedulerService") -> None:
     if not should_switch:
         return
 
+    auto_switch_enabled = _parse_bool_setting(
+        service.job_store.get_system_setting("router_auto_champion_switch_enabled", "false"),
+        default=False,
+    )
+    if not auto_switch_enabled:
+        recommendation_detail = {
+            "previous": current_champion or "",
+            "recommended": best_model_id,
+            "strategy_mode": strategy_mode,
+            "avg_quality_score": float(best.get("avg_quality_score", 0.0) or 0.0),
+            "avg_score_per_won": float(best.get("avg_score_per_won", 0.0) or 0.0),
+            "avg_cost_won": float(best.get("avg_cost_won", 0.0) or 0.0),
+            "samples": int(best.get("samples", 0) or 0),
+            "recommended_at": now_utc(),
+        }
+        service.job_store.set_system_setting("router_champion_recommendation_model", best_model_id)
+        service.job_store.set_system_setting(
+            "router_champion_recommendation_detail",
+            json.dumps(recommendation_detail, ensure_ascii=False),
+        )
+        logger.info(
+            "Champion recommendation recorded without auto switch: %s -> %s",
+            current_champion,
+            best_model_id,
+        )
+        if service.notifier and getattr(service.notifier, "enabled", False):
+            message = (
+                "🏆 챔피언 모델 교체 후보\n"
+                "자동 교체는 꺼져 있어요. 성능 기록만 남겼습니다.\n"
+                f"• 현재: {current_champion or '-'}\n"
+                f"• 후보: {best_model_id}\n"
+                f"• 품질: {float(best.get('avg_quality_score', 0.0) or 0.0):.1f}점\n"
+                f"• 비용효율: {float(best.get('avg_score_per_won', 0.0) or 0.0):.2f}"
+            )
+            try:
+                await service.notifier.send_message(message)
+            except Exception:
+                logger.debug("Champion recommendation notification failed", exc_info=True)
+        return
+
     service.job_store.set_system_setting("router_champion_model", best_model_id)
     logger.info("Champion switched: %s -> %s", current_champion, best_model_id)
 
@@ -949,6 +1381,10 @@ def cycle_get_configured_daily_target(service: "SchedulerService") -> int:
     if not get_setting or not callable(get_setting):
         return default_target
     raw = str(get_setting("scheduler_daily_posts_target", "")).strip()
+    if not raw:
+        import os
+
+        raw = str(os.getenv("SCHEDULER_DAILY_POSTS_TARGET", "")).strip()
     if not raw:
         return default_target
     try:
@@ -1097,7 +1533,7 @@ def cycle_normalize_topic_mode(service: "SchedulerService", raw_mode: str) -> st
     lowered = raw_mode.lower().strip()
     if lowered == "economy":
         return "finance"
-    if lowered in {"cafe", "it", "parenting", "finance"}:
+    if lowered in {"cafe", "it", "parenting", "finance", "health"}:
         return lowered
     return "cafe"
 
@@ -1112,6 +1548,8 @@ def cycle_infer_topic_mode_from_category(service: "SchedulerService", category_n
         return "it"
     if any(token in lowered for token in ("육아", "아이", "부모", "가정")):
         return "parenting"
+    if any(token in lowered for token in ("건강", "의학", "의료", "운동", "수면", "식단", "health")):
+        return "health"
     return "cafe"
 
 
@@ -1123,6 +1561,7 @@ def cycle_persona_id_for_topic(service: "SchedulerService", topic_mode: str) -> 
         "it": "P2",
         "parenting": "P3",
         "finance": "P4",
+        "health": "P1",
     }
     return mapping.get(service._normalize_topic_mode(topic_mode), "P1")
 
@@ -1142,6 +1581,7 @@ def cycle_build_seed_title(
         "it": "IT",
         "parenting": "육아",
         "finance": "경제",
+        "health": "건강",
     }.get(service._normalize_topic_mode(topic_mode), "라이프")
     return f"{local_date} {label} 브리핑 #{sequence} - {category}"
 
@@ -1154,6 +1594,7 @@ def cycle_build_seed_keywords(service: "SchedulerService", category: str, topic_
         "it": ["IT", "자동화", "생산성"],
         "parenting": ["육아", "가정", "성장"],
         "finance": ["경제", "재테크", "투자"],
+        "health": ["건강", "습관", "근거"],
     }.get(service._normalize_topic_mode(topic_mode), ["일상", "정보"])
 
     category_token = str(category).strip()
@@ -1436,7 +1877,7 @@ async def run_scheduler_forever(service_cls,
     from ..llm import get_generator, llm_generate_fn
     from ..logging_config import setup_logging
     from ..uploaders.playwright_publisher import PlaywrightPublisher
-    from .job_store import JobStore
+    from .job_store import JobConfig, JobStore
     from .notifier import TelegramNotifier
     from .pipeline_service import PipelineService, stub_generate_fn
     from .trend_job_service import TrendJobService
@@ -1455,7 +1896,8 @@ async def run_scheduler_forever(service_cls,
     if resolved_daily_posts_target < 1:
         resolved_daily_posts_target = service_cls.DEFAULT_DAILY_TARGET
 
-    job_store = JobStore(db_path=resolved_db_path)
+    job_config = JobConfig(max_llm_calls_per_job=config.pipeline.max_llm_calls_per_job)
+    job_store = JobStore(db_path=resolved_db_path, config=job_config)
     metrics_collector = MetricsCollector(db_path=job_store.db_path)
 
     dry_run = False
@@ -1495,6 +1937,7 @@ async def run_scheduler_forever(service_cls,
 
     quality_evaluator = None
     feedback_analyzer = None
+    vlm_evaluator = None
     try:
         from ..llm.provider_factory import create_client
         from .quality_evaluator import QualityEvaluator
@@ -1507,6 +1950,93 @@ async def run_scheduler_forever(service_cls,
         logger.info("Scheduler quality evaluator backend: llm")
     except Exception as exc:
         logger.warning("Scheduler quality evaluator init failed: %s", exc)
+
+    try:
+        from ..evaluation.visual_evaluator import VisualQualityEvaluator
+        from ..llm.circuit_breaker import ProviderCircuitBreaker
+        from ..llm.llm_router import LLMRouter
+        from ..llm.provider_factory import create_client
+        from ..llm.vlm_router import VLMRouter, normalize_vlm_strategy_mode
+
+        router = LLMRouter(job_store=job_store, llm_config=config.llm)
+        saved = router.get_saved_settings()
+        text_keys = dict(saved.get("text_api_keys", {}))
+        vlm_enabled = bool(saved.get("vlm_enabled", False))
+        if vlm_enabled:
+            strategy_mode = normalize_vlm_strategy_mode(
+                saved.get("vlm_strategy_mode", constants.VLM_DEFAULT_STRATEGY_MODE),
+                fallback_strategy=saved.get("strategy_mode", "cost"),
+            )
+            vlm_router = VLMRouter(job_store=job_store)
+            route_chain = vlm_router.build_route(
+                strategy_mode=strategy_mode,
+                text_api_keys=text_keys,
+                preferred_model=str(saved.get("vlm_model", constants.VLM_DEFAULT_MODEL)),
+                quality_floor=float(saved.get("vlm_quality_floor", constants.VLM_DEFAULT_QUALITY_FLOOR)),
+                max_cost_guard_krw=float(
+                    saved.get("vlm_max_cost_guard_krw", constants.VLM_DEFAULT_MAX_COST_GUARD_KRW)
+                ),
+                max_candidates=constants.VLM_ROUTER_MAX_CANDIDATES,
+            )
+            if route_chain:
+                vlm_breaker = ProviderCircuitBreaker(
+                    job_store=job_store,
+                    notifier=notifier,
+                    fail_threshold=3,
+                    open_ttl_seconds=300,
+                )
+                vlm_breaker.load_all_from_db(
+                    [f"{item.client_provider}:{item.model}".strip().lower() for item in route_chain]
+                )
+
+                clients = []
+                score_bias_map: Dict[str, float] = {}
+                route_labels = []
+                for item in route_chain:
+                    api_key = str(text_keys.get(item.key_id, "")).strip()
+                    if not api_key:
+                        continue
+                    try:
+                        client = create_client(
+                            provider=item.client_provider,
+                            model=item.model,
+                            timeout_sec=constants.VLM_REQUEST_TIMEOUT_SEC,
+                            api_key=api_key,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Scheduler VLM client init skipped: %s/%s (%s)",
+                            item.client_provider,
+                            item.model,
+                            exc,
+                        )
+                        continue
+                    clients.append(client)
+                    score_bias_map[f"{item.client_provider}:{item.model}".strip().lower()] = float(
+                        item.scoring_bias_offset or 0.0
+                    )
+                    route_labels.append(f"{item.client_provider}:{item.model}")
+
+                if clients:
+                    primary_client, *fallback_clients = clients
+                    vlm_evaluator = VisualQualityEvaluator(
+                        vlm_client=primary_client,
+                        fallback_clients=fallback_clients,
+                        circuit_breaker=vlm_breaker,
+                        score_bias_map=score_bias_map,
+                    )
+                    logger.info("Scheduler visual evaluator backend: %s", " -> ".join(route_labels))
+                else:
+                    logger.info("Scheduler visual evaluator disabled (no available VLM clients)")
+            else:
+                logger.info("Scheduler visual evaluator disabled (no route candidates)")
+        else:
+            logger.info(
+                "Scheduler visual evaluator disabled (enabled=%s)",
+                vlm_enabled,
+            )
+    except Exception as exc:
+        logger.warning("Scheduler visual evaluator init failed: %s", exc)
 
     try:
         from ..seo.feedback_analyzer import FeedbackAnalyzer
@@ -1559,6 +2089,7 @@ async def run_scheduler_forever(service_cls,
         retry_backoff_max_sec=config.retry.backoff_max_sec,
         image_generator=image_generator,
         quality_evaluator=quality_evaluator,
+        vlm_evaluator=vlm_evaluator,
         memory_store=_scheduler_memory_store,
     )
 

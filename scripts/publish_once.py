@@ -108,6 +108,26 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="AI 토글 검증 시 요구하는 최소 expected_on 개수",
     )
+    parser.add_argument(
+        "--preflight-editor",
+        action="store_true",
+        help="발행 전 네이버 에디터 DOM/화면 사전 진단을 실행",
+    )
+    parser.add_argument(
+        "--preflight-soft",
+        action="store_true",
+        help="에디터 사전 진단 실패를 경고로만 처리",
+    )
+    parser.add_argument(
+        "--browser-channel",
+        default=None,
+        help="Playwright 브라우저 채널 지정 예: chrome",
+    )
+    parser.add_argument(
+        "--draft-only",
+        action="store_true",
+        help="실발행 대신 네이버 임시저장까지만 수행",
+    )
     return parser.parse_args()
 
 
@@ -225,6 +245,14 @@ async def run(args: argparse.Namespace):
         os.environ["IMAGE_DISABLE_STOCK"] = "true"
     if args.ai_toggle_mode:
         os.environ["NAVER_AI_TOGGLE_MODE"] = args.ai_toggle_mode
+    if args.preflight_editor:
+        os.environ["NAVER_EDITOR_PREFLIGHT"] = "true"
+    if args.preflight_soft:
+        os.environ["NAVER_EDITOR_PREFLIGHT_STRICT"] = "false"
+    if args.browser_channel:
+        os.environ["PLAYWRIGHT_BROWSER_CHANNEL"] = str(args.browser_channel).strip()
+    if args.draft_only:
+        os.environ["NAVER_PUBLISH_MODE"] = "draft"
 
     # 세션 파일 체크
     session_file = Path("data/sessions/naver/state.json")
@@ -263,6 +291,13 @@ async def run(args: argparse.Namespace):
         print("  이미지전략 : ai_only (stock disabled)")
     if args.ai_toggle_mode:
         print(f"  토글모드  : {args.ai_toggle_mode}")
+    if os.getenv("NAVER_EDITOR_PREFLIGHT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        strict_label = os.getenv("NAVER_EDITOR_PREFLIGHT_STRICT", "true")
+        print(f"  사전진단  : enabled (strict={strict_label})")
+    if os.getenv("PLAYWRIGHT_BROWSER_CHANNEL", "").strip():
+        print(f"  브라우저  : {os.getenv('PLAYWRIGHT_BROWSER_CHANNEL', '').strip()}")
+    if os.getenv("NAVER_PUBLISH_MODE", "").strip().lower() == "draft":
+        print("  저장모드  : 임시저장")
     print("=" * 55)
     print()
 
@@ -490,13 +525,14 @@ async def run(args: argparse.Namespace):
     print("=" * 55)
     print(f"  최종 상태 : {final_job.status}")
     if final_job.status == "completed":
-        print(f"  발행 URL  : {final_job.result_url}")
+        result_label = "임시저장 URL" if args.draft_only else "발행 URL"
+        print(f"  {result_label}  : {final_job.result_url}")
         if use_llm:
             provider_summary = _format_provider_summary(final_job.seo_snapshot)
             if provider_summary:
                 print(f"  LLM Provider : {provider_summary}")
         print()
-        print("🎉 실발행 성공!")
+        print("🎉 임시저장 성공!" if args.draft_only else "🎉 실발행 성공!")
         if args.verify_ai_toggle:
             report_path = Path("data/ai_toggle/last_report.json")
             if not report_path.exists():

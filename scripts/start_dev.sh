@@ -5,6 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_PID=""
 FRONTEND_PID=""
+PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="/opt/homebrew/bin/python3.11"
+fi
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="python3"
+fi
 
 cleanup() {
   # 종료 시 자식 프로세스를 정리해서 좀비 프로세스를 방지한다.
@@ -21,7 +28,7 @@ trap cleanup EXIT INT TERM
 cd "${ROOT_DIR}"
 
 echo "[start_dev] Starting FastAPI on :8000"
-python3 -m uvicorn server.main:app --reload --port 8000 &
+"${PYTHON_BIN}" -m uvicorn server.main:app --reload --port 8000 &
 BACKEND_PID=$!
 
 echo "[start_dev] Starting Next.js on :3000"

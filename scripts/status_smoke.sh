@@ -10,6 +10,7 @@ LOG_DIR="${WORKSPACE_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/smoke.stdout.log"
 STDERR_LOG="${LOG_DIR}/smoke.stderr.log"
 AI_TOGGLE_REPORT="${WORKSPACE_DIR}/data/ai_toggle/last_report.json"
+EDITOR_PREFLIGHT_REPORT="${WORKSPACE_DIR}/data/editor_diagnostics/last_report.json"
 ERROR_PATTERN="ERROR|FAILED|Traceback|AUTH_EXPIRED|CAPTCHA_REQUIRED|NETWORK_TIMEOUT|PUBLISH_FAILED"
 
 echo "== AutoBlog Smoke Status =="
@@ -81,6 +82,26 @@ if [[ -f "${AI_TOGGLE_REPORT}" ]]; then
   fi
 else
   echo "AI 토글 리포트 파일 없음: ${AI_TOGGLE_REPORT}"
+fi
+
+echo
+echo "== 최근 에디터 사전 진단 요약 =="
+if [[ -f "${EDITOR_PREFLIGHT_REPORT}" ]]; then
+  PREFLIGHT_STATUS="$(grep -E '^  "status": ' "${EDITOR_PREFLIGHT_REPORT}" | tail -n 1 | cut -d'"' -f4 || true)"
+  PREFLIGHT_STAGE="$(grep -E '^  "stage": ' "${EDITOR_PREFLIGHT_REPORT}" | tail -n 1 | cut -d'"' -f4 || true)"
+  PREFLIGHT_URL="$(grep -E '^  "current_url": ' "${EDITOR_PREFLIGHT_REPORT}" | tail -n 1 | cut -d'"' -f4 || true)"
+  PREFLIGHT_SCREENSHOT="$(grep -E '^  "screenshot_path": ' "${EDITOR_PREFLIGHT_REPORT}" | tail -n 1 | cut -d'"' -f4 || true)"
+
+  echo "status: ${PREFLIGHT_STATUS:-unknown}"
+  echo "stage: ${PREFLIGHT_STAGE:-unknown}"
+  if [[ -n "${PREFLIGHT_URL}" ]]; then
+    echo "current_url: ${PREFLIGHT_URL}"
+  fi
+  if [[ -n "${PREFLIGHT_SCREENSHOT}" ]]; then
+    echo "screenshot: ${PREFLIGHT_SCREENSHOT}"
+  fi
+else
+  echo "에디터 사전 진단 리포트 파일 없음: ${EDITOR_PREFLIGHT_REPORT}"
 fi
 
 echo

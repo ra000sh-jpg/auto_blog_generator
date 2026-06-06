@@ -20,9 +20,16 @@ if [[ ! -f "$SESSION_FILE" ]]; then
   exit 1
 fi
 
-export PLAYWRIGHT_HEADLESS=false
+HEADFUL_MODE_LOWER="$(printf '%s' "${HEADFUL_MODE}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${HEADFUL_MODE_LOWER}" == "true" ]]; then
+  export PLAYWRIGHT_HEADLESS=false
+else
+  export PLAYWRIGHT_HEADLESS=true
+fi
 export NAVER_AI_TOGGLE_MODE="${NAVER_AI_TOGGLE_MODE:-metadata}"
 export NAVER_AI_TOGGLE_POST_VERIFY=true
+export NAVER_EDITOR_PREFLIGHT="${NAVER_EDITOR_PREFLIGHT:-true}"
+export NAVER_EDITOR_PREFLIGHT_STRICT="${NAVER_EDITOR_PREFLIGHT_STRICT:-true}"
 
 echo "======================================================="
 echo "  Headful 스모크 테스트 시작"
@@ -33,6 +40,7 @@ echo "  category   : $CATEGORY"
 echo "  persona    : $PERSONA"
 echo "  toggleMode : $NAVER_AI_TOGGLE_MODE"
 echo "  headful    : $HEADFUL_MODE"
+echo "  preflight  : $NAVER_EDITOR_PREFLIGHT (strict=$NAVER_EDITOR_PREFLIGHT_STRICT)"
 echo "======================================================="
 
 PUBLISH_ARGS=(
@@ -45,9 +53,9 @@ PUBLISH_ARGS=(
   --ai-toggle-mode "$NAVER_AI_TOGGLE_MODE"
   --verify-ai-toggle
   --verify-min-expected "$VERIFY_MIN_EXPECTED"
+  --preflight-editor
 )
 
-HEADFUL_MODE_LOWER="$(printf '%s' "${HEADFUL_MODE}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${HEADFUL_MODE_LOWER}" == "true" ]]; then
   PUBLISH_ARGS+=(--headful)
 fi

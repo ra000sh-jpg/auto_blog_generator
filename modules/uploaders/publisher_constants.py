@@ -57,6 +57,14 @@ PUBLISH_BTN_1_SELECTORS = [
     "button:has-text('발행')",
 ]
 
+DRAFT_SAVE_SELECTORS = [
+    ".se-header button:has-text('저장')",
+    "button[class*='save_btn']",
+    "button[class*='save']",
+    "button:has-text('저장')",
+    "a:has-text('저장')",
+]
+
 PUBLISH_BTN_2_SELECTORS = [
     ".layer_result button.confirm_btn__WEaBq",
     ".layer_result button:has-text('발행')",

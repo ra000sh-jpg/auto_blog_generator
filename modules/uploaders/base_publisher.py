@@ -32,6 +32,7 @@ class BasePublisher(ABC):
         image_points: Optional[List["ImageInsertionPoint"]] = None,
         tags: Optional[List[str]] = None,
         category: Optional[str] = None,
+        publish_mode: Optional[str] = None,
     ) -> PublishResult:
         """포스트를 발행하고 결과를 반환한다."""
 

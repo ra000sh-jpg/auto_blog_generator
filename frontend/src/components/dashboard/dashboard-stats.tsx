@@ -1,6 +1,6 @@
 "use client";
 
-import { Flame, Inbox, TrendingUp, Wallet } from "lucide-react";
+import { Flame, Inbox, Monitor, TrendingUp, Wallet } from "lucide-react";
 import { formatKrw } from "@/lib/utils/formatters";
 import type { DashboardResponse, IdeaVaultStatsResponse } from "@/lib/api";
 import { GlassCard, StatCard } from "./dashboard-ui";
@@ -16,7 +16,7 @@ export function DashboardStats({ dashboard, ideaVaultStats, dashLoading }: Dashb
     const s = dashboard?.scheduler;
 
     return (
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
             <GlassCard glow="blue">
                 <StatCard
                     icon={<Flame className="h-5 w-5 text-blue-600" />}
@@ -54,6 +54,20 @@ export function DashboardStats({ dashboard, ideaVaultStats, dashLoading }: Dashb
                     value={dashLoading ? "—" : `₩${formatKrw(m?.llm_cost_krw ?? 0)}`}
                     sub={m ? `$${m.llm_cost_usd.toFixed(4)} / ${m.llm_total_calls}호출` : undefined}
                     iconBg="bg-amber-100"
+                    loading={dashLoading}
+                />
+            </GlassCard>
+            <GlassCard glow="blue">
+                <StatCard
+                    icon={<Monitor className="h-5 w-5 text-indigo-600" />}
+                    label="시각 품질"
+                    value={
+                        dashLoading
+                            ? "—"
+                            : `${Number(m?.avg_vlm_visual_score || 0).toFixed(1)}점`
+                    }
+                    sub="최근 7일 평균"
+                    iconBg="bg-indigo-100"
                     loading={dashLoading}
                 />
             </GlassCard>

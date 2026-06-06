@@ -6,15 +6,6 @@ from typing import Optional
 
 from .. import constants
 from .base_client import BaseLLMClient
-from .claude_client import ClaudeClient
-from .deepseek_client import DeepSeekClient
-from .openai_compat_client import (
-    create_cerebras_client,
-    create_gemini_client,
-    create_groq_client,
-    create_openai_client,
-)
-from .qwen_client import QwenClient
 
 
 def create_client(
@@ -28,10 +19,20 @@ def create_client(
     normalized = provider.strip().lower()
 
     if normalized == "qwen":
+        from .qwen_client import QwenClient
+
         return QwenClient(model=model or "qwen-plus", timeout_sec=timeout_sec, api_key=api_key)
     if normalized == "deepseek":
-        return DeepSeekClient(model=model or "deepseek-chat", timeout_sec=timeout_sec, api_key=api_key)
+        from .deepseek_client import DeepSeekClient
+
+        return DeepSeekClient(
+            model=model or constants.DEFAULT_DEEPSEEK_MODEL,
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
     if normalized == "claude":
+        from .claude_client import ClaudeClient
+
         return ClaudeClient(
             model=model or "claude-sonnet-4-20250514",
             timeout_sec=timeout_sec,
@@ -39,26 +40,82 @@ def create_client(
             api_key=api_key,
         )
     if normalized == "groq":
+        from .openai_compat_client import create_groq_client
+
         return create_groq_client(
             model=model or "llama-3.3-70b-versatile",
             timeout_sec=timeout_sec,
             api_key=api_key,
         )
     if normalized == "cerebras":
+        from .openai_compat_client import create_cerebras_client
+
         return create_cerebras_client(
             model=model or "llama3.1-8b",
             timeout_sec=timeout_sec,
             api_key=api_key,
         )
     if normalized == "gemini":
+        from .openai_compat_client import create_gemini_client
+
         return create_gemini_client(
             model=model or "gemini-2.0-flash",
             timeout_sec=timeout_sec,
             api_key=api_key,
         )
     if normalized == "openai":
+        from .openai_compat_client import create_openai_client
+
         return create_openai_client(
             model=model or "gpt-4.1-mini",
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "nvidia":
+        from .openai_compat_client import create_nvidia_client
+
+        return create_nvidia_client(
+            model=model or "meta/llama-3.3-70b-instruct",
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "nvidia_vlm":
+        from .openai_compat_client import create_nvidia_vlm_client
+
+        return create_nvidia_vlm_client(
+            model=model or constants.VLM_DEFAULT_MODEL,
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "openai_vlm":
+        from .openai_compat_client import create_openai_vlm_client
+
+        return create_openai_vlm_client(
+            model=model or "gpt-4.1-mini",
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "gemini_vlm":
+        from .openai_compat_client import create_gemini_vlm_client
+
+        return create_gemini_vlm_client(
+            model=model or "gemini-2.5-flash-lite",
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "groq_vlm":
+        from .openai_compat_client import create_groq_vlm_client
+
+        return create_groq_vlm_client(
+            model=model or "meta-llama/llama-4-scout-17b-16e-instruct",
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "qwen_vlm":
+        from .openai_compat_client import create_qwen_vlm_client
+
+        return create_qwen_vlm_client(
+            model=model or "qwen-vl-plus",
             timeout_sec=timeout_sec,
             api_key=api_key,
         )

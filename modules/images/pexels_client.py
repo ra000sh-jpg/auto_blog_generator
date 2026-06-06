@@ -197,7 +197,7 @@ class PexelsImageClient:
 
         photos = await self.search(
             query=search_query,
-            per_page=10,
+            per_page=15,
             orientation=orientation,
         )
 
@@ -207,8 +207,8 @@ class PexelsImageClient:
                 error_message=f"No photos found for: {search_query}",
             )
 
-        # 첫 번째 사진 다운로드 (추후 랜덤 선택 등 개선 가능)
-        photo = random.choice(photos[:5]) if len(photos) >= 5 else photos[0]
+        # 검색어 단어와 alt 텍스트 매칭 점수로 가장 관련성 높은 사진 선택
+        photo = self._pick_best_photo(photos[:10], search_query)
 
         local_path = await self.download_photo(photo, size_key="large")
 
@@ -259,6 +259,39 @@ class PexelsImageClient:
             return " ".join(words[:8])
 
         return prompt
+
+    @staticmethod
+    def _score_photo_relevance(photo: dict, query: str) -> int:
+        """photo alt 텍스트와 검색어 단어들의 매칭 점수를 반환한다.
+
+        Pexels alt 필드는 사진 설명 텍스트를 포함한다.
+        검색어를 단어로 분리해 각각이 alt에 포함되면 +1점.
+        3자 미만 단어(관사, 전치사 등)는 제외한다.
+        """
+        alt = (photo.get("alt") or "").lower()
+        terms = [t.lower() for t in query.split() if len(t) >= 3]
+        return sum(1 for term in terms if term in alt)
+
+    def _pick_best_photo(self, photos: list, query: str) -> dict:
+        """관련성 점수 기반으로 가장 적합한 사진을 선택한다.
+
+        1. 관련성 점수(alt 텍스트 매칭) 계산
+        2. 점수 1위가 있으면 그것 사용
+        3. 동점 최다 그룹에서 랜덤 선택 (다양성 확보)
+        4. 모든 점수가 0이면 Pexels 관련성 순 1위(photos[0]) 사용
+        """
+        if not photos:
+            return {}
+
+        scored = [(self._score_photo_relevance(p, query), i, p) for i, p in enumerate(photos)]
+        best_score = max(s for s, _, _ in scored)
+
+        if best_score == 0:
+            # alt 텍스트 매칭 없음 → Pexels가 관련성으로 정렬한 첫 번째 사용
+            return photos[0]
+
+        top_photos = [p for s, _, p in scored if s == best_score]
+        return random.choice(top_photos)
 
     async def close(self) -> None:
         """aiohttp 세션을 정리한다."""

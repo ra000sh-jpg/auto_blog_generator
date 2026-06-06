@@ -132,10 +132,10 @@ export default function AllocationSettingsCard({
     return (
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="font-[family-name:var(--font-heading)] text-lg font-semibold">
-                Scheduler Allocation
+                스케줄러 배분
             </h2>
             <p className="mt-1 text-sm text-slate-600">
-                하루 총 발행량과 Idea Vault 사용량을 먼저 정한 뒤, 나머지 비율을 트렌드 카테고리에 배분하세요. (합계 100%)
+                하루 총 발행량과 아이디어 창고 사용량을 먼저 정한 뒤, 나머지 비율을 트렌드 카테고리에 배분하세요. (합계 100%)
             </p>
 
             <label className="mt-4 block rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -155,7 +155,7 @@ export default function AllocationSettingsCard({
 
             <label className="mt-3 block rounded-xl border border-slate-200 bg-slate-50 p-3">
                 <div className="flex items-center justify-between text-sm">
-                    <span>창고 아이디어(Idea Vault) 하루 사용량</span>
+                    <span>아이디어 창고 하루 사용량</span>
                     <span className="font-semibold">{ideaVaultDailyQuota}편</span>
                 </div>
                 <input
@@ -173,8 +173,8 @@ export default function AllocationSettingsCard({
 
             <div className="mt-4 rounded-xl border border-slate-200">
                 <div className="grid grid-cols-12 border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
-                    <div className="col-span-3">Category</div>
-                    <div className="col-span-2">Topic Mode</div>
+                    <div className="col-span-3">카테고리</div>
+                    <div className="col-span-2">토픽 모드</div>
                     <div className="col-span-3">할당량</div>
                     <div className="col-span-2">총 이미지</div>
                     <div className="col-span-2">AI 이미지</div>
@@ -328,7 +328,7 @@ export default function AllocationSettingsCard({
                 {trendDailyTarget <= 0 && (
                     <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
                         <span className="text-slate-400">ℹ️</span>
-                        <p>하루 발행량이 모두 Idea Vault 예약으로 가득 차서, 트렌드 토픽 발굴은 오늘 진행되지 않습니다.</p>
+                        <p>하루 발행량이 모두 아이디어 창고 예약으로 가득 차서, 트렌드 토픽 발굴은 오늘 진행되지 않습니다.</p>
                     </div>
                 )}
 

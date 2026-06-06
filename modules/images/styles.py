@@ -27,7 +27,7 @@ THUMBNAIL_STYLES: Dict[str, ImageStyle] = {
     "editorial_bold": ImageStyle(
         name="Editorial Bold",
         suffix=(
-            ", bold editorial magazine style, strong typography composition, "
+            ", bold editorial magazine style, strong geometric composition, "
             "clean modern layout, vibrant accent color on neutral background, "
             "professional blog header, 4K quality"
         ),
@@ -119,6 +119,7 @@ TOPIC_THUMBNAIL_STYLE: Dict[str, str] = {
     "parenting": "lifestyle_warm",
     "it": "editorial_bold",
     "finance": "editorial_bold",
+    "health": "product_clean",
     "default": "product_clean",
 }
 
@@ -127,6 +128,7 @@ TOPIC_CONTENT_STYLE: Dict[str, str] = {
     "parenting": "cozy_lifestyle",
     "it": "clean_infographic",
     "finance": "clean_infographic",
+    "health": "clean_infographic",
     "default": "clean_infographic",
 }
 

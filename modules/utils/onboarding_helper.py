@@ -257,15 +257,17 @@ def infer_topic_mode(category_name: str) -> str:
         return "it"
     if any(token in lowered for token in ("육아", "아이", "부모", "가정", "parenting", "family")):
         return "parenting"
+    if any(token in lowered for token in ("건강", "의학", "의료", "운동", "수면", "식단", "health")):
+        return "health"
     return "cafe"
 
 
 def normalize_topic_mode(raw_mode: str, fallback_category: str = "") -> str:
-    """토픽 모드를 허용 범위(cafe/it/parenting/finance)로 정규화한다."""
+    """토픽 모드를 허용 범위(cafe/it/parenting/finance/health)로 정규화한다."""
     lowered = str(raw_mode).strip().lower()
     if lowered == "economy":
         return "finance"
-    if lowered in {"cafe", "it", "parenting", "finance"}:
+    if lowered in {"cafe", "it", "parenting", "finance", "health"}:
         return lowered
     return infer_topic_mode(fallback_category or raw_mode)
 

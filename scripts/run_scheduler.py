@@ -24,6 +24,17 @@ from modules.config import load_config
 from modules.logging_config import setup_logging
 
 
+def _int_env(name: str) -> int | None:
+    """환경변수 정수 값을 안전하게 읽는다."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Auto Blog Scheduler")
     default_db_path = os.getenv("AUTOBLOG_DB_PATH", "data/automation.db")
@@ -35,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--daily-target",
         type=int,
-        default=None,
+        default=_int_env("SCHEDULER_DAILY_POSTS_TARGET"),
         help=(
             "일일 포스팅 목표 편수. "
             "지정 시 DB 설정(scheduler_daily_posts_target)보다 우선 적용됩니다. "

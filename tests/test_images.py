@@ -26,6 +26,148 @@ def test_image_generator_builds_prompt():
     assert "테스트 제목" in prompt
 
 
+def test_summary_card_renderer_creates_png(tmp_path):
+    """본문 요약 카드가 비용 없이 PNG로 생성되어야 한다."""
+    from PIL import Image
+
+    from modules.images.summary_card_renderer import extract_summary_bullets, render_summary_card
+
+    content = (
+        "며칠 전 시장이 크게 흔들렸고, 저는 먼저 손실보다 기록을 확인했습니다.\n\n"
+        "## 시장 전망보다 먼저 마주해야 하는 오해\n"
+        "초심자는 정보 부족보다 불안 때문에 더 자주 흔들립니다.\n\n"
+        "## 초기 자산 배분, 왜 첫 번째 경계선인가\n"
+        "배분은 수익률을 높이는 기술이라기보다 평범한 하루를 지키는 틀입니다.\n\n"
+        "## 손실을 마주하는 연습\n"
+        "작은 손실에서 감정 반응을 기록하면 무리한 선택을 줄일 수 있습니다.\n"
+    )
+
+    bullets = extract_summary_bullets(
+        content=content,
+        title="손실을 마주하는 연습",
+        max_bullets=4,
+    )
+    assert len(bullets) >= 3
+    assert "시장 전망보다 먼저 마주해야 하는 오해" in bullets
+
+    result = render_summary_card(
+        title="손실을 마주하는 연습",
+        content=content,
+        output_dir=str(tmp_path),
+    )
+
+    assert result is not None
+    assert result.path.endswith(".png")
+    with Image.open(result.path) as image:
+        assert image.size == (1080, 1350)
+
+
+def test_market_chart_renderer_creates_change_bar_png(tmp_path):
+    """변동률 데이터가 있으면 시장 막대그래프 PNG가 생성되어야 한다."""
+    from PIL import Image
+
+    from modules.images.market_chart_renderer import render_market_chart
+
+    result = render_market_chart(
+        title="미장 전 브리핑",
+        output_dir=str(tmp_path),
+        market_snapshot={
+            "slot": "us_preopen",
+            "scope": "us",
+            "data_points": [
+                {"symbol": "SPY", "source": "Stooq", "value": 624.1, "change_percent": 0.72},
+                {"symbol": "QQQ", "source": "Stooq", "value": 542.3, "change_percent": -0.35},
+                {"symbol": "BTC", "source": "CoinGecko", "value": 104200.0, "change_percent": 1.8},
+            ],
+        },
+    )
+
+    assert result is not None
+    assert result.mode == "change_bar"
+    assert result.point_count == 3
+    with Image.open(result.path) as image:
+        assert image.size == (1200, 760)
+
+
+def test_market_chart_renderer_creates_indicator_board_when_change_missing(tmp_path):
+    """단위가 다른 시장 수치는 억지 그래프 대신 지표 보드로 생성되어야 한다."""
+    from PIL import Image
+
+    from modules.images.market_chart_renderer import render_market_chart
+
+    result = render_market_chart(
+        title="국장 전 브리핑",
+        output_dir=str(tmp_path),
+        market_snapshot={
+            "slot": "kr_preopen",
+            "scope": "kr",
+            "data_points": [
+                {"symbol": "KOSPI", "source": "Stooq", "value": 2870.25},
+                {"symbol": "USD/KRW", "source": "Yahoo", "value": 1368.4},
+                {"symbol": "US10Y", "source": "FRED", "value": 4.38},
+            ],
+        },
+    )
+
+    assert result is not None
+    assert result.mode == "indicator_board"
+    assert result.point_count == 3
+    with Image.open(result.path) as image:
+        assert image.size == (1200, 760)
+
+
+def test_flowchart_renderer_creates_png(tmp_path):
+    """흐름도 렌더러가 단계형 PNG를 생성해야 한다."""
+    from modules.images.flowchart_renderer import render_flowchart
+
+    result = render_flowchart(
+        title="오늘 투자 판단 흐름",
+        nodes=[
+            "환율 압력을 먼저 확인한다",
+            "금리와 선물 흐름을 함께 본다",
+            "포지션을 더하기보다 줄일 기준을 정한다",
+        ],
+        output_dir=str(tmp_path),
+        style="market_note",
+    )
+
+    assert result is not None
+    assert result.node_count == 3
+    assert result.path.endswith(".png")
+
+
+def test_market_note_table_renderer_sanitizes_cells_and_creates_png(tmp_path):
+    """시장노트형 표는 셀 수 불일치와 짧은 오타를 정리한 뒤 PNG로 생성한다."""
+
+    from PIL import Image
+
+    from modules.images.table_renderer import extract_and_render_tables_with_validation
+    from modules.images.visual_text_sanitizer import sanitize_visual_text
+
+    assert sanitize_visual_text("수익율과 테그") == "수익률과 태그"
+
+    content = (
+        "| 구분 | 확인 기준 | 메모 |\n"
+        "| --- | --- | --- |\n"
+        "| 반도체 | +1.2% 강세 | 수익율보다 수급 |\n"
+        "| 환율 | 하락 | 전일대비 부담 | 추가 셀 |\n"
+    )
+
+    modified, paths, validation = extract_and_render_tables_with_validation(
+        content=content,
+        output_dir=str(tmp_path),
+        style="market_note",
+    )
+
+    assert "[TABLE_0]" in modified
+    assert len(paths) == 1
+    assert validation.passed is False
+    assert any("trimmed" in issue for issue in validation.issues)
+    with Image.open(paths[0]) as image:
+        assert image.size[0] > 0
+        assert image.size[1] > 0
+
+
 def test_pollinations_client_size_parsing():
     """size 문자열이 올바르게 (width, height)로 변환되어야 한다."""
     from modules.images.pollinations_client import PollinationsImageClient
@@ -387,18 +529,3 @@ def test_image_generator_detects_free_tier_exhaustion_and_fallbacks_to_stock():
     assert result.source_kind_by_path[result.content_paths[0]] == "stock"
     fallback_logs = [row for row in result.generation_logs if row.get("fallback_reason") == "free_tier_exhausted"]
     assert fallback_logs
-
-def test_flowchart_renderer_creates_png(tmp_path):
-    """흐름도 렌더러가 PNG 파일을 생성해야 한다."""
-    from pathlib import Path
-    from modules.images.flowchart_renderer import render_flowchart
-
-    result = render_flowchart(
-        title="선택 기준 점검",
-        nodes=["현재 상황 확인", "선택지 비교", "주의점 기록", "다음 행동 결정"],
-        output_dir=str(tmp_path),
-    )
-
-    assert result is not None
-    assert Path(result.path).exists()
-    assert result.node_count == 4

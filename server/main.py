@@ -24,6 +24,7 @@ from server.routers.metrics import router as metrics_router
 from server.routers.ai_toggle import router as ai_toggle_router
 from server.routers.naver_connect import router as naver_connect_router
 from server.routers.onboarding import router as onboarding_router
+from server.routers.ops import router as ops_router
 from server.routers.router_settings import router as router_settings_router
 from server.routers.scheduler import router as scheduler_router
 from server.routers.scheduler import set_scheduler_instance
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 # --- A-1: API 토큰 인증 미들웨어 ---
 _API_TOKEN: str = os.getenv("AUTOBLOG_API_TOKEN", "").strip()
 _BYPASS_PATHS: frozenset[str] = frozenset(["/api/health", "/docs", "/openapi.json"])
+
+
+def _feature_enabled(env_name: str, *, default: bool = True) -> bool:
+    """운영 서버에서 실험 기능 라우터를 가볍게 끌 수 있게 한다."""
+    raw_value = os.getenv(env_name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
@@ -165,19 +174,26 @@ app.add_middleware(TokenAuthMiddleware)
 
 app.include_router(health_router, prefix="/api", tags=["health"])
 app.include_router(jobs_router, prefix="/api", tags=["jobs"])
-app.include_router(metrics_router, prefix="/api", tags=["metrics"])
-app.include_router(ai_toggle_router, prefix="/api", tags=["ai-toggle"])
 app.include_router(config_router, prefix="/api", tags=["config"])
-app.include_router(channels_router, prefix="/api", tags=["channels"])
 app.include_router(onboarding_router, prefix="/api", tags=["onboarding"])
 app.include_router(magic_input_router, prefix="/api", tags=["magic-input"])
-app.include_router(idea_vault_router, prefix="/api", tags=["idea-vault"])
 app.include_router(router_settings_router, prefix="/api", tags=["router-settings"])
 app.include_router(naver_connect_router, prefix="/api", tags=["naver-connect"])
 app.include_router(scheduler_router, prefix="/api", tags=["scheduler"])
 app.include_router(stats_router, prefix="/api", tags=["stats"])
 app.include_router(telegram_webhook_router, prefix="/api", tags=["telegram"])
-app.include_router(update_router, prefix="/api", tags=["update"])
+app.include_router(ops_router, prefix="/api", tags=["ops"])
+
+if _feature_enabled("AUTOBLOG_ENABLE_METRICS_API"):
+    app.include_router(metrics_router, prefix="/api", tags=["metrics"])
+if _feature_enabled("AUTOBLOG_ENABLE_AI_TOGGLE_API"):
+    app.include_router(ai_toggle_router, prefix="/api", tags=["ai-toggle"])
+if _feature_enabled("AUTOBLOG_ENABLE_CHANNELS_API"):
+    app.include_router(channels_router, prefix="/api", tags=["channels"])
+if _feature_enabled("AUTOBLOG_ENABLE_IDEA_VAULT_API"):
+    app.include_router(idea_vault_router, prefix="/api", tags=["idea-vault"])
+if _feature_enabled("AUTOBLOG_ENABLE_UPDATE_API"):
+    app.include_router(update_router, prefix="/api", tags=["update"])
 
 
 @app.get("/", tags=["root"])

@@ -161,7 +161,8 @@ def test_draft_prefetch_stops_on_cpu_interrupt(tmp_path: Path):
 
     call_count = 0
 
-    async def _fake_prepare():
+    async def _fake_prepare(*args, **kwargs):
+        del args, kwargs
         nonlocal call_count
         call_count += 1
         # 이벤트 루프를 한 턴 양보해 watchdog 가 실행될 기회를 준다
@@ -211,7 +212,8 @@ def test_draft_prefetch_completes_when_resource_ok(tmp_path: Path):
 
     call_count = 0
 
-    async def _fake_prepare():
+    async def _fake_prepare(*args, **kwargs):
+        del args, kwargs
         nonlocal call_count
         call_count += 1
         return True

@@ -30,6 +30,7 @@ class WorkerConfig:
     heartbeat_interval_sec: int = 60  # heartbeat 간격
     reaper_interval_sec: int = 120  # reaper 실행 간격
     graceful_shutdown_timeout_sec: int = 30  # graceful shutdown 대기
+    required_tag: Optional[str] = None  # 특정 태그가 있는 job만 처리
 
 
 class Worker:
@@ -173,7 +174,10 @@ class Worker:
             return
 
         # Due job claim
-        jobs = self.job_store.claim_due_jobs(limit=available_slots)
+        jobs = self.job_store.claim_due_jobs(
+            limit=available_slots,
+            required_tag=self.config.required_tag,
+        )
 
         for job in jobs:
             await self._start_job(job)

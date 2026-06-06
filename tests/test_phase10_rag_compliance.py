@@ -180,6 +180,13 @@ def test_publisher_force_ai_toggle_env(monkeypatch):
     assert publisher._force_ai_toggle is True
 
 
+def test_publisher_draft_publish_mode_env(monkeypatch):
+    """NAVER_PUBLISH_MODE=draft이면 발행 대신 임시저장 경로를 사용해야 한다."""
+    monkeypatch.setenv("NAVER_PUBLISH_MODE", "draft")
+    publisher = PlaywrightPublisher(blog_id="phase10-draft-test")
+    assert publisher._publish_mode == "draft"
+
+
 def test_publisher_extract_log_no_from_post_url():
     """PostView URL에서 logNo를 안정적으로 추출해야 한다."""
     publisher = PlaywrightPublisher(blog_id="phase10-url-test")
@@ -233,6 +240,63 @@ def test_publisher_decide_ai_toggle_respects_metadata_and_force(monkeypatch):
     assert force_decision["mode"] == "force"
 
 
+def test_publisher_decide_ai_toggle_treats_summary_card_as_manual(monkeypatch):
+    """요약 카드/표 렌더러 이미지는 AI 활용 설정 대상이 아니어야 한다."""
+    monkeypatch.delenv("NAVER_AI_TOGGLE_FORCE", raising=False)
+    publisher = PlaywrightPublisher(blog_id="phase10-summary-card-toggle-test")
+    publisher._set_image_source_lookup(
+        {
+            "data/images/summary_card_case.png": {
+                "kind": "manual",
+                "provider": "summary_card_renderer",
+            },
+            "data/images/table_case.png": {
+                "kind": "manual",
+                "provider": "table_renderer",
+            },
+            "data/images/market_chart_case.png": {
+                "kind": "manual",
+                "provider": "market_chart_renderer",
+            },
+        }
+    )
+
+    summary_decision = publisher._decide_ai_toggle("data/images/summary_card_case.png")
+    table_decision = publisher._decide_ai_toggle("data/images/table_case.png")
+    chart_decision = publisher._decide_ai_toggle("data/images/market_chart_case.png")
+
+    assert summary_decision["should_toggle"] is False
+    assert table_decision["should_toggle"] is False
+    assert chart_decision["should_toggle"] is False
+
+
+def test_publisher_ensure_ai_usage_toggle_off_rechecks_state():
+    """비AI 이미지의 AI 활용 설정이 ON이면 OFF 전환 후 재확인해야 한다."""
+    import asyncio
+
+    publisher = PlaywrightPublisher(blog_id="phase10-toggle-off-test")
+    states = [
+        {"found": True, "on": True},
+        {"found": True, "on": False},
+    ]
+    calls: list[bool] = []
+
+    async def read_state(_page, **kwargs):
+        assert kwargs.get("selected_class_is_on") is False
+        return states.pop(0)
+
+    async def toggle_state(_page, *, target_on: bool, selected_class_is_on: bool = True):
+        calls.append(target_on)
+        assert selected_class_is_on is False
+        return True
+
+    publisher._read_selected_image_ai_toggle_state = read_state  # type: ignore[method-assign]
+    publisher._toggle_ai_usage_from_selected_component_to_state = toggle_state  # type: ignore[method-assign]
+
+    assert asyncio.run(publisher._ensure_ai_usage_toggle_off(object())) is True
+    assert calls == [False]
+
+
 def test_publisher_ai_toggle_mode_off_disables_all(monkeypatch):
     """off 모드에서는 source_kind와 무관하게 토글을 비활성화해야 한다."""
     monkeypatch.setenv("NAVER_AI_TOGGLE_MODE", "off")
@@ -281,5 +345,5 @@ def test_ai_toggle_regression_scenarios_ai_mixed_stock(monkeypatch):
     assert publisher._decide_ai_toggle("data/images/scenario_ai.jpg")["should_toggle"] is True
     # Mixed 시나리오(1: AI, 1: Stock)
     assert publisher._decide_ai_toggle("data/images/scenario_stock.jpg")["should_toggle"] is False
-    # Stock-only 시나리오
-    assert publisher._decide_ai_toggle("data/images/scenario_placeholder.jpg")["should_toggle"] is False
+    # Placeholder + AI provider 시나리오
+    assert publisher._decide_ai_toggle("data/images/scenario_placeholder.jpg")["should_toggle"] is True

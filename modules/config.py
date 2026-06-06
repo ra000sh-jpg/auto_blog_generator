@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict
 
-import yaml  # type: ignore[import-untyped]
+try:
+    import yaml  # type: ignore[import-untyped]
+except Exception:  # pragma: no cover - 선택 의존성 미설치 환경 보호
+    yaml = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -44,8 +47,8 @@ class LLMConfig:
     secondary_provider: str = "deepseek"
     secondary_model: str = "deepseek-chat"
     # 3순위 폴백 (쉼표 구분, 순서대로 시도)
-    tertiary_providers: str = "groq,cerebras"
-    tertiary_models: str = "llama-3.3-70b-versatile,llama3.1-8b"
+    tertiary_providers: str = "groq,nvidia"
+    tertiary_models: str = "llama-3.3-70b-versatile,meta/llama-3.3-70b-instruct"
     max_tokens: int = 4096
     temperature: float = 0.7
     timeout_sec: float = 120.0
@@ -189,6 +192,8 @@ def load_config(config_dir: str = "config") -> AppConfig:
 def _load_yaml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
+    if yaml is None:
+        raise RuntimeError("PyYAML이 설치되어 있지 않아 설정 파일을 읽을 수 없습니다.")
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
     if not isinstance(data, dict):
