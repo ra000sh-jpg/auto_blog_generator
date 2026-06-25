@@ -107,7 +107,12 @@ def _build_generator(
                 timeout_sec=config.timeout_sec,
                 max_tokens=config.max_tokens,
             )
-            if any(existing.provider_name == client.provider_name for existing in additional_clients):
+            existing_providers = {
+                str(getattr(existing, "provider_name", "") or "").strip().lower()
+                for existing in [primary_client, secondary_client, *additional_clients]
+                if existing is not None
+            }
+            if client.provider_name in existing_providers:
                 continue
             additional_clients.append(client)
         except Exception as exc:
@@ -131,7 +136,7 @@ def _build_generator(
         notifier=notifier,
     )
     circuit_breaker.load_all_from_db(
-        ["qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras", "nvidia"]
+        ["qwen", "deepseek", "zai", "gemini", "openai", "claude", "groq", "cerebras", "nvidia"]
     )
 
     web_search_client = None

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, Dict
 
-from modules.automation.notifier import TelegramNotifier
+from modules.automation.notifier import TelegramNotifier, resolve_manual_login_url
 
 
 class CaptureNotifier(TelegramNotifier):
@@ -15,10 +16,72 @@ class CaptureNotifier(TelegramNotifier):
         text: str,
         *,
         disable_notification: bool = False,
+        reply_markup: Dict[str, Any] | None = None,
     ) -> bool:
-        del disable_notification
+        del disable_notification, reply_markup
         self.messages.append(text)
         return True
+
+
+class CaptureBackgroundNotifier(TelegramNotifier):
+    def __init__(self):
+        super().__init__(bot_token="token", chat_id="chat")
+        self.background_messages: list[dict[str, Any]] = []
+
+    def send_message_background(
+        self,
+        text: str,
+        *,
+        disable_notification: bool = False,
+        reply_markup: Dict[str, Any] | None = None,
+    ) -> None:
+        self.background_messages.append(
+            {
+                "text": text,
+                "disable_notification": disable_notification,
+                "reply_markup": reply_markup,
+            }
+        )
+
+
+def test_manual_login_url_defaults_to_settings_focus(monkeypatch):
+    monkeypatch.delenv("AUTOBLOG_MANUAL_LOGIN_URL", raising=False)
+    monkeypatch.delenv("AUTOBLOG_WEB_BASE_URL", raising=False)
+
+    assert resolve_manual_login_url() == "http://localhost:3000/settings?focus=naver"
+
+
+def test_manual_login_url_uses_explicit_override(monkeypatch):
+    monkeypatch.setenv("AUTOBLOG_MANUAL_LOGIN_URL", "https://example.test/naver-login")
+    monkeypatch.setenv("AUTOBLOG_WEB_BASE_URL", "https://dashboard.example.test")
+
+    assert resolve_manual_login_url() == "https://example.test/naver-login"
+
+
+def test_auth_expired_critical_notification_includes_manual_login_button(monkeypatch):
+    monkeypatch.delenv("AUTOBLOG_MANUAL_LOGIN_URL", raising=False)
+    monkeypatch.setenv("AUTOBLOG_WEB_BASE_URL", "https://dashboard.example.test/")
+    notifier = CaptureBackgroundNotifier()
+
+    notifier.notify_critical_background(
+        error_code="AUTH_EXPIRED",
+        message="세션 만료. 수동 로그인 후 session state 갱신 필요.",
+        job_id="job-1",
+    )
+
+    assert notifier.background_messages
+    message = notifier.background_messages[0]
+    assert "https://dashboard.example.test/settings?focus=naver" in message["text"]
+    assert message["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "네이버 수동 로그인",
+                    "url": "https://dashboard.example.test/settings?focus=naver",
+                }
+            ]
+        ]
+    }
 
 
 def test_daily_summary_includes_idea_vault_alert_when_low_stock():

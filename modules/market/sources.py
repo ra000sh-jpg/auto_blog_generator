@@ -54,19 +54,28 @@ FREE_DATA_SOURCE_TIERS: tuple[DataSourceTier, ...] = (
     DataSourceTier(
         tier=2,
         purpose="금리/달러/매크로",
-        sources=("FRED public CSV", "BLS RSS", "BEA RSS", "Census Economic Indicators RSS"),
-        notes="API 키 없이 열리는 공개 CSV/RSS를 먼저 쓰고, 키 기반 API는 선택 검증으로만 사용한다.",
+        sources=(
+            "FRED public CSV",
+            "BLS Public Data API",
+            "BEA NIPA API",
+            "U.S. Treasury FiscalData API",
+            "ECOS StatisticSearch API",
+            "KOSIS statisticsParameterData API",
+            "BOJ Time-Series Data Search",
+            "Census Economic Indicators RSS",
+        ),
+        notes="키 없이 열리는 공식 API/CSV/RSS/HTML 시계열을 먼저 쓰고, BEA/ECOS/KOSIS처럼 키가 필요한 API는 선택 검증으로만 사용한다.",
     ),
     DataSourceTier(
         tier=3,
         purpose="미국 공시/실적 맥락",
-        sources=("SEC EDGAR", "company IR RSS", "Nasdaq earnings calendar"),
-        notes="원문 재배포 없이 이벤트와 링크만 보관한다.",
+        sources=("SEC EDGAR", "OpenDART", "company IR RSS", "Nasdaq earnings calendar"),
+        notes="원문 재배포 없이 공시 이벤트와 원문 링크만 보관한다.",
     ),
     DataSourceTier(
         tier=4,
         purpose="글로벌 뉴스/섹터 이슈",
-        sources=("official RSS", "GDELT DOC API", "Google News RSS", "trusted outlet RSS"),
+        sources=("official RSS", "China NBS National Data", "GDELT DOC API", "Google News RSS", "trusted outlet RSS"),
         notes="본문 복제 없이 제목, 출처, 시각, 링크 중심으로 수집한다.",
     ),
     DataSourceTier(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 import httpx
@@ -520,7 +520,7 @@ def complete_onboarding(
     job_store: JobStore = Depends(get_job_store),
 ) -> CompleteOnboardingResponse:
     """온보딩 완료 플래그를 저장한다."""
-    completed_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    completed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     job_store.set_system_setting("onboarding_completed", "true")
     job_store.set_system_setting("onboarding_completed_at", completed_at)
 

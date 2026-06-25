@@ -87,6 +87,16 @@ def test_draft_compact_message_includes_writing_strategy_summary():
     payload = {
         "content": "본문",
         "tags": ["경제공부"],
+        "seo_snapshot": {
+            "editorial_intent": {
+                "issue_title": "AI 반도체 투자 확대",
+                "speaker_purpose": "AI 기대가 실제 수요로 이어지는 조건을 확인하게 한다.",
+                "evidence_roles": [
+                    {"metric_key": "US10Y", "role": "성장주 부담 확인"},
+                    {"metric_key": "KOSPI", "role": "국내 시장 기준점"},
+                ],
+            }
+        },
         "quality_snapshot": {
             "writing_strategy": {
                 "label": "국장전 시나리오 브리핑형",
@@ -112,8 +122,12 @@ def test_draft_compact_message_includes_writing_strategy_summary():
     assert "추천 전략: 국장전 시나리오 브리핑형" in message
     assert "검색 의도: 뉴스 해설" in message
     assert "전략 비율: 근거 35% + 체크리스트 25% + 리스크 25%" in message
+    assert "방향성 주제: AI 반도체 투자 확대" in message
+    assert "화자 목적: AI 기대가 실제 수요로 이어지는 조건을 확인하게 한다." in message
+    assert "근거 수치: US10Y=성장주 부담 확인" in message
     assert "본문 TXT: 첨부됨" in message
     assert "writing_strategy: 국장전 시나리오 브리핑형" in attachment
+    assert "direction_issue: AI 반도체 투자 확대" in attachment
 
 
 def build_store(tmp_path: Path, name: str = "draft_approval.db") -> JobStore:
@@ -235,7 +249,7 @@ def test_draft_preview_marks_revision_needed():
     assert "수정필요" in message
     assert "통찰 품질 82/100" in message
     assert "수정본입력" in str(build_inline_keyboard(DraftApprovalRequest("a1", "t1", "draft-preview-job", "2026-06-06T00:00:00Z")))
-    assert "/draft_update draft-preview-job" in message
+    assert "처리 후 이 메시지 하단에 진행상황이 표시됩니다." in message
 
 
 def test_telegram_webhook_approves_draft_to_ready_queue(
@@ -249,6 +263,7 @@ def test_telegram_webhook_approves_draft_to_ready_queue(
     store = app.dependency_overrides[get_job_store]()
     store.set_system_setting("telegram_bot_token", "123456789:ABCdef_token")
     store.set_system_setting("telegram_chat_id", "777001")
+    monkeypatch.setenv("NAVER_PUBLISH_MODE", "draft")
 
     assert store.schedule_job(
         job_id="draft-webhook-job",
@@ -275,6 +290,7 @@ def test_telegram_webhook_approves_draft_to_ready_queue(
 
     answered: list[str] = []
     replied: list[str] = []
+    status_updates: list[str] = []
 
     async def _fake_answer_callback_query(
         bot_token: str,
@@ -290,8 +306,13 @@ def test_telegram_webhook_approves_draft_to_ready_queue(
         del bot_token, chat_id
         replied.append(text)
 
+    async def _fake_append_status(bot_token: str, *, message: Dict[str, Any], status_text: str) -> None:
+        del bot_token, message
+        status_updates.append(status_text)
+
     monkeypatch.setattr(telegram_router, "_answer_callback_query", _fake_answer_callback_query)
     monkeypatch.setattr(telegram_router, "_send_telegram_reply", _fake_send_reply)
+    monkeypatch.setattr(telegram_router, "_append_callback_status_to_message", _fake_append_status)
 
     response = client.post(
         "/api/telegram/webhook",
@@ -303,7 +324,11 @@ def test_telegram_webhook_approves_draft_to_ready_queue(
                     approval_id=approval.approval_id,
                     token=approval.token,
                 ),
-                "message": {"chat": {"id": 777001, "type": "private"}},
+                "message": {
+                    "message_id": 9001,
+                    "text": "AutoBlog 초안 승인 요청",
+                    "chat": {"id": 777001, "type": "private"},
+                },
             }
         },
     )
@@ -311,8 +336,9 @@ def test_telegram_webhook_approves_draft_to_ready_queue(
     response_payload = response.json()
     assert response_payload["callback_handled"] is True
     assert response_payload["callback_action"] == "approve"
-    assert any("발행 대기열" in text for text in answered)
-    assert any("ready_to_publish" in text for text in replied)
+    assert any("네이버 임시저장" in text for text in answered)
+    assert any("텔레그램 승인 완료" in text for text in replied)
+    assert any("네이버 임시저장 대기" in text for text in status_updates)
 
     updated = store.get_job("draft-webhook-job")
     assert updated is not None

@@ -42,6 +42,7 @@ DEFAULT_ROUTER_AUTO_REGISTER_MODELS = {
     "qwen-plus",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
+    "glm-4.7-flash",
 }
 
 

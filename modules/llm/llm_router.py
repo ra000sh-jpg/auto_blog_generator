@@ -72,7 +72,7 @@ class ImageModelSpec:
 #   OpenAI: https://openai.com/api/pricing
 #   Qwen: https://help.aliyun.com/zh/model-studio/getting-started/models
 #   Claude: https://docs.anthropic.com/en/docs/about-claude/models
-#   Groq/Cerebras: 무료 Tier (rate limit 적용)
+#   Z.AI/Groq/Cerebras: 무료 Tier (rate limit 적용)
 TEXT_MODEL_MATRIX: List[TextModelSpec] = [
     # Qwen (DashScope)
     TextModelSpec(
@@ -155,6 +155,17 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
         output_cost_per_1m_usd=0.28,
         quality_score=90,
         speed_score=75,
+    ),
+    # Z.AI
+    TextModelSpec(
+        provider="zai",
+        model="glm-4.7-flash",
+        label="Z.AI GLM-4.7 Flash (무료)",
+        key_id="zai",
+        input_cost_per_1m_usd=0.0,
+        output_cost_per_1m_usd=0.0,
+        quality_score=92,
+        speed_score=96,
     ),
     # Gemini
     TextModelSpec(
@@ -262,13 +273,13 @@ TEXT_MODEL_MATRIX: List[TextModelSpec] = [
     ),
     TextModelSpec(
         provider="cerebras",
-        model="llama3.1-8b",
-        label="Cerebras Llama3.1 8B (무료)",
+        model="gpt-oss-120b",
+        label="Cerebras GPT-OSS 120B (무료)",
         key_id="cerebras",
         input_cost_per_1m_usd=0.0,
         output_cost_per_1m_usd=0.0,
-        quality_score=76,
-        speed_score=97,
+        quality_score=86,
+        speed_score=94,
     ),
     # NVIDIA NIM (12개월 이용권 활용)
     # deepseek-ai/deepseek-r1 → 410 Gone (2026-03 서비스 종료)
@@ -329,6 +340,7 @@ DEFAULT_TEXT_KEYS = {
     "groq": "GROQ_API_KEY",
     "cerebras": "CEREBRAS_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    "zai": "ZAI_API_KEY",
 }
 
 DEFAULT_IMAGE_KEYS = {
@@ -361,6 +373,10 @@ DEFAULT_IMAGE_TOPIC_QUOTA_OVERRIDES = {
     "parenting": "0",
 }
 DEFAULT_TRAFFIC_FEEDBACK_STRONG_MODE = False
+FREE_FALLBACK_PROVIDER_ORDER = ("zai", "nvidia", "groq", "cerebras")
+FREE_FALLBACK_PROVIDER_RANK = {
+    provider: index for index, provider in enumerate(FREE_FALLBACK_PROVIDER_ORDER)
+}
 
 
 def mask_secret(raw_value: str) -> str:
@@ -512,6 +528,14 @@ def _find_image_model(engine_id: str) -> Optional[ImageModelSpec]:
         if spec.engine_id == normalized:
             return spec
     return None
+
+
+def _free_fallback_priority(spec: TextModelSpec) -> int:
+    """무료 fallback provider 우선순위를 반환한다."""
+    return FREE_FALLBACK_PROVIDER_RANK.get(
+        str(spec.provider or "").strip().lower(),
+        len(FREE_FALLBACK_PROVIDER_RANK),
+    )
 
 
 def _role_temperature(strategy_mode: str, role: str) -> float:
@@ -1153,7 +1177,7 @@ class LLMRouter:
             selected=quality_spec,
             pool=available_text_models,
             strategy_mode=strategy_mode,
-            max_size=3,
+            max_size=4,
             cost_strict_mode=cost_strict_mode,
             cost_free_only_fallback=cost_free_only_fallback,
             cost_max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
@@ -1162,7 +1186,7 @@ class LLMRouter:
             selected=voice_spec,
             pool=available_text_models,
             strategy_mode=strategy_mode,
-            max_size=2,
+            max_size=4,
             cost_strict_mode=cost_strict_mode,
             cost_free_only_fallback=cost_free_only_fallback,
             cost_max_fallback_usd_per_1m=cost_max_fallback_usd_per_1m,
@@ -1374,7 +1398,7 @@ class LLMRouter:
                 selected=selected_quality_spec,
                 pool=available_specs,
                 strategy_mode=strategy_mode,
-                max_size=3,
+                max_size=4,
                 cost_strict_mode=bool(saved.get("cost_strict_mode", DEFAULT_COST_STRICT_MODE)),
                 cost_free_only_fallback=bool(
                     saved.get("cost_free_only_fallback", DEFAULT_COST_FREE_ONLY_FALLBACK)
@@ -1973,7 +1997,15 @@ class LLMRouter:
 
         threshold = _ROLE_MIN_QUALITY.get(role, 75)
         is_cheap_role = role in _CHEAP_ROLES
-        by_cost = sorted(candidates, key=lambda item: (item.avg_cost_per_1k_usd, -item.quality_score))
+        by_cost = sorted(
+            candidates,
+            key=lambda item: (
+                item.avg_cost_per_1k_usd,
+                _free_fallback_priority(item) if self._is_free_spec(item) else len(FREE_FALLBACK_PROVIDER_RANK),
+                -item.quality_score,
+                -item.speed_score,
+            ),
+        )
         by_quality = sorted(candidates, key=lambda item: (-item.quality_score, item.avg_cost_per_1k_usd))
 
         if is_cheap_role:
@@ -1985,7 +2017,7 @@ class LLMRouter:
                 and item.quality_score >= threshold
             ]
             if free_candidates:
-                return sorted(free_candidates, key=lambda item: (-item.speed_score, item.avg_cost_per_1k_usd))[0]
+                return self._sort_free_fallback_candidates(free_candidates)[0]
             for item in by_cost:
                 if item.quality_score >= threshold:
                     return item
@@ -2033,9 +2065,14 @@ class LLMRouter:
         if not candidates:
             return []
 
-        free_candidates = [item for item in candidates if self._is_free_spec(item)]
+        free_candidates = self._sort_free_fallback_candidates(
+            [item for item in candidates if self._is_free_spec(item)]
+        )
         if free_candidates:
             return free_candidates
+
+        if free_only:
+            return []
 
         safe_cap = max(0.0, float(max_fallback_usd_per_1m or 0.0))
         low_cost_candidates = [
@@ -2044,10 +2081,29 @@ class LLMRouter:
         if low_cost_candidates:
             return low_cost_candidates
 
-        if free_only:
-            # 무료 우선 모드라도 무료 키가 전부 비어 있으면 완전 실패를 피하기 위해 원본 후보를 유지한다.
-            return candidates
         return candidates
+
+    def _sort_free_fallback_candidates(self, candidates: List[TextModelSpec]) -> List[TextModelSpec]:
+        """무료 fallback 후보를 provider당 대표 모델 하나로 정렬한다."""
+        ordered = sorted(
+            candidates,
+            key=lambda item: (
+                _free_fallback_priority(item),
+                -item.quality_score,
+                -item.speed_score,
+                item.provider,
+                item.model,
+            ),
+        )
+        deduped: List[TextModelSpec] = []
+        seen_providers: set[str] = set()
+        for item in ordered:
+            provider = str(item.provider or "").strip().lower()
+            if provider in seen_providers:
+                continue
+            seen_providers.add(provider)
+            deduped.append(item)
+        return deduped
 
     def _coerce_cost_strict_quality_spec(
         self,
@@ -2099,6 +2155,12 @@ class LLMRouter:
         ]
         if not candidates:
             return []
+
+        if cost_free_only_fallback:
+            free_candidates = self._sort_free_fallback_candidates(
+                [item for item in candidates if self._is_free_spec(item)]
+            )
+            return free_candidates[: max(0, max_size)]
 
         if strategy_mode in {"quality", "balanced"}:
             # quality/balanced 모드: 품질 근접도 우선
@@ -2274,7 +2336,7 @@ class LLMRouter:
     def _provider_to_key_id(self, provider: str) -> str:
         """provider명을 key_id로 변환한다."""
         normalized = str(provider or "").strip().lower()
-        if normalized in {"qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras", "nvidia"}:
+        if normalized in {"qwen", "deepseek", "gemini", "openai", "claude", "groq", "cerebras", "nvidia", "zai"}:
             return normalized
         return "qwen"
 
@@ -2449,5 +2511,6 @@ def provider_label(name: str) -> str:
         "groq": "Groq",
         "cerebras": "Cerebras",
         "nvidia": "NVIDIA",
+        "zai": "Z.AI",
     }
     return mapping.get(str(name).strip().lower(), name)

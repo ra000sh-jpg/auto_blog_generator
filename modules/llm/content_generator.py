@@ -334,6 +334,12 @@ class ContentGenerator:
         market_context, market_snapshot_meta = self._collect_market_snapshot_context(job)
         if market_context:
             news_context = market_context + news_context
+        editorial_context, editorial_intent_meta = self._collect_editorial_intent_context(
+            job=job,
+            market_snapshot_meta=market_snapshot_meta,
+        )
+        if editorial_context:
+            news_context = editorial_context + news_context
 
         naver_context = self._collect_naver_context(
             job=job,
@@ -578,6 +584,7 @@ class ContentGenerator:
             "insight_strategy": insight_strategy.to_dict(),
             "source_context_count": len(news_context),
             "market_snapshot": market_snapshot_meta,
+            "editorial_intent": editorial_intent_meta,
         }
 
         writing_strategy_snapshot = (
@@ -1449,6 +1456,23 @@ class ContentGenerator:
                     "url": str(getattr(point, "url", "") or "").strip(),
                 }
             )
+        news_item_meta: List[Dict[str, Any]] = []
+        for item in list(getattr(snapshot, "news_items", ()) or ())[:8]:
+            published_at = getattr(item, "published_at", None)
+            if hasattr(published_at, "isoformat"):
+                published_text = published_at.isoformat()
+            else:
+                published_text = str(published_at or "")
+            news_item_meta.append(
+                {
+                    "title": str(getattr(item, "title", "") or "").strip(),
+                    "source": str(getattr(item, "source", "") or "").strip(),
+                    "url": str(getattr(item, "url", "") or "").strip(),
+                    "published_at": published_text,
+                    "summary": str(getattr(item, "summary", "") or "").strip()[:280],
+                    "relevance_keyword": str(getattr(item, "relevance_keyword", "") or "").strip(),
+                }
+            )
         meta = {
             "slot": str(getattr(snapshot.slot, "value", snapshot.slot or "")),
             "scope": str(getattr(snapshot.scope, "value", snapshot.scope)),
@@ -1459,9 +1483,19 @@ class ContentGenerator:
             "data_points": data_point_meta,
             "chart_recommended": len(data_point_meta) >= 2,
             "news_item_count": len(getattr(snapshot, "news_items", ()) or ()),
+            "news_items": news_item_meta,
             "skipped_source_count": len(getattr(snapshot, "skipped_sources", ()) or ()),
             "reason": str(getattr(snapshot.confidence, "reason", "")),
         }
+        try:
+            from ..market import source_pack_from_market_snapshot
+
+            meta["source_pack"] = source_pack_from_market_snapshot(
+                snapshot,
+                topic=job.title,
+            ).to_dict()
+        except Exception as exc:
+            logger.debug("Source Pack snapshot build skipped: %s", exc)
         return ([context] if context else []), meta
 
     def _build_market_slot_writing_injection(self, job: Job) -> str:
@@ -1510,6 +1544,140 @@ class ContentGenerator:
 - 투자 결론처럼 보이는 단정 표현은 피하고 조건과 한계를 같이 쓰세요.
 """.strip()
         return f"{strategy_prompt}\n\n{base_prompt}\n\n{common_guard}"
+
+    def _collect_editorial_intent_context(
+        self,
+        *,
+        job: Job,
+        market_snapshot_meta: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+        """빅카인즈 방향성 이슈와 confirmed_metrics를 글쓰기 의도로 변환한다."""
+
+        if self._resolve_market_slot(job) is None:
+            return [], {}
+
+        try:
+            from ..market import (
+                DirectionSignalAggregator,
+                collect_naver_direction_signals,
+                direction_signal_to_issue_dict,
+                editorial_intent_to_context,
+                plan_directional_topic,
+                signals_from_bigkinds_issues,
+                signals_from_market_news_items,
+            )
+        except Exception as exc:
+            logger.debug("Directional topic planner unavailable: %s", exc)
+            return [], {}
+
+        source_pack = market_snapshot_meta.get("source_pack", {}) if isinstance(market_snapshot_meta, dict) else {}
+        confirmed_metrics = source_pack.get("confirmed_metrics", []) if isinstance(source_pack, dict) else []
+        issues = self._directional_issues_from_job_tags(job)
+        direction_signals = signals_from_bigkinds_issues(issues)
+        news_items = market_snapshot_meta.get("news_items", []) if isinstance(market_snapshot_meta, dict) else []
+        if isinstance(news_items, list):
+            direction_signals.extend(signals_from_market_news_items(news_items))
+        if not issues and self._bigkinds_context_enabled():
+            try:
+                from ..collectors.bigkinds_public import BigKindsPublicCollector
+
+                issues = [issue.to_dict() for issue in BigKindsPublicCollector().collect_directional_issues(max_items=6)]
+                direction_signals.extend(signals_from_bigkinds_issues(issues))
+            except Exception as exc:
+                logger.debug("BigKinds context collection skipped: %s", exc)
+                issues = []
+
+        naver_query = ""
+        if issues:
+            naver_query = str(issues[0].get("issue_title", "") if isinstance(issues[0], dict) else "")
+        if not naver_query:
+            naver_query = " ".join(str(item) for item in (job.seed_keywords or [])[:3] if str(item).strip())
+        try:
+            direction_signals.extend(collect_naver_direction_signals(naver_query, max_per_service=2))
+        except Exception as exc:
+            logger.debug("Naver direction signal collection skipped: %s", exc)
+
+        direction_plan = DirectionSignalAggregator().aggregate(
+            direction_signals,
+            confirmed_metrics=confirmed_metrics if isinstance(confirmed_metrics, list) else [],
+            seed_keywords=job.seed_keywords or [],
+            scope=str(market_snapshot_meta.get("scope", "") or ""),
+        )
+        if direction_plan is not None:
+            issues = [direction_signal_to_issue_dict(signal) for signal in direction_plan.ranked_signals]
+            if issues:
+                issues[0]["direction_signal_plan"] = direction_plan.to_dict()
+
+        if not issues:
+            return [], {}
+
+        intent = plan_directional_topic(
+            base_title=job.title,
+            issues=issues,
+            confirmed_metrics=confirmed_metrics if isinstance(confirmed_metrics, list) else [],
+            seed_keywords=job.seed_keywords or [],
+            scope=str(market_snapshot_meta.get("scope", "") or ""),
+        )
+        if intent is None:
+            return [], {}
+
+        intent_dict = intent.to_dict()
+        context_text = editorial_intent_to_context(intent_dict)
+        if not context_text:
+            return [], intent_dict
+        return (
+            [
+                {
+                    "title": "방향성 주제 플랜",
+                    "link": str(intent_dict.get("source", "") or ""),
+                    "content": context_text,
+                    "source": "EditorialIntent",
+                }
+            ],
+            intent_dict,
+        )
+
+    def _directional_issues_from_job_tags(self, job: Job) -> List[Dict[str, Any]]:
+        """스케줄러가 남긴 방향성 태그를 이슈 후보로 복원한다."""
+
+        issue_value = ""
+        angle_value = ""
+        source_value = ""
+        tier_value = ""
+        for raw_tag in job.tags or []:
+            tag = str(raw_tag or "").strip()
+            if tag.startswith("direction_issue:"):
+                issue_value = tag.split(":", 1)[1].replace("_", " ").strip()
+            elif tag.startswith("direction_angle:"):
+                angle_value = tag.split(":", 1)[1].replace("_", " ").strip()
+            elif tag.startswith("direction_signal_source:"):
+                source_value = tag.split(":", 1)[1].replace("_", " ").strip()
+            elif tag.startswith("direction_signal_tier:"):
+                tier_value = tag.split(":", 1)[1].replace("_", " ").strip()
+        if not issue_value:
+            return []
+        return [
+            {
+                "issue_title": issue_value,
+                "category": angle_value,
+                "keywords": list(job.seed_keywords or []),
+                "source": source_value or "BigKinds public direction tag",
+                "source_tier": tier_value or "agenda",
+                "source_url": source_value or "BigKinds public direction tag",
+                "confidence": 0.72,
+            }
+        ]
+
+    def _bigkinds_context_enabled(self) -> bool:
+        """콘텐츠 생성 중 빅카인즈 공개 화면 재수집 여부를 반환한다."""
+
+        return str(os.getenv("AUTOBLOG_BIGKINDS_DIRECTION_CONTEXT_ENABLED", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "enabled",
+        }
 
     def _resolve_writing_strategy_plan(self, *, job: Job, topic_mode: str) -> Any:
         """job 태그와 토픽으로 글쓰기 전략 계획을 반환한다."""
@@ -3785,6 +3953,7 @@ class ContentGenerator:
         labels = {
             "qwen": "Qwen",
             "deepseek": "DeepSeek",
+            "zai": "Z.AI",
             "claude": "Claude",
             "groq": "Groq",
             "cerebras": "Cerebras",

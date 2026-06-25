@@ -72,6 +72,41 @@ def test_kr_preopen_opportunity_seed_adds_auto_publish_tags_without_api_keys():
     assert "opportunity_status:fallback" in result["tags"]
 
 
+def test_kr_preopen_opportunity_seed_uses_bigkinds_direction_when_enabled(tmp_path: Path, monkeypatch):
+    """빅카인즈 방향성 기능이 켜져 있으면 수치 중심 fallback 대신 방향성 제목을 만든다."""
+
+    import modules.collectors.bigkinds_public as bigkinds_module
+
+    class FakeBigKindsCollector:
+        def collect_directional_issues(self, max_items: int = 8):
+            del max_items
+            return [
+                bigkinds_module.BigKindsIssue(
+                    issue_title="AI 반도체 투자 확대",
+                    category="경제",
+                    news_count=42,
+                    keywords=("삼성전자", "HBM"),
+                    confidence=0.9,
+                )
+            ]
+
+    monkeypatch.setattr(bigkinds_module, "BigKindsPublicCollector", FakeBigKindsCollector)
+    store = build_store(tmp_path, "scheduler_bigkinds_direction.db")
+    store.set_system_setting("scheduler_bigkinds_direction_enabled", "true")
+    service = SchedulerService(job_store=store)
+
+    result = _build_kr_preopen_opportunity_seed(
+        service=service,
+        original_slot=BlogSlot.KR_PREOPEN,
+        resolved_slot=BlogSlot.KR_PREOPEN,
+        local_dt=datetime(2026, 6, 8, 7, 0, tzinfo=timezone.utc),
+    )
+
+    assert "AI 반도체" in result["title"]
+    assert "direction_source:bigkinds" in result["tags"]
+    assert "opportunity_status:directional" in result["tags"]
+
+
 def test_scheduler_service_setup():
     scheduler = SchedulerService(daily_posts_target=3, min_post_interval_minutes=60)
     scheduler.setup_scheduler()
@@ -336,6 +371,49 @@ def test_jobstore_claim_filters_required_tag_for_generate_and_publish(tmp_path: 
     assert [job.job_id for job in publish_claims] == ["publish-market-job"]
     assert publish_store.get_job("publish-legacy-job").status == publish_store.STATUS_READY
     assert publish_store.get_job("publish-market-job").status == publish_store.STATUS_RUNNING
+    assert publish_store.get_ready_to_publish_count(required_tag="market_daily") == 0
+    assert publish_store.get_ready_to_publish_count() == 1
+
+
+def test_market_daily_ready_count_ignores_legacy_ready_jobs(tmp_path: Path):
+    """시장 모드 ready 카운트는 실제 claim 가능한 market_daily 초안만 세야 한다."""
+
+    store = build_store(tmp_path, "scheduler_market_ready_count.db")
+    store.set_system_setting("scheduler_market_daily_enabled", "true")
+    due_now = now_utc()
+
+    assert store.schedule_job(
+        job_id="legacy-ready-count-job",
+        title="오래된 일반 ready 글",
+        seed_keywords=["legacy"],
+        platform="naver",
+        persona_id="P1",
+        scheduled_at=due_now,
+        tags=[],
+    )
+    assert store.schedule_job(
+        job_id="market-ready-count-job",
+        title="시장 ready 글",
+        seed_keywords=["market"],
+        platform="naver",
+        persona_id="P4",
+        scheduled_at=due_now,
+        tags=["market_daily", "market_slot:kr_preopen"],
+    )
+
+    claimed = store.claim_due_jobs(limit=2, now_override=due_now)
+    assert {job.job_id for job in claimed} == {"legacy-ready-count-job", "market-ready-count-job"}
+    for job in claimed:
+        assert store.save_prepared_payload(
+            job.job_id,
+            {"title": job.title, "content": "준비된 초안 본문", "images": [], "image_points": []},
+        )
+
+    scheduler = SchedulerService(job_store=store)
+
+    assert store.get_ready_to_publish_count() == 2
+    assert store.get_ready_to_publish_count(required_tag="market_daily") == 1
+    assert scheduler._get_ready_draft_count() == 1
 
 
 def test_pipeline_prepare_then_publish_ready_job(tmp_path: Path):

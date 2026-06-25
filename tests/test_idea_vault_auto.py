@@ -319,14 +319,13 @@ def test_collect_pending_updates_stores_messages(tmp_path: Path):
 
     mock_parser_instance = MagicMock()
     mock_parser_instance.parse_bulk = _fake_parse_bulk
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(return_value=mock_response)
 
     async def _run():
         from server.routers.telegram_webhook import collect_pending_updates
-
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client.get = AsyncMock(return_value=mock_response)
 
         with patch("server.routers.telegram_webhook.httpx.AsyncClient", return_value=mock_client):
             with patch("modules.llm.idea_vault_parser.IdeaVaultBatchParser", return_value=mock_parser_instance):
@@ -335,6 +334,10 @@ def test_collect_pending_updates_stores_messages(tmp_path: Path):
     stored = asyncio.run(_run())
 
     assert stored == 2, f"Expected 2 stored, got {stored}"
+    get_call = mock_client.get.call_args
+    assert get_call is not None
+    params = get_call.kwargs.get("params") or {}
+    assert "callback_query" in params.get("allowed_updates", "")
 
     # last_id 갱신 확인
     last_id = store.get_system_setting("telegram_last_processed_update_id", "0")

@@ -11,6 +11,10 @@ STDOUT_LOG="${LOG_DIR}/worker.stdout.log"
 STDERR_LOG="${LOG_DIR}/worker.stderr.log"
 ERROR_PATTERN="AUTH_EXPIRED|CAPTCHA_REQUIRED|ELEMENT_NOT_FOUND|NETWORK_TIMEOUT|RATE_LIMITED|CONTENT_REJECTED|PUBLISH_FAILED|PIPELINE_ERROR|QUALITY_FAILED|BUDGET_EXCEEDED|WORKER_CRASH|CRITICAL|ERROR"
 
+mask_sensitive() {
+  sed -E 's#bot[0-9]+:[A-Za-z0-9_-]+#bot***MASKED***#g'
+}
+
 echo "== AutoBlog Worker Status =="
 echo "label: ${LABEL}"
 echo "plist: ${PLIST_TARGET}"
@@ -52,7 +56,7 @@ echo "stderr: ${STDERR_LOG}"
 if [[ -f "${STDOUT_LOG}" ]]; then
   echo
   echo "== stdout 최근 30줄 =="
-  tail -n 30 "${STDOUT_LOG}"
+  tail -n 30 "${STDOUT_LOG}" | mask_sensitive
 else
   echo
   echo "[WARN] stdout 로그 파일 없음"
@@ -61,7 +65,7 @@ fi
 if [[ -f "${STDERR_LOG}" ]]; then
   echo
   echo "== stderr 최근 30줄 =="
-  tail -n 30 "${STDERR_LOG}"
+  tail -n 30 "${STDERR_LOG}" | mask_sensitive
 else
   echo
   echo "[WARN] stderr 로그 파일 없음"
@@ -72,7 +76,7 @@ echo "== 에러 코드 강조 (최근 로그 검색) =="
 if [[ -f "${STDOUT_LOG}" ]] || [[ -f "${STDERR_LOG}" ]]; then
   MATCHED_LINES="$(grep -nE "${ERROR_PATTERN}" "${STDOUT_LOG}" "${STDERR_LOG}" 2>/dev/null | tail -n 30 || true)"
   if [[ -n "${MATCHED_LINES}" ]]; then
-    printf '%s\n' "${MATCHED_LINES}" | sed 's/^/[!] /'
+    printf '%s\n' "${MATCHED_LINES}" | mask_sensitive | sed 's/^/[!] /'
   else
     echo "감지된 에러 코드 없음"
   fi

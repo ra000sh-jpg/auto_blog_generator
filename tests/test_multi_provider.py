@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -173,14 +174,18 @@ def test_provider_factory_creates_correct_client(monkeypatch: pytest.MonkeyPatch
     """Provider 팩토리가 올바른 클라이언트를 생성해야 한다."""
     monkeypatch.setenv("DASHSCOPE_API_KEY", "test-qwen-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("ZAI_API_KEY", "test-zai-key")
 
     qwen = create_client("qwen")
     deepseek = create_client("deepseek")
+    zai = create_client("zai")
 
     assert isinstance(qwen, QwenClient)
     assert isinstance(deepseek, DeepSeekClient)
     assert qwen.provider_name == "qwen"
     assert deepseek.provider_name == "deepseek"
+    assert zai.provider_name == "zai"
+    assert zai.model == "glm-4.7-flash"
 
 
 def test_dual_model_strategy():
@@ -511,6 +516,38 @@ def test_openai_compat_does_not_retry_on_410(monkeypatch: pytest.MonkeyPatch):
             )
         )
     assert call_count == 1
+
+
+def test_zai_flash_disables_thinking(monkeypatch: pytest.MonkeyPatch):
+    """Z.AI Flash 호출은 thinking을 꺼서 지연과 토큰 사용을 줄여야 한다."""
+    from modules.llm.openai_compat_client import create_zai_client
+
+    captured_payload: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_payload
+        captured_payload = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "model": "glm-4.7-flash",
+                "choices": [{"message": {"content": "테스트"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            request=request,
+        )
+
+    monkeypatch.setenv("ZAI_API_KEY", "test-key")
+    client = create_zai_client(timeout_sec=5.0)
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)  # noqa: SLF001
+
+    try:
+        asyncio.run(client.generate(system_prompt="sys", user_prompt="user", max_tokens=8))
+    finally:
+        asyncio.run(client.close())
+
+    assert captured_payload["model"] == "glm-4.7-flash"
+    assert captured_payload["thinking"] == {"type": "disabled"}
 
 
 def test_fallback_alert_is_deduped_per_job():

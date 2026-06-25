@@ -1039,7 +1039,7 @@ def test_magic_input_parsing_and_job_creation(client: TestClient):
     created_payload = create_response.json()
     assert created_payload["job_id"] != ""
     assert created_payload["status"] == "queued"
-    assert created_payload["parser_used"] in {"heuristic", "qwen", "deepseek", "gemini", "groq", "cerebras"}
+    assert created_payload["parser_used"] in {"heuristic", "qwen", "deepseek", "zai", "gemini", "groq", "cerebras"}
 
     list_response = client.get("/api/jobs?page=1&size=20")
     assert list_response.status_code == 200

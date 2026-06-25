@@ -26,6 +26,18 @@ from .free_data_collector import (
     UrllibMarketTextFetcher,
     collect_market_snapshot,
 )
+from .source_pack import (
+    ConfirmedMetric,
+    SourceEvidence,
+    SourcePack,
+    SourcePackCollector,
+    append_source_pack_section,
+    evaluate_source_pack_dict,
+    normalize_source_pack_dict,
+    render_source_pack_section,
+    source_pack_from_market_snapshot,
+    source_pack_from_payload,
+)
 from .opportunity import (
     ContentBrief,
     KR_PREOPEN_SEEDS,
@@ -35,6 +47,23 @@ from .opportunity import (
     OpportunityScore,
     OpportunityScorer,
     select_best_kr_preopen_opportunity,
+)
+from .directional_topic_planner import (
+    EditorialIntent,
+    EvidenceRole,
+    editorial_intent_to_context,
+    evaluate_directional_title,
+    plan_directional_topic,
+)
+from .direction_signal import (
+    DirectionSignal,
+    DirectionSignalAggregator,
+    DirectionSignalPlan,
+    collect_naver_direction_signals,
+    direction_signal_to_issue_dict,
+    signals_from_bigkinds_issues,
+    signals_from_market_news_items,
+    signals_from_naver_items,
 )
 
 __all__ = [
@@ -58,6 +87,16 @@ __all__ = [
     "SkippedSource",
     "UrllibMarketTextFetcher",
     "collect_market_snapshot",
+    "ConfirmedMetric",
+    "SourceEvidence",
+    "SourcePack",
+    "SourcePackCollector",
+    "append_source_pack_section",
+    "evaluate_source_pack_dict",
+    "normalize_source_pack_dict",
+    "render_source_pack_section",
+    "source_pack_from_market_snapshot",
+    "source_pack_from_payload",
     "ContentBrief",
     "KR_PREOPEN_SEEDS",
     "KeywordSignal",
@@ -66,4 +105,17 @@ __all__ = [
     "OpportunityScore",
     "OpportunityScorer",
     "select_best_kr_preopen_opportunity",
+    "EditorialIntent",
+    "EvidenceRole",
+    "editorial_intent_to_context",
+    "evaluate_directional_title",
+    "plan_directional_topic",
+    "DirectionSignal",
+    "DirectionSignalAggregator",
+    "DirectionSignalPlan",
+    "collect_naver_direction_signals",
+    "direction_signal_to_issue_dict",
+    "signals_from_bigkinds_issues",
+    "signals_from_market_news_items",
+    "signals_from_naver_items",
 ]

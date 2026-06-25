@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -111,15 +112,41 @@ def _get_webhook_secret(job_store: Any) -> Optional[str]:
 
 
 def _get_allowed_chat_id(job_store: Any) -> Optional[str]:
-    """DB 또는 환경변수에서 허용 Chat ID 를 조회한다 (빈 값 = 모두 허용)."""
+    """DB에 저장된 허용 Chat ID 를 조회한다 (빈 값 = 모두 허용)."""
     chat_id = ""
     try:
         chat_id = str(job_store.get_system_setting("telegram_chat_id", "")).strip()
     except Exception:
-        pass
-    if not chat_id:
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     return chat_id or None
+
+
+def _resolve_draft_destination_label(job_store: Any, job_id: str) -> str:
+    """승인 후 이동할 목적지를 사용자에게 보여줄 문구로 반환한다."""
+    publish_mode = ""
+    try:
+        payload = job_store.load_prepared_payload(job_id)
+        if isinstance(payload, dict):
+            publish_mode = str(payload.get("publish_mode", "") or "").strip().lower()
+    except Exception:
+        publish_mode = ""
+
+    if not publish_mode:
+        try:
+            job = job_store.get_job(job_id)
+        except Exception:
+            job = None
+        tags = getattr(job, "tags", []) if job is not None else []
+        if isinstance(tags, list):
+            for tag in tags:
+                tag_text = str(tag or "").strip().lower()
+                if tag_text.startswith("publish_mode:"):
+                    publish_mode = tag_text.split(":", 1)[1].strip()
+                    break
+
+    if not publish_mode:
+        publish_mode = os.getenv("NAVER_PUBLISH_MODE", "publish").strip().lower()
+    return "네이버 임시저장" if publish_mode == "draft" else "네이버 발행"
 
 
 def _normalize_auth_code(raw_value: str) -> str:
@@ -548,7 +575,7 @@ async def _handle_draft_saved_callback_query(
                 bot_token=bot_token,
                 callback_query_id=callback_query_id,
                 text=callback_text,
-                show_alert=False,
+                show_alert=True,
             )
         if bot_token:
             await _append_callback_status_to_message(
@@ -628,11 +655,16 @@ async def _handle_draft_approval_callback_query(
     if ok:
         action = str(result.get("action", ""))
         job_id = str(result.get("job_id", "")).strip()
+        status_text = ""
         if action == "approve":
-            callback_text = "승인 완료: 발행 대기열로 이동했습니다."
+            destination = _resolve_draft_destination_label(job_store, job_id)
+            callback_text = f"승인 완료: {destination} 대기 중입니다."
+            status_text = f"승인 완료 - 1/3 승인 완료, 2/3 {destination} 대기 중"
             followup_text = (
-                "승인 완료: 초안이 ready_to_publish 큐로 이동했습니다.\n"
-                "publisher 워커가 다음 순서에 네이버 블로그 임시저장/발행 설정에 따라 처리합니다."
+                "승인 완료\n"
+                "진행상황: 1/3 텔레그램 승인 완료\n"
+                f"다음 단계: 2/3 {destination} 처리 대기\n"
+                "완료 알림: 3/3 확인 링크 전송 예정"
             )
         elif action == "revise":
             revision_result = start_draft_revision_session(
@@ -645,6 +677,7 @@ async def _handle_draft_approval_callback_query(
             )
             if revision_result.get("ok"):
                 callback_text = "수정본 입력 대기 상태로 전환했습니다."
+                status_text = "수정본 입력 대기 - 다음 메시지로 완성본 전체를 보내주세요."
                 followup_text = (
                     "수정본 입력 모드로 전환했습니다.\n"
                     "이 메시지 다음에 수정한 완성본 전체를 그대로 붙여넣어 주세요.\n"
@@ -653,9 +686,11 @@ async def _handle_draft_approval_callback_query(
                 )
             else:
                 callback_text = "수정본 입력 상태 전환에 실패했습니다."
+                status_text = "수정본 입력 준비 실패"
                 followup_text = f"수정본 입력 준비 실패: {revision_result.get('reason', 'unknown')}"
         else:
             callback_text = "취소 완료: 초안을 중단했습니다."
+            status_text = "취소 완료 - 이 초안은 업로드하지 않습니다."
             followup_text = "취소 완료: 이 초안은 발행 대기열에 올리지 않았습니다."
         if job_id:
             followup_text += f"\njob_id: {job_id}"
@@ -666,6 +701,12 @@ async def _handle_draft_approval_callback_query(
                 callback_query_id=callback_query_id,
                 text=callback_text,
                 show_alert=False,
+            )
+        if bot_token and status_text:
+            await _append_callback_status_to_message(
+                bot_token,
+                message=message,
+                status_text=status_text,
             )
         if bot_token and chat_id is not None:
             await _send_telegram_reply(bot_token, chat_id, followup_text)
@@ -1498,7 +1539,13 @@ async def collect_pending_updates(job_store: Any) -> int:
     offset = last_processed_id + 1 if last_processed_id > 0 else 0
     try:
         url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-        params: Dict[str, Any] = {"limit": _GETUP_LIMIT, "timeout": 0}
+        params: Dict[str, Any] = {
+            "limit": _GETUP_LIMIT,
+            "timeout": 0,
+            # Telegram은 allowed_updates를 마지막 호출 값으로 기억한다.
+            # 다른 폴러가 message만 요청해도 승인 버튼 callback_query는 계속 받아야 한다.
+            "allowed_updates": json.dumps(["message", "edited_message", "callback_query"]),
+        }
         if offset > 0:
             params["offset"] = offset
 

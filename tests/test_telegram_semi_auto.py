@@ -343,6 +343,41 @@ def test_poll_and_collect_consumes_updates_one_by_one(tmp_path: Path):
     assert slots_after_second[1]["status"] == "received"
 
 
+def test_image_collector_does_not_consume_callback_updates(tmp_path: Path):
+    store = build_store(tmp_path, "semi_auto_callback_guard.db")
+    store.set_system_setting("telegram_chat_id", "123")
+    notifier = CaptureNotifier(bot_token="token", chat_id="123")
+    collector = TelegramImageCollector(
+        job_store=store,
+        notifier=notifier,  # type: ignore[arg-type]
+        image_output_dir=str(tmp_path / "images"),
+    )
+    collector.init_slots(
+        "semi-auto-callback-guard-job",
+        [{"slot_id": "content_1", "slot_role": "content", "prompt": "prompt"}],
+    )
+    slots = collector.get_slots("semi-auto-callback-guard-job")
+    slots[0]["status"] = "sent"
+    store.set_system_setting("img_slot_semi-auto-callback-guard-job", json.dumps(slots))
+
+    async def _mock_fetch_updates():
+        return [
+            {
+                "update_id": 7,
+                "callback_query": {
+                    "id": "callback-1",
+                    "data": "abd:v1:a:approval:token",
+                    "message": {"chat": {"id": "123"}},
+                },
+            }
+        ]
+
+    collector._fetch_updates = _mock_fetch_updates  # type: ignore[method-assign]
+
+    assert asyncio.run(collector.poll_and_collect("semi-auto-callback-guard-job")) is False
+    assert store.get_system_setting("telegram_last_update_id", "0") == "0"
+
+
 def test_image_collector_worker_runs_with_topic_only_semi_auto(
     tmp_path: Path,
     monkeypatch,

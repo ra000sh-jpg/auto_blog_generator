@@ -171,6 +171,8 @@ def _provider_label(provider: str) -> str:
         return "Qwen"
     if provider == "deepseek":
         return "DeepSeek"
+    if provider == "zai":
+        return "Z.AI"
     if provider == "claude":
         return "Claude"
     return provider
@@ -240,18 +242,18 @@ async def run(args: argparse.Namespace):
 
     # DRY_RUN 강제 비활성화
     os.environ["DRY_RUN"] = "false"
-    if args.ai_only_images:
+    if getattr(args, "ai_only_images", False):
         os.environ["IMAGE_CONTENT_STRATEGY_OVERRIDE"] = "ai_only"
         os.environ["IMAGE_DISABLE_STOCK"] = "true"
-    if args.ai_toggle_mode:
+    if getattr(args, "ai_toggle_mode", None):
         os.environ["NAVER_AI_TOGGLE_MODE"] = args.ai_toggle_mode
-    if args.preflight_editor:
+    if getattr(args, "preflight_editor", False):
         os.environ["NAVER_EDITOR_PREFLIGHT"] = "true"
-    if args.preflight_soft:
+    if getattr(args, "preflight_soft", False):
         os.environ["NAVER_EDITOR_PREFLIGHT_STRICT"] = "false"
-    if args.browser_channel:
+    if getattr(args, "browser_channel", None):
         os.environ["PLAYWRIGHT_BROWSER_CHANNEL"] = str(args.browser_channel).strip()
-    if args.draft_only:
+    if getattr(args, "draft_only", False):
         os.environ["NAVER_PUBLISH_MODE"] = "draft"
 
     # 세션 파일 체크

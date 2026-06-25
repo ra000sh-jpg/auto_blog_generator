@@ -42,13 +42,13 @@ class RetryConfig:
 
 @dataclass
 class LLMConfig:
-    primary_provider: str = "qwen"
-    primary_model: str = "qwen-plus"
-    secondary_provider: str = "deepseek"
-    secondary_model: str = "deepseek-chat"
-    # 3순위 폴백 (쉼표 구분, 순서대로 시도)
-    tertiary_providers: str = "groq,nvidia"
-    tertiary_models: str = "llama-3.3-70b-versatile,meta/llama-3.3-70b-instruct"
+    primary_provider: str = "deepseek"
+    primary_model: str = "deepseek-v4-pro"
+    secondary_provider: str = "zai"
+    secondary_model: str = "glm-4.7-flash"
+    # 3순위 이후 폴백 (쉼표 구분, 순서대로 시도)
+    tertiary_providers: str = "zai,nvidia,groq,cerebras"
+    tertiary_models: str = "glm-4.7-flash,meta/llama-3.3-70b-instruct,meta-llama/llama-4-scout-17b-16e-instruct,gpt-oss-120b"
     max_tokens: int = 4096
     temperature: float = 0.7
     timeout_sec: float = 120.0
@@ -234,6 +234,8 @@ def _apply_env_overrides(config_data: Dict[str, Any]) -> Dict[str, Any]:
         "LLM_PRIMARY_MODEL": ("llm", "primary_model", str),
         "LLM_SECONDARY_PROVIDER": ("llm", "secondary_provider", str),
         "LLM_SECONDARY_MODEL": ("llm", "secondary_model", str),
+        "LLM_TERTIARY_PROVIDERS": ("llm", "tertiary_providers", str),
+        "LLM_TERTIARY_MODELS": ("llm", "tertiary_models", str),
         # 이전 단일 모델 설정과의 하위 호환
         "LLM_MODEL": ("llm", "primary_model", str),
         "CLAUDE_MODEL": ("llm", "primary_model", str),

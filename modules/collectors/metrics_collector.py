@@ -347,7 +347,7 @@ class MetricsCollector:
         blended_score = (ai_score * (1.0 - traffic_weight)) + (traffic_score * traffic_weight)
         blended_score = max(0.0, min(100.0, blended_score))
 
-        is_free_model = 1 if provider in {"groq", "cerebras"} else 0
+        is_free_model = 1 if provider in {"zai", "groq", "cerebras", "nvidia"} else 0
         now = post.get("published_at") or metric.published_at
         log_id = str(uuid.uuid4())
 

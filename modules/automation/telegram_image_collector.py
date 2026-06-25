@@ -179,7 +179,12 @@ class TelegramImageCollector:
                 update_id = int(update.get("update_id", 0))
             except (TypeError, ValueError):
                 update_id = 0
+            if update.get("callback_query"):
+                # 버튼 콜백은 초안 승인 폴러가 처리해야 하므로 여기서 소비하지 않는다.
+                continue
             message = update.get("message", {})
+            if not message:
+                continue
             msg_chat_id = str(message.get("chat", {}).get("id", "")).strip()
             if registered_chat_id and msg_chat_id != registered_chat_id:
                 max_consumed_update_id = max(max_consumed_update_id, update_id)
@@ -229,9 +234,10 @@ class TelegramImageCollector:
         except ValueError:
             offset = 0
 
+        allowed_updates = "%5B%22message%22%2C%22callback_query%22%5D"
         url = (
             f"https://api.telegram.org/bot{bot_token}/getUpdates"
-            f"?offset={offset}&timeout=5&allowed_updates=%5B%22message%22%5D"
+            f"?offset={offset}&timeout=5&allowed_updates={allowed_updates}"
         )
         try:
             data = await asyncio.to_thread(self._get_json, url)

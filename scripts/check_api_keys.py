@@ -251,8 +251,9 @@ async def run_checks(db_path: str, env_path: Path, timeout_sec: float) -> Dict[s
         "openai": "gpt-4.1-mini",
         "claude": "claude-sonnet-4-20250514",
         "groq": "llama-3.3-70b-versatile",
-        "cerebras": "llama3.1-8b",
+        "cerebras": "gpt-oss-120b",
         "nvidia": "meta/llama-3.3-70b-instruct",
+        "zai": "glm-4.7-flash",
     }
 
     secret_values: List[str] = []

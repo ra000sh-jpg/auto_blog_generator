@@ -21,7 +21,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from modules.automation.job_store import Job, JobStore
+from modules.automation.pipeline_service import PipelineService
 from modules.automation.quality_evaluator import EvaluationResult, QualityEvaluator
+from modules.uploaders.playwright_publisher import PublishResult
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +58,23 @@ def _make_job(store: JobStore, job_id: str = "job_q1") -> Job:
     return jobs[0]
 
 
+class _DummyPublisher:
+    async def publish(
+        self,
+        title: str,
+        content: str,
+        thumbnail=None,
+        images=None,
+        image_sources=None,
+        image_points=None,
+        tags=None,
+        category=None,
+        publish_mode=None,
+    ) -> PublishResult:
+        del title, content, thumbnail, images, image_sources, image_points, tags, category, publish_mode
+        return PublishResult(success=True, url="https://blog.naver.com/test/gate2")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # QualityEvaluator Unit Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,6 +90,51 @@ class TestQualityEvaluatorNoLLM:
         )
         assert result.passed is True
         assert result.detail.get("skipped") is True
+
+
+def test_pipeline_gate2_evaluates_prepared_content_key(store):
+    """Gate 2는 발행 payload의 content 본문을 평가해야 한다."""
+
+    class CaptureEvaluator:
+        max_retries = 2
+
+        def __init__(self) -> None:
+            self.seen_content = ""
+
+        async def evaluate(self, *, content: str, persona_desc: str, retry_count: int = 0):
+            del persona_desc, retry_count
+            self.seen_content = content
+            return EvaluationResult(passed=True, score=88, gate="pass")
+
+    async def generate_content(_job):
+        del _job
+        body = (
+            "테스트 글은 테크와 IT 흐름을 독자가 차분하게 이해하도록 돕는 글입니다. "
+            "서비스를 고를 때는 기능 이름보다 실제 사용 장면, 비용, 반복 사용 가능성을 함께 봐야 합니다. "
+            "특히 자동화 도구는 처음 설정할 때보다 일주일 뒤에도 같은 품질을 유지하는지가 더 중요합니다. "
+            "그래서 이 글은 체크리스트, 판단 기준, 운영 리스크를 나누어 설명합니다. "
+        )
+        return {
+            "final_content": "Gate 2가 실제로 읽어야 하는 본문입니다. " + (body * 8),
+            "quality_gate": "pass",
+            "quality_snapshot": {"score": 90, "issues": []},
+            "seo_snapshot": {"provider_used": "stub", "provider_model": "stub"},
+            "image_prompts": [],
+            "llm_token_usage": {},
+        }
+
+    store.set_system_setting("telegram_draft_approval_enabled", "false")
+    job = _make_job(store, "job_gate2_payload_content")
+    evaluator = CaptureEvaluator()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=_DummyPublisher(),
+        generate_fn=generate_content,
+        quality_evaluator=evaluator,
+    )
+
+    assert asyncio.run(pipeline.process_generation(job)) is True
+    assert "실제로 읽어야 하는 본문" in evaluator.seen_content
 
 
 class TestQualityEvaluatorPass:

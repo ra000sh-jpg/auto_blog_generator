@@ -449,6 +449,45 @@ def test_cost_strict_blocks_paid_champion_and_eval(tmp_path: Path):
     assert "gemini" not in fallback_providers
 
 
+def test_deepseek_fallback_uses_free_providers_before_qwen(tmp_path: Path):
+    """DeepSeek 실패 대비 fallback은 Z.AI → NVIDIA → Groq → Cerebras 순서이며 Qwen은 제외해야 한다."""
+    store = _build_store(tmp_path, "deepseek_free_fallback.db")
+    store.set_system_setting("router_strategy_mode", "quality")
+    store.set_system_setting("router_cost_free_only_fallback", "true")
+    store.set_system_setting(
+        "router_text_api_keys",
+        json.dumps(
+            {
+                "deepseek": "deepseek-test-key",
+                "qwen": "qwen-test-key",
+                "zai": "zai-test-key",
+                "nvidia": "nvidia-test-key",
+                "groq": "groq-test-key",
+                "cerebras": "cerebras-test-key",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    store.set_system_setting("router_champion_model", "deepseek-v4-pro")
+
+    router = LLMRouter(job_store=store)
+    plan = router.build_generation_plan_for_job(job=_build_job("deepseek-free-fallback", "IT 자동화"))
+    fallback_providers = [
+        str(item.get("provider", "")).strip().lower()
+        for item in plan["quality_step"].get("fallback_chain", [])
+    ]
+    voice_fallback_providers = [
+        str(item.get("provider", "")).strip().lower()
+        for item in plan["voice_step"].get("fallback_chain", [])
+    ]
+
+    assert plan["quality_step"]["provider"] == "deepseek"
+    assert fallback_providers[:4] == ["zai", "nvidia", "groq", "cerebras"]
+    assert "qwen" not in fallback_providers
+    assert voice_fallback_providers[:4] == ["zai", "nvidia", "groq", "cerebras"]
+    assert "qwen" not in voice_fallback_providers
+
+
 def test_pipeline_records_quality_step_per_provider_breakdown(tmp_path: Path):
     """quality_step by_provider가 있으면 mixed 집계 대신 provider별 row를 저장해야 한다."""
     store = _build_store(tmp_path, "quality_breakdown_metrics.db")

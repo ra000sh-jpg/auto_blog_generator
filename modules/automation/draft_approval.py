@@ -202,7 +202,7 @@ def build_inline_keyboard(request: DraftApprovalRequest) -> Dict[str, Any]:
         "inline_keyboard": [
             [
                 {
-                    "text": "승인",
+                    "text": "승인 후 임시저장",
                     "callback_data": build_callback_data(
                         action="approve",
                         approval_id=request.approval_id,
@@ -271,11 +271,10 @@ def build_draft_preview_message(
         "본문 미리보기",
         content or "(본문 없음)",
         "",
-        "수정하려면 아래 `수정본입력` 버튼을 누른 뒤 완성본 본문을 그대로 보내주세요.",
-        "제목까지 바꾸려면 수정본 첫 줄에 `제목: 새 제목`을 넣어주세요.",
-        f"명령어 백업: /draft_update {job_id}",
+        "승인하면 네이버 임시저장 대기열로 이동합니다.",
+        "수정하려면 `수정본입력` 버튼을 누른 뒤 완성본 전체를 보내주세요.",
         "",
-        "승인하면 ready_to_publish 큐로 이동하고, publisher 워커가 네이버 블로그 임시저장/발행 설정에 따라 처리합니다.",
+        "처리 후 이 메시지 하단에 진행상황이 표시됩니다.",
     ]
     return "\n".join(lines)
 
@@ -313,6 +312,7 @@ def build_draft_compact_message(
     tags_raw = payload.get("tags", [])
     tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()] if isinstance(tags_raw, list) else []
     strategy_summary = summarize_strategy_for_message(payload)
+    editorial_summary = _editorial_intent_summary(payload)
     lines = [
         "AutoBlog 초안 승인 요청",
         status_line,
@@ -326,6 +326,19 @@ def build_draft_compact_message(
             lines.append(f"검색 의도: {strategy_summary['intent']}")
         if strategy_summary.get("axis"):
             lines.append(f"전략 비율: {strategy_summary['axis']}")
+    if editorial_summary:
+        if editorial_summary.get("issue"):
+            lines.append(f"방향성 주제: {editorial_summary['issue']}")
+        if editorial_summary.get("article_type"):
+            lines.append(f"글 유형: {editorial_summary['article_type']}")
+        if editorial_summary.get("purpose"):
+            lines.append(f"화자 목적: {editorial_summary['purpose']}")
+        if editorial_summary.get("why_today"):
+            lines.append(f"오늘 이유: {editorial_summary['why_today']}")
+        if editorial_summary.get("sources"):
+            lines.append(f"출처 계층: {editorial_summary['sources']}")
+        if editorial_summary.get("evidence"):
+            lines.append(f"근거 수치: {editorial_summary['evidence']}")
     if tags:
         lines.append(f"태그: {', '.join(tags[:5])}")
     if expires_at:
@@ -334,7 +347,9 @@ def build_draft_compact_message(
         [
             "",
             "본문 TXT: 첨부됨",
-            "수정은 TXT를 복사해 Grok/Gemini에서 고친 뒤, 수정본입력 버튼 다음 메시지로 보내거나 TXT 파일을 다시 업로드하세요.",
+            "승인하면 네이버 임시저장 대기열로 이동합니다.",
+            "수정하려면 `수정본입력` 버튼을 누른 뒤 완성본 전체를 보내주세요.",
+            "처리 후 이 메시지 하단에 진행상황이 표시됩니다.",
         ]
     )
     return "\n".join(lines)
@@ -354,6 +369,7 @@ def build_draft_text_attachment(
     tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()] if isinstance(tags_raw, list) else []
     category = str(payload.get("category", "") or "").strip()
     strategy_summary = summarize_strategy_for_message(payload)
+    editorial_summary = _editorial_intent_summary(payload)
     lines = [
         f"job_id: {str(job_id or '').strip()}",
         f"title: {str(title or payload.get('title', '') or '').strip()}",
@@ -366,6 +382,17 @@ def build_draft_text_attachment(
                 f"writing_strategy: {strategy_summary.get('label', '')}",
                 f"writing_intent: {strategy_summary.get('intent', '')}",
                 f"writing_axis: {strategy_summary.get('axis', '')}",
+            ]
+        )
+    if editorial_summary:
+        lines.extend(
+            [
+                f"direction_issue: {editorial_summary.get('issue', '')}",
+                f"direction_article_type: {editorial_summary.get('article_type', '')}",
+                f"direction_purpose: {editorial_summary.get('purpose', '')}",
+                f"direction_why_today: {editorial_summary.get('why_today', '')}",
+                f"direction_sources: {editorial_summary.get('sources', '')}",
+                f"direction_evidence: {editorial_summary.get('evidence', '')}",
             ]
         )
     if expires_at:
@@ -382,6 +409,46 @@ def build_draft_text_attachment(
         ]
     )
     return "\n".join(lines)
+
+
+def _editorial_intent_summary(payload: Dict[str, Any]) -> Dict[str, str]:
+    """payload에서 방향성 주제 요약을 추출한다."""
+
+    seo_snapshot = payload.get("seo_snapshot", {})
+    intent = seo_snapshot.get("editorial_intent", {}) if isinstance(seo_snapshot, dict) else {}
+    if not isinstance(intent, dict) or not intent:
+        return {}
+    issue = str(intent.get("issue_title", "") or "").strip()
+    purpose = str(intent.get("speaker_purpose", "") or "").strip()
+    article_type = str(intent.get("article_type", "") or "").strip()
+    why_today_raw = intent.get("why_today", [])
+    why_today = ""
+    if isinstance(why_today_raw, list):
+        why_today = str(why_today_raw[0] if why_today_raw else "").strip()
+    sources_raw = intent.get("supporting_sources", [])
+    sources = ""
+    if isinstance(sources_raw, list):
+        sources = ", ".join(str(source).strip() for source in sources_raw[:4] if str(source).strip())
+    roles = intent.get("evidence_roles", [])
+    role_labels: list[str] = []
+    if isinstance(roles, list):
+        for role in roles[:4]:
+            if not isinstance(role, dict):
+                continue
+            metric = str(role.get("metric_key", "") or "").strip()
+            role_name = str(role.get("role", "") or "").strip()
+            if metric and role_name:
+                role_labels.append(f"{metric}={role_name}")
+            elif metric:
+                role_labels.append(metric)
+    return {
+        "issue": issue[:80],
+        "article_type": article_type[:40],
+        "purpose": purpose[:120],
+        "why_today": why_today[:120],
+        "sources": sources[:120],
+        "evidence": ", ".join(role_labels)[:120],
+    }
 
 
 def parse_draft_text_attachment(raw_text: str, *, fallback_job_id: str = "") -> Dict[str, str]:

@@ -16,9 +16,9 @@
         <string>--max-interval</string>
         <string>110</string>
         <string>--cpu-start-threshold</string>
-        <string>28</string>
+        <string>45</string>
         <string>--cpu-stop-threshold</string>
-        <string>35</string>
+        <string>60</string>
         <string>--cpu-window-size</string>
         <string>5</string>
         <string>--generator-poll-sec</string>

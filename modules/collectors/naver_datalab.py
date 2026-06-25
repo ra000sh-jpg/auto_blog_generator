@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -162,7 +162,9 @@ class NaverDataLabCollector:
         except ValueError:
             return []
 
-        if datetime.utcnow() - fetched_at > timedelta(hours=self.cache_ttl_hours):
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - fetched_at > timedelta(hours=self.cache_ttl_hours):
             return []
 
         keywords = cache_entry.get("keywords", [])
@@ -220,7 +222,7 @@ class NaverDataLabCollector:
         """성공 응답을 캐시에 기록한다."""
         self._cache_data[category_name] = {
             "keywords": keywords,
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
         self._persist_cache_data()
 

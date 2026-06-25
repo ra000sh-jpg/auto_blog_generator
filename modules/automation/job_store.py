@@ -159,6 +159,7 @@ class JobStore:
         "AUTH_EXPIRED",
         "CAPTCHA_REQUIRED",
         "CONTENT_REJECTED",
+        "QUALITY_REJECTED",
         "BUDGET_EXCEEDED",
     })
 
@@ -2484,6 +2485,21 @@ class JobStore:
                 LIMIT 12
                 """
             ).fetchall()
+            if not trend_rows:
+                trend_rows = conn.execute(
+                    """
+                    SELECT
+                        strftime('%Y-%W', measured_at) AS week_key,
+                        MIN(substr(measured_at, 1, 10)) AS week_start,
+                        AVG(score_per_won) AS avg_score_per_won,
+                        AVG(quality_score) AS avg_quality_score
+                    FROM model_performance_log
+                    WHERE score_per_won IS NOT NULL
+                    GROUP BY week_key
+                    ORDER BY week_key ASC
+                    LIMIT 12
+                    """
+                ).fetchall()
             avg_vlm_visual_score = 0.0
             try:
                 vlm_row = conn.execute(
@@ -3181,25 +3197,31 @@ class JobStore:
             required_tag=required_tag,
         )
 
-    def get_ready_to_publish_count(self, job_kind: Optional[str] = None) -> int:
+    def get_ready_to_publish_count(
+        self,
+        job_kind: Optional[str] = None,
+        required_tag: Optional[str] = None,
+    ) -> int:
         """발행 대기(ready) 상태 Job 수를 반환한다."""
         with self.connection() as conn:
+            where_clauses = ["status = ?"]
+            params: List[Any] = [self.STATUS_READY]
             normalized_kind = str(job_kind or "").strip().lower()
             if normalized_kind:
-                row = conn.execute(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM jobs
-                    WHERE status = ?
-                    AND job_kind = ?
-                    """,
-                    (self.STATUS_READY, normalized_kind),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS total FROM jobs WHERE status = ?",
-                    (self.STATUS_READY,),
-                ).fetchone()
+                where_clauses.append("job_kind = ?")
+                params.append(normalized_kind)
+            normalized_tag = str(required_tag or "").strip()
+            if normalized_tag:
+                where_clauses.append("tags LIKE ?")
+                params.append(f'%"{normalized_tag}"%')
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM jobs
+                WHERE {' AND '.join(where_clauses)}
+                """,
+                params,
+            ).fetchone()
             return int(row["total"]) if row else 0
 
     def _log_event(

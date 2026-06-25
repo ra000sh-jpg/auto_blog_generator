@@ -60,6 +60,63 @@ class DummyPublisher:
         return PublishResult(success=False, error_code="PUBLISH_FAILED", error_message="publish failed")
 
 
+class DummyNotifier:
+    """텔레그램 알림 호출 확인용 더미 알림기."""
+
+    enabled = True
+
+    def __init__(self):
+        self.messages: List[str] = []
+        self.critical_messages: List[Dict[str, str]] = []
+
+    async def send_message(
+        self,
+        text: str,
+        *,
+        disable_notification: bool = False,
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        del disable_notification, reply_markup
+        self.messages.append(text)
+        return True
+
+    def notify_critical_background(
+        self,
+        *,
+        error_code: str,
+        message: str,
+        job_id: str = "",
+    ) -> None:
+        self.critical_messages.append(
+            {
+                "error_code": error_code,
+                "message": message,
+                "job_id": job_id,
+            }
+        )
+
+    def send_message_background(
+        self,
+        text: str,
+        *,
+        disable_notification: bool = False,
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del disable_notification, reply_markup
+        self.messages.append(text)
+
+    def send_document_background(
+        self,
+        *,
+        file_path: str,
+        caption: str = "",
+        filename: str = "",
+        disable_notification: bool = False,
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del file_path, caption, filename, disable_notification, reply_markup
+
+
 class DummyVisualSidecar:
     """발행 직전 사이드카 호출 확인용 대역."""
 
@@ -89,6 +146,26 @@ class DummyVisualSidecar:
             "visual_sidecar": {"status": "attached", "added_count": 1},
         }
         return enriched
+
+
+def sufficient_source_pack_payload() -> Dict[str, Any]:
+    """발행 전 검증을 통과하는 최소 Source Pack fixture."""
+
+    return {
+        "schema_version": "source_pack.v1",
+        "scope": "kr",
+        "sources": [
+            {"source": "FRED", "source_type": "official", "title": "US10Y", "metric_key": "US10Y", "value": 4.2},
+            {"source": "Stooq", "source_type": "market_data", "title": "KOSPI", "metric_key": "KOSPI", "value": 2870.0},
+            {"source": "CoinGecko", "source_type": "market_data", "title": "BTC", "metric_key": "BTC", "value": 104000.0},
+        ],
+        "confirmed_metrics": [
+            {"key": "US10Y", "label": "DGS10", "value": 4.2, "source": "FRED"},
+            {"key": "KOSPI", "label": "KOSPI", "value": 2870.0, "source": "Stooq"},
+            {"key": "BTC", "label": "bitcoin", "value": 104000.0, "source": "CoinGecko"},
+        ],
+        "missing_sources": [],
+    }
 
 
 def schedule_and_claim(store: JobStore, job_id: str = "job-1"):
@@ -126,6 +203,92 @@ def test_convert_markdown_table_to_naver_plain_text():
     assert "■ 손실을 마주하는 연습" in converted
     assert "[표] 구분 / 배움 중심 접근 / 수익 중심 접근" in converted
     assert "• 배움 중심 접근: 금액보다 결정 과정을 먼저 점검한다" in converted
+
+
+def test_publication_preflight_blocks_fact_gap_phrase_before_publish(tmp_path: Path):
+    """데이터 누락 문구가 남은 초안은 네이버 발행기 호출 전에 보류되어야 한다."""
+
+    store = build_store(tmp_path, "publication_preflight_phrase.db")
+    job = schedule_and_claim(store, "preflight-phrase-job")
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "국장 전 브리핑",
+            "content": "오늘 시장을 정리합니다. 구체적 수치는 확인하지 못했습니다.",
+            "images": [],
+            "image_points": [],
+            "tags": [],
+            "category": "",
+            "publish_mode": "draft",
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    notifier = DummyNotifier()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+        notifier=notifier,
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is False
+
+    updated = store.get_job(job.job_id)
+    assert updated is not None
+    assert updated.status == store.STATUS_FAILED_QUALITY
+    assert updated.error_code == "QUALITY_REJECTED"
+    assert publisher.called == 0
+    assert any("발행 전 보류" in message for message in notifier.messages)
+    assert any("진행상황" in message for message in notifier.messages)
+    saved_payload = store.load_prepared_payload(job.job_id)
+    preflight = saved_payload["quality_snapshot"]["publication_preflight"]
+    assert preflight["status"] == "blocked"
+    assert any(issue["code"] == "BLOCKED_PUBLICATION_PHRASE" for issue in preflight["issues"])
+
+
+def test_source_pack_section_is_attached_before_publish(tmp_path: Path):
+    """Source Pack이 충분하면 네이버 본문 하단에 출처 섹션을 자동 추가한다."""
+
+    store = build_store(tmp_path, "source_pack_section_publish.db")
+    job = schedule_and_claim(store, "source-pack-section-job")
+    assert store.save_prepared_payload(
+        job.job_id,
+        {
+            "title": "국장 전 브리핑",
+            "content": "FRED 기준 US10Y는 4.2이고 Stooq 기준 KOSPI는 2870입니다.",
+            "images": [],
+            "image_points": [],
+            "tags": [],
+            "category": "",
+            "publish_mode": "draft",
+            "source_pack": sufficient_source_pack_payload(),
+            "quality_snapshot": {"score": 92},
+        },
+    )
+    assert store.update_job_status(job.job_id, store.STATUS_RUNNING)
+    running_job = store.get_job(job.job_id)
+    assert running_job is not None
+
+    publisher = DummyPublisher()
+    pipeline = PipelineService(
+        job_store=store,
+        publisher=publisher,
+        generate_fn=lambda _job: {},
+    )
+    pipeline._summary_card_enabled = False
+    pipeline._market_chart_enabled = False
+
+    assert asyncio.run(pipeline.process_publication(running_job)) is True
+
+    assert "■ 참고한 공식/시장 데이터" in publisher.last_payload["content"]
+    assert "FRED" in publisher.last_payload["content"]
+    assert publisher.called == 1
 
 
 def test_ready_payload_markdown_table_is_normalized_before_publish(tmp_path: Path):
@@ -378,6 +541,8 @@ def test_kr_preopen_auto_publish_passes_publish_mode_and_recommended_tags(tmp_pa
                     "data_points": [
                         {"symbol": "KOSPI", "source": "Stooq", "value": 2870.0},
                         {"symbol": "USD/KRW", "source": "FRED", "value": 1365.0},
+                        {"symbol": "BTC", "source": "CoinGecko", "value": 104000.0},
+                        {"symbol": "ETH", "source": "Binance", "value": 2500.0},
                     ],
                 }
             },

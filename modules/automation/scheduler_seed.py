@@ -898,6 +898,10 @@ def _build_kr_preopen_opportunity_seed(
 
     tags = ["auto_publish:kr_preopen", "publish_mode:publish"]
     if not result:
+        direction_seed = _build_bigkinds_direction_seed(service=service)
+        if direction_seed:
+            direction_seed["tags"] = _unique_nonempty([*tags, *direction_seed.get("tags", [])])
+            return direction_seed
         tags.extend(["opportunity_status:fallback", "opportunity_score:0"])
         return {"tags": tags}
 
@@ -922,6 +926,92 @@ def _build_kr_preopen_opportunity_seed(
         "opportunity_keyword": keyword,
         "opportunity_score": score,
     }
+
+
+def _build_bigkinds_direction_seed(*, service: "SchedulerService") -> Dict[str, Any]:
+    """빅카인즈/네이버 신호로 국장전 방향성 제목을 만든다."""
+
+    if not _bigkinds_direction_enabled(service):
+        return {}
+    try:
+        from ..collectors.bigkinds_public import BigKindsPublicCollector
+        from ..market.direction_signal import (
+            DirectionSignalAggregator,
+            collect_naver_direction_signals,
+            direction_signal_to_issue_dict,
+            signals_from_bigkinds_issues,
+        )
+        from ..market.directional_topic_planner import plan_directional_topic
+
+        collector = BigKindsPublicCollector()
+        issues = collector.collect_directional_issues(max_items=8)
+        direction_signals = signals_from_bigkinds_issues(issues)
+        naver_query = str(getattr(issues[0], "issue_title", "") or "") if issues else "국장 반도체 환율 수급"
+        direction_signals.extend(collect_naver_direction_signals(naver_query, max_per_service=2))
+        direction_plan = DirectionSignalAggregator().aggregate(
+            direction_signals,
+            confirmed_metrics=(),
+            seed_keywords=["국장", "반도체", "환율", "수급"],
+            scope="kr",
+        )
+        planner_issues = [direction_signal_to_issue_dict(signal) for signal in direction_plan.ranked_signals] if direction_plan else []
+        if planner_issues and direction_plan is not None:
+            planner_issues[0]["direction_signal_plan"] = direction_plan.to_dict()
+        intent = plan_directional_topic(
+            base_title="국장 개장 전 브리핑",
+            issues=planner_issues or issues,
+            confirmed_metrics=(),
+            seed_keywords=["국장", "반도체", "환율", "수급"],
+            scope="kr",
+        )
+    except Exception as exc:
+        logger.debug("BigKinds directional seed skipped: %s", exc)
+        return {}
+
+    if intent is None or not intent.primary_title:
+        return {}
+
+    issue_title = str(intent.issue_title or "").strip()
+    seed_keywords = _unique_nonempty([issue_title, *[role.metric_key for role in intent.evidence_roles]])
+    if not seed_keywords:
+        seed_keywords = ["국장", "오늘의 이슈", "시장 판단", "리스크 확인"]
+    signal_plan = intent.direction_signal_plan or {}
+    selected_signal = signal_plan.get("selected_signal", {}) if isinstance(signal_plan, dict) else {}
+    signal_score = int(round(float(signal_plan.get("score", 65) or 65))) if isinstance(signal_plan, dict) else 65
+    selected_source = str(selected_signal.get("source", "") if isinstance(selected_signal, dict) else "").strip()
+    selected_tier = str(selected_signal.get("source_tier", "") if isinstance(selected_signal, dict) else "").strip()
+    source_tag = "direction_source:bigkinds" if "bigkinds" in selected_source.lower() else "direction_source:multi_source"
+    return {
+        "title": intent.primary_title,
+        "seed_keywords": seed_keywords[:5],
+        "tags": _unique_nonempty([
+            "opportunity_status:directional",
+            f"opportunity_score:{signal_score}",
+            source_tag,
+            "direction_source:multi_source",
+            f"direction_signal_source:{_tag_safe(selected_source)[:36]}" if selected_source else "",
+            f"direction_signal_tier:{_tag_safe(selected_tier)[:24]}" if selected_tier else "",
+            f"direction_issue:{_tag_safe(issue_title)[:40]}",
+            f"direction_angle:{_tag_safe(intent.angle)}",
+            f"direction_article_type:{_tag_safe(intent.article_type)[:24]}",
+            "opportunity_evidence:direction_signal",
+        ]),
+        "category": "경제 브리핑",
+        "opportunity_keyword": issue_title,
+        "opportunity_score": signal_score,
+    }
+
+
+def _bigkinds_direction_enabled(service: "SchedulerService") -> bool:
+    """빅카인즈 공개 이슈 기반 방향성 제목 활성 여부를 반환한다."""
+
+    job_store = getattr(service, "job_store", None)
+    default = os.getenv("SCHEDULER_BIGKINDS_DIRECTION_ENABLED", "false")
+    try:
+        raw = job_store.get_system_setting("scheduler_bigkinds_direction_enabled", default) if job_store else default
+    except Exception:
+        raw = default
+    return _is_truthy(raw)
 
 
 def _market_extra_opportunity_limit(

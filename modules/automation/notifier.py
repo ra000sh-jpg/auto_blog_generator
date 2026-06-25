@@ -16,6 +16,25 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _trim_trailing_slash(value: str) -> str:
+    """URL 끝의 슬래시만 정리한다."""
+    return value.strip().rstrip("/")
+
+
+def resolve_manual_login_url() -> str:
+    """세션 만료 알림에 넣을 네이버 수동 로그인 URL을 계산한다."""
+    explicit_url = os.getenv("AUTOBLOG_MANUAL_LOGIN_URL", "").strip()
+    if explicit_url:
+        return explicit_url
+
+    web_base_url = _trim_trailing_slash(
+        os.getenv("AUTOBLOG_WEB_BASE_URL", "http://localhost:3000")
+    )
+    if not web_base_url:
+        return ""
+    return f"{web_base_url}/settings?focus=naver"
+
+
 @dataclass
 class TelegramNotifier:
     """텔레그램 알림 전송기."""
@@ -215,7 +234,25 @@ class TelegramNotifier:
             f"- job_id: {job_id or '-'}\n"
             f"- detail: {message[:300]}"
         )
-        self.send_message_background(body, disable_notification=False)
+        reply_markup = None
+        if error_code == "AUTH_EXPIRED":
+            manual_login_url = resolve_manual_login_url()
+            if manual_login_url:
+                body = (
+                    f"{body}\n"
+                    f"- login: {manual_login_url}\n"
+                    "- action: 링크에서 네이버 재연동을 눌러 session state를 갱신하세요."
+                )
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "네이버 수동 로그인", "url": manual_login_url}]
+                    ]
+                }
+        self.send_message_background(
+            body,
+            disable_notification=False,
+            reply_markup=reply_markup,
+        )
 
     async def notify_daily_summary(
         self,

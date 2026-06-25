@@ -1681,10 +1681,14 @@ def cycle_get_ready_draft_count(service: "SchedulerService") -> int:
         return 0
     get_count = getattr(service.job_store, "get_ready_to_publish_count", None)
     if get_count and callable(get_count):
+        required_tag = _scheduler_required_job_tag(service)
         try:
-            return int(get_count(job_kind=service._master_job_kind()))
+            return int(get_count(job_kind=service._master_job_kind(), required_tag=required_tag))
         except TypeError:
-            return int(get_count())
+            try:
+                return int(get_count(job_kind=service._master_job_kind()))
+            except TypeError:
+                return int(get_count())
     return 0
 
 
@@ -1695,10 +1699,14 @@ def cycle_get_ready_count(service: "SchedulerService", job_kind: Optional[str] =
         return 0
     get_count = getattr(service.job_store, "get_ready_to_publish_count", None)
     if get_count and callable(get_count):
+        required_tag = _scheduler_required_job_tag(service)
         try:
-            return int(get_count(job_kind=job_kind))
+            return int(get_count(job_kind=job_kind, required_tag=required_tag))
         except TypeError:
-            return int(get_count())
+            try:
+                return int(get_count(job_kind=job_kind))
+            except TypeError:
+                return int(get_count())
     return 0
 
 

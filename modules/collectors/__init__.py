@@ -7,6 +7,8 @@ __all__ = [
     "RssNewsCollector",
     "NaverSearchCollector",
     "NaverSearchItem",
+    "BigKindsPublicCollector",
+    "BigKindsIssue",
 ]
 
 
@@ -31,5 +33,12 @@ def __getattr__(name: str):
         return {
             "NaverSearchCollector": NaverSearchCollector,
             "NaverSearchItem": NaverSearchItem,
+        }[name]
+    if name in {"BigKindsPublicCollector", "BigKindsIssue"}:
+        from .bigkinds_public import BigKindsIssue, BigKindsPublicCollector
+
+        return {
+            "BigKindsPublicCollector": BigKindsPublicCollector,
+            "BigKindsIssue": BigKindsIssue,
         }[name]
     raise AttributeError(name)

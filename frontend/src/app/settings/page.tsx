@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -38,15 +38,41 @@ type Feedback = {
 
 type StatusTone = "ok" | "warn" | "muted";
 
-const PRIMARY_TEXT_KEYS = ["deepseek", "qwen", "groq", "nvidia", "gemini", "openai"];
+const PRIMARY_TEXT_KEYS = ["deepseek", "zai", "nvidia", "groq", "cerebras", "qwen", "gemini", "openai"];
 
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [focusNaverRequested, setFocusNaverRequested] = useState(false);
+  const [highlightNaver, setHighlightNaver] = useState(false);
+  const naverCardRef = useRef<HTMLDivElement | null>(null);
 
   const [onboardingData, setOnboardingData] = useState<OnboardingStatusResponse | null>(null);
   const [routerData, setRouterData] = useState<RouterSettingsResponse | null>(null);
   const [naverStatus, setNaverStatus] = useState<NaverConnectStatusResponse | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const shouldFocusNaver = params.get("focus") === "naver" || params.get("action") === "naver-login";
+    if (!shouldFocusNaver) return;
+    setFocusNaverRequested(true);
+    setHighlightNaver(true);
+  }, []);
+
+  useEffect(() => {
+    if (!focusNaverRequested || loading) return;
+
+    const scrollTimer = window.setTimeout(() => {
+      naverCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 120);
+    const highlightTimer = window.setTimeout(() => setHighlightNaver(false), 6000);
+
+    return () => {
+      window.clearTimeout(scrollTimer);
+      window.clearTimeout(highlightTimer);
+    };
+  }, [focusNaverRequested, loading]);
 
   useEffect(() => {
     let isMounted = true;
@@ -141,6 +167,8 @@ export default function SettingsPage() {
             <NaverConnectionCard
               initialStatus={naverStatus}
               onStatusChange={setNaverStatus}
+              containerRef={naverCardRef}
+              highlight={highlightNaver}
             />
             <TelegramCompactCard initialOnboardingStatus={onboardingData} />
           </div>
@@ -225,7 +253,7 @@ function QuickModelSettingsCard({
     );
     const fromMasks = new Set(Object.keys(routerData.settings.text_api_keys_masked || {}));
     const merged = new Set([...fromMatrix, ...fromMasks, ...PRIMARY_TEXT_KEYS.slice(0, 2)]);
-    return PRIMARY_TEXT_KEYS.filter((key) => merged.has(key)).slice(0, 4);
+    return PRIMARY_TEXT_KEYS.filter((key) => merged.has(key)).slice(0, 5);
   }, [routerData]);
 
   async function handleSave() {
@@ -361,14 +389,19 @@ function DailyOperationCard({
 function NaverConnectionCard({
   initialStatus,
   onStatusChange,
+  containerRef,
+  highlight,
 }: {
   initialStatus: NaverConnectStatusResponse | null;
   onStatusChange: (value: NaverConnectStatusResponse | null) => void;
+  containerRef?: RefObject<HTMLDivElement | null>;
+  highlight?: boolean;
 }) {
   const [status, setStatus] = useState(initialStatus);
   const [connecting, setConnecting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const connected = Boolean(status?.connected && status.exists);
+  const highlightClass = highlight ? "border-emerald-300 ring-2 ring-emerald-200 ring-offset-2" : "border-slate-200";
 
   async function handleConnect() {
     setConnecting(true);
@@ -390,7 +423,7 @@ function NaverConnectionCard({
   }
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <section ref={containerRef} className={`rounded-lg border bg-white p-5 shadow-sm transition ${highlightClass}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-slate-950">네이버 블로그</h2>
@@ -793,8 +826,10 @@ function compactRecord(values: Record<string, string>) {
 function providerLabel(provider: string) {
   const labelMap: Record<string, string> = {
     deepseek: "DeepSeek",
+    zai: "Z.AI",
     qwen: "Qwen",
     groq: "Groq",
+    cerebras: "Cerebras",
     nvidia: "NVIDIA",
     gemini: "Gemini",
     openai: "OpenAI",

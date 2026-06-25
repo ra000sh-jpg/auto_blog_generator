@@ -51,7 +51,7 @@ def create_client(
         from .openai_compat_client import create_cerebras_client
 
         return create_cerebras_client(
-            model=model or "llama3.1-8b",
+            model=model or "gpt-oss-120b",
             timeout_sec=timeout_sec,
             api_key=api_key,
         )
@@ -76,6 +76,14 @@ def create_client(
 
         return create_nvidia_client(
             model=model or "meta/llama-3.3-70b-instruct",
+            timeout_sec=timeout_sec,
+            api_key=api_key,
+        )
+    if normalized == "zai":
+        from .openai_compat_client import create_zai_client
+
+        return create_zai_client(
+            model=model or "glm-4.7-flash",
             timeout_sec=timeout_sec,
             api_key=api_key,
         )

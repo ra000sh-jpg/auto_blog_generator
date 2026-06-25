@@ -57,6 +57,8 @@ LLM_PRICE_TABLE: Dict[str, tuple[float, float]] = {
     "groq": (0.0, 0.0),
     # Cerebras (무료 Tier)
     "cerebras": (0.0, 0.0),
+    # Z.AI GLM Flash (무료 Tier)
+    "zai": (0.0, 0.0),
     # NVIDIA NIM (이용권 기반 무료 — credits 차감 없이 사용)
     "nvidia": (0.0, 0.0),
     "nvidia_vlm": (0.0, 0.0),

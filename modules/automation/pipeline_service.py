@@ -37,6 +37,7 @@ from ..images.placement import (
 from ..images.market_chart_renderer import render_market_chart
 from ..images.summary_card_renderer import render_summary_card
 from ..images.table_renderer import extract_and_render_tables, extract_and_render_tables_with_validation
+from ..market.source_pack import append_source_pack_section
 from ..metrics import MetricsStore
 from .job_store import Job, JobStore
 from ..uploaders.base_publisher import PublishResult
@@ -52,6 +53,10 @@ from .draft_approval import (
     create_draft_approval_request,
     get_approval_ttl_hours,
     is_draft_approval_enabled,
+)
+from .publication_preflight import (
+    PublicationPreflightResult,
+    run_publication_preflight,
 )
 from .telegram_image_collector import TelegramImageCollector, is_semi_auto_mode
 from .visual_sidecar import build_visual_sidecar_from_env
@@ -136,12 +141,13 @@ class PipelineService:
 
     MAX_API_CALLS_PER_JOB = 15  # LLM 호출 상한
     RETRY_LIMITED_ERRORS = frozenset({"QUALITY_FAILED", "NETWORK_TIMEOUT"})
-    FREE_MODEL_PROVIDERS = frozenset({"groq", "cerebras"})
+    FREE_MODEL_PROVIDERS = frozenset({"zai", "groq", "cerebras", "nvidia"})
     PROVIDER_PRICE_PER_1K_USD = {
         "qwen": (0.0004, 0.0012),
         "deepseek": (0.00027, 0.0011),
         "groq": (0.0, 0.0),
         "cerebras": (0.0, 0.0),
+        "zai": (0.0, 0.0),
         "gemini": (0.00035, 0.00105),
         "openai": (0.005, 0.015),
         "claude": (0.003, 0.015),
@@ -796,6 +802,18 @@ class PipelineService:
                 error_message=result.error_message,
             )
             return
+
+        preflight = run_publication_preflight(
+            job=job,
+            payload=payload,
+            publisher=publisher,
+            publish_mode=str(payload.get("publish_mode", publish_mode) or publish_mode),
+        )
+        payload = self._with_publication_preflight_snapshot(payload=payload, preflight=preflight)
+        if not preflight.ok:
+            self._handle_publication_preflight_block(job=job, payload=payload, preflight=preflight)
+            return
+        payload = self._with_source_pack_reference_section(payload=payload, source_pack=preflight.source_pack)
 
         result, publish_duration_sec = await self._publish_with_retry(
             publisher=publisher,
@@ -1632,6 +1650,211 @@ class PipelineService:
         except Exception:
             logger.debug("Auto publish withheld notification skipped", extra={"job_id": job.job_id})
 
+    def _with_publication_preflight_snapshot(
+        self,
+        *,
+        payload: Dict[str, Any],
+        preflight: PublicationPreflightResult,
+    ) -> Dict[str, Any]:
+        """발행 전 점검 결과를 payload와 quality_snapshot에 저장한다."""
+
+        normalized = dict(payload)
+        source_pack = dict(preflight.source_pack or {})
+        if source_pack:
+            normalized["source_pack"] = source_pack
+            seo_snapshot = dict(normalized.get("seo_snapshot", {}) or {})
+            market_snapshot = dict(seo_snapshot.get("market_snapshot", {}) or {})
+            if market_snapshot:
+                market_snapshot["source_pack"] = source_pack
+                seo_snapshot["market_snapshot"] = market_snapshot
+                normalized["seo_snapshot"] = seo_snapshot
+
+        quality = dict(normalized.get("quality_snapshot", {}) or {})
+        quality["publication_preflight"] = preflight.to_quality_snapshot()
+        normalized["quality_snapshot"] = quality
+        return normalized
+
+    def _with_source_pack_reference_section(
+        self,
+        *,
+        payload: Dict[str, Any],
+        source_pack: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Source Pack 출처 요약 섹션을 본문 하단에 추가한다."""
+
+        if not source_pack:
+            return payload
+        content = str(payload.get("content", "") or "")
+        updated_content = append_source_pack_section(content, source_pack)
+        if updated_content == content:
+            return payload
+
+        normalized = dict(payload)
+        normalized["content"] = updated_content
+        quality = dict(normalized.get("quality_snapshot", {}) or {})
+        source_section = dict(quality.get("source_pack_section", {}) or {})
+        source_section.update(
+            {
+                "status": "attached",
+                "source_count": len(source_pack.get("sources", []) or []),
+            }
+        )
+        quality["source_pack_section"] = source_section
+        normalized["quality_snapshot"] = quality
+        return normalized
+
+    def _handle_publication_preflight_block(
+        self,
+        *,
+        job: Job,
+        payload: Dict[str, Any],
+        preflight: PublicationPreflightResult,
+    ) -> None:
+        """발행 전 점검 실패를 저장하고 기존 실패/알림 흐름으로 연결한다."""
+
+        error_code = preflight.primary_error_code
+        error_message = preflight.summary
+        try:
+            self.job_store.save_prepared_payload(job.job_id, payload, mark_ready=False)
+        except Exception:
+            logger.debug("Publication preflight payload save skipped", exc_info=True)
+
+        updater = getattr(self.job_store, "update_quality_snapshot", None)
+        if callable(updater):
+            try:
+                updater(job.job_id, payload.get("quality_snapshot", {}) or {})
+            except Exception:
+                logger.debug("Publication preflight snapshot update skipped", exc_info=True)
+
+        self._record_failure_metrics(error_code)
+        self._record_job_metric(
+            job_id=job.job_id,
+            metric_type="publication_preflight",
+            status="blocked",
+            error_code=error_code,
+            detail={
+                "summary": error_message,
+                "issues": [issue.to_dict() for issue in preflight.blocking_issues],
+            },
+        )
+        self._notify_publication_preflight_blocked(job=job, preflight=preflight)
+        self._fail_with_retry_policy(
+            job=job,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+    def _notify_publication_preflight_blocked(
+        self,
+        *,
+        job: Job,
+        preflight: PublicationPreflightResult,
+    ) -> None:
+        """발행 전 보류 사유를 텔레그램에 전달한다."""
+
+        if not self.notifier or not getattr(self.notifier, "enabled", False):
+            return
+
+        error_code = preflight.primary_error_code
+        issue_lines = [
+            self._format_preflight_issue_message(issue)
+            for issue in preflight.blocking_issues[:6]
+        ]
+        issue_lines = [line for line in issue_lines if line]
+        if not issue_lines:
+            return
+        action = self._preflight_next_action(error_code=error_code, preflight=preflight)
+        message = "\n".join(
+            [
+                "[발행 전 보류] 네이버 업로드 중단",
+                "",
+                f"code: {error_code}",
+                f"제목: {job.title}",
+                f"job_id: {job.job_id}",
+                "",
+                "진행상황:",
+                "- 1/3 텔레그램 승인 접수 완료",
+                "- 2/3 발행 전 점검에서 중단",
+                "- 3/3 네이버 임시저장 미진행",
+                "",
+                "사유:",
+                *[f"- {line}" for line in issue_lines],
+                "",
+                f"다음 단계: {action}",
+            ]
+        )
+
+        if error_code in {"AUTH_EXPIRED", "CAPTCHA_REQUIRED"}:
+            notify_critical = getattr(self.notifier, "notify_critical_background", None)
+            if callable(notify_critical):
+                try:
+                    notify_critical(
+                        error_code=error_code,
+                        message=message,
+                        job_id=job.job_id,
+                    )
+                    return
+                except Exception:
+                    logger.debug("Publication preflight critical notification skipped", exc_info=True)
+
+        send_background = getattr(self.notifier, "send_message_background", None)
+        if not callable(send_background):
+            return
+        try:
+            send_background(message, disable_notification=False)
+        except Exception:
+            logger.debug("Publication preflight notification skipped", exc_info=True)
+
+    def _format_preflight_issue_message(self, issue: Any) -> str:
+        """텔레그램에 표시할 preflight 이슈 문구를 만든다."""
+
+        code = str(getattr(issue, "code", "") or "").strip()
+        message = str(getattr(issue, "message", "") or "").strip()
+        detail = getattr(issue, "detail", {}) or {}
+        labels = {
+            "AUTH_EXPIRED": "네이버 로그인",
+            "CAPTCHA_REQUIRED": "네이버 보안확인",
+            "SOURCE_PACK_INSUFFICIENT": "근거 부족",
+            "UNSUPPORTED_CLAIM": "근거 없는 수치",
+            "BLOCKED_PUBLICATION_PHRASE": "본문 문구",
+            "BLOCKED_INVESTMENT_PHRASE": "투자 권유 표현",
+        }
+        label = labels.get(code, code or "점검")
+        if code == "SOURCE_PACK_INSUFFICIENT":
+            official = detail.get("official_source_count", 0)
+            market = detail.get("market_data_source_count", 0)
+            metrics = detail.get("confirmed_metric_count", 0)
+            return f"[{label}] 공식 {official}개 / 시장 {market}개 / 확인 수치 {metrics}개"
+        if code == "UNSUPPORTED_CLAIM":
+            ledger = detail.get("claim_ledger", {}) if isinstance(detail, dict) else {}
+            unsupported = ledger.get("unsupported_claims", []) if isinstance(ledger, dict) else []
+            if unsupported and isinstance(unsupported[0], dict):
+                text = str(unsupported[0].get("text", "") or "").strip()
+                if text:
+                    return f"[{label}] {text[:140]}"
+        return f"[{label}] {message}"
+
+    def _preflight_next_action(
+        self,
+        *,
+        error_code: str,
+        preflight: PublicationPreflightResult,
+    ) -> str:
+        """preflight 차단 유형별 다음 행동을 안내한다."""
+
+        issue_codes = {str(issue.code or "") for issue in preflight.blocking_issues}
+        if error_code == "AUTH_EXPIRED":
+            return "네이버 수동 로그인 후 session state를 갱신하고 다시 승인하세요."
+        if "SOURCE_PACK_INSUFFICIENT" in issue_codes:
+            return "공식/시장 데이터 Source Pack을 보강한 뒤 초안을 재생성하거나 다시 승인하세요."
+        if "UNSUPPORTED_CLAIM" in issue_codes:
+            return "표시된 수치 문장을 Source Pack 근거와 맞추거나 해당 수치를 삭제하세요."
+        if "BLOCKED_PUBLICATION_PHRASE" in issue_codes:
+            return "본문의 확인 필요/자료 없음 문구를 실제 근거 문장으로 고친 뒤 다시 승인하세요."
+        if "BLOCKED_INVESTMENT_PHRASE" in issue_codes:
+            return "매수/수익 단정 표현을 학습용 기준 문장으로 바꾼 뒤 다시 승인하세요."
+        return "원인 수정 후 초안을 다시 승인하거나 재생성하세요."
+
     def _investment_forbidden_hits(self, text: str) -> list[str]:
         pattern_labels = (
             (r"매수\s*(하세요|추천|관점|타이밍|신호)", "매수 유도"),
@@ -1877,6 +2100,13 @@ class PipelineService:
                 return False
             if self._is_category_expansion_job(job):
                 return True
+        if not self.notifier or not getattr(self.notifier, "enabled", False):
+            return False
+        if not any(
+            callable(getattr(self.notifier, method_name, None))
+            for method_name in ("send_document_background", "send_message_background", "send_message")
+        ):
+            return False
         try:
             return is_draft_approval_enabled(self.job_store)
         except Exception:
@@ -2844,7 +3074,8 @@ class PipelineService:
                 if tone:
                     persona_desc = f"persona_id={persona_id}, tone={tone}"
 
-            final_content = str(payload.get("final_content", ""))
+            # 발행 payload는 최종 본문을 content 키에 담는다. 구버전 payload만 final_content를 쓴다.
+            final_content = str(payload.get("content") or payload.get("final_content") or "")
 
             # 현재 평가 횟수는 job 메타 quality_snapshot에 체크포인트로 저장
             q_meta = q_snap if isinstance(q_snap, dict) else {}

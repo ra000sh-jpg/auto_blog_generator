@@ -102,6 +102,9 @@ class OpenAICompatClient(BaseLLMClient):
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self._provider == "zai" and "flash" in self.model.lower():
+            # Flash 무료 fallback은 짧은 자동화 작업이 많으므로 reasoning을 꺼서 지연과 토큰 사용을 줄인다.
+            payload["thinking"] = {"type": "disabled"}
 
         response = await self._client.post(
             f"{self._base_url}/chat/completions",
@@ -286,7 +289,7 @@ def create_groq_client(
 
 
 def create_cerebras_client(
-    model: str = "llama3.3-70b",
+    model: str = "gpt-oss-120b",
     timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
     api_key: Optional[str] = None,
 ) -> OpenAICompatClient:
@@ -340,6 +343,21 @@ def create_nvidia_client(
         api_key_env="NVIDIA_API_KEY",
         model=model,
         provider="nvidia",
+        api_key=api_key,
+        timeout_sec=timeout_sec,
+    )
+
+
+def create_zai_client(
+    model: str = "glm-4.7-flash",
+    timeout_sec: float = constants.LLM_REQUEST_TIMEOUT_SEC,
+    api_key: Optional[str] = None,
+) -> OpenAICompatClient:
+    return OpenAICompatClient(
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZAI_API_KEY",
+        model=model,
+        provider="zai",
         api_key=api_key,
         timeout_sec=timeout_sec,
     )

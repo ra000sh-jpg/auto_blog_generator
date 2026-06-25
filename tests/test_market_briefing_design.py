@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timezone
 
 import pytest
@@ -199,6 +200,167 @@ def test_market_snapshot_uses_fred_public_csv_without_api_key():
     assert not any("api.stlouisfed.org" in url for url in fetcher.urls)
     assert any("fred.stlouisfed.org/graph/fredgraph.csv" in url for url in fetcher.urls)
     assert any(point.symbol == "US10Y" and point.source == "FRED CSV" for point in snapshot.data_points)
+
+
+def test_market_snapshot_collects_official_macro_api_points():
+    """BLS/BEA/미 재무부 공식 API 수치를 Source Pack 후보 데이터로 수집해야 한다."""
+    fetcher = FakeMarketFetcher(
+        {
+            "stooq.com": "Symbol,Date,Time,Open,High,Low,Close,Volume\nSPY.US,2026-06-05,22:00:00,1,1,1,621.5,100\n",
+            "id=DGS10": "observation_date,DGS10\n2026-06-04,4.12\n",
+            "id=DGS2": "observation_date,DGS2\n2026-06-04,3.91\n",
+            "id=DEXKOUS": "observation_date,DEXKOUS\n2026-06-04,1365.5\n",
+            "CUSR0000SA0": (
+                '{"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"CUSR0000SA0",'
+                '"data":[{"year":"2026","period":"M05","value":"321.465"}]}]}}'
+            ),
+            "LNS14000000": (
+                '{"status":"REQUEST_SUCCEEDED","Results":{"series":[{"seriesID":"LNS14000000",'
+                '"data":[{"year":"2026","period":"M05","value":"4.1"}]}]}}'
+            ),
+            "apps.bea.gov/api/data": (
+                '{"BEAAPI":{"Results":{"Data":['
+                '{"LineNumber":"1","TimePeriod":"2025Q4","DataValue":"2.3"},'
+                '{"LineNumber":"1","TimePeriod":"2026Q1","DataValue":"1.6"}'
+                "]}}}"
+            ),
+            "daily_treasury_rates": (
+                '{"data":[{"record_date":"2026-06-05","bc_2year":"3.91",'
+                '"bc_10year":"4.12","bc_30year":"4.75"}]}'
+            ),
+            "coingecko": '{"bitcoin":{"usd":70000,"usd_24h_change":1.2},"ethereum":{"usd":3500,"usd_24h_change":0.8}}',
+            "binance.com": '{"lastPrice":"70010.0","priceChangePercent":"1.1"}',
+        }
+    )
+
+    snapshot = collect_market_snapshot(
+        MarketScope.US,
+        slot=BlogSlot.US_PREOPEN,
+        now=datetime(2026, 6, 5, 8, 10, tzinfo=timezone.utc),
+        fetcher=fetcher,
+        env={"BEA_API_KEY": "bea-key"},
+        max_news_items=0,
+    )
+    by_symbol = {point.symbol: point for point in snapshot.data_points}
+
+    assert by_symbol["US_CPI"].source == "BLS"
+    assert by_symbol["US_CPI"].observed_at == datetime(2026, 5, 1, tzinfo=timezone.utc)
+    assert by_symbol["US_UNEMPLOYMENT_RATE"].value == 4.1
+    assert by_symbol["US_REAL_GDP_GROWTH"].source == "BEA"
+    assert by_symbol["US_REAL_GDP_GROWTH"].observed_at == datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert by_symbol["US10Y_TREASURY"].source == "U.S. Treasury FiscalData"
+    assert by_symbol["US30Y_TREASURY"].value == 4.75
+    assert snapshot.data_mode == DataMode.NUMERIC_BRIEFING
+
+
+def test_market_snapshot_collects_korean_official_sources():
+    """국장 브리핑은 ECOS/KOSIS/OpenDART 공식 근거를 함께 담을 수 있어야 한다."""
+    fetcher = FakeMarketFetcher(
+        {
+            "stooq.com": "Symbol,Date,Time,Open,High,Low,Close,Volume\nKOSPI,2026-06-05,15:30:00,1,1,1,2870.5,100\n",
+            "ecos.bok.or.kr/api/StatisticSearch": (
+                '{"StatisticSearch":{"row":[{"TIME":"20260605","DATA_VALUE":"1368.2",'
+                '"ITEM_NAME1":"원/미국달러"}]}}'
+            ),
+            "statisticsParameterData.do": (
+                '[{"PRD_SE":"M","PRD_DE":"202605","DT":"58210.4",'
+                '"TBL_NM":"수출입 총괄","ITM_NM":"수출액"}]'
+            ),
+            "opendart.fss.or.kr/api/list.json": (
+                '{"status":"000","message":"정상","list":['
+                '{"corp_name":"삼성전자","report_nm":"분기보고서","rcept_no":"20260605000123",'
+                '"rcept_dt":"20260605","stock_code":"005930","corp_cls":"Y"},'
+                '{"corp_name":"SK하이닉스","report_nm":"주요사항보고서","rcept_no":"20260604000456",'
+                '"rcept_dt":"20260604","stock_code":"000660","corp_cls":"Y"}'
+                "]}"
+            ),
+        }
+    )
+
+    snapshot = collect_market_snapshot(
+        MarketScope.KR,
+        slot=BlogSlot.KR_PREOPEN,
+        now=datetime(2026, 6, 5, 8, 10, tzinfo=timezone.utc),
+        fetcher=fetcher,
+        env={
+            "ECOS_API_KEY": "ecos-secret",
+            "KOSIS_API_KEY": "kosis-secret",
+            "OPENDART_API_KEY": "dart-secret",
+            "AUTOBLOG_OPENDART_CORP_CODES": "00126380,00164779",
+            "AUTOBLOG_ECOS_SERIES": json.dumps(
+                [
+                    {
+                        "symbol": "KR_USD_KRW_ECOS",
+                        "stat_code": "731Y001",
+                        "cycle": "D",
+                        "item_code1": "0000001",
+                        "label": "USD/KRW",
+                    }
+                ]
+            ),
+            "AUTOBLOG_KOSIS_SERIES": json.dumps(
+                [
+                    {
+                        "symbol": "KR_EXPORT_KOSIS",
+                        "org_id": "101",
+                        "tbl_id": "DT_TEST",
+                        "itm_id": "T1",
+                        "obj_l1": "ALL",
+                        "prd_se": "M",
+                        "label": "수출액",
+                    }
+                ]
+            ),
+        },
+        max_news_items=2,
+    )
+    by_symbol = {point.symbol: point for point in snapshot.data_points}
+
+    assert by_symbol["KR_USD_KRW_ECOS"].source == "ECOS"
+    assert by_symbol["KR_USD_KRW_ECOS"].value == 1368.2
+    assert by_symbol["KR_USD_KRW_ECOS"].observed_at == datetime(2026, 6, 5, tzinfo=timezone.utc)
+    assert "ecos-secret" not in by_symbol["KR_USD_KRW_ECOS"].url
+    assert by_symbol["KR_EXPORT_KOSIS"].source == "KOSIS"
+    assert by_symbol["KR_EXPORT_KOSIS"].observed_at == datetime(2026, 5, 1, tzinfo=timezone.utc)
+    assert "kosis-secret" not in by_symbol["KR_EXPORT_KOSIS"].url
+    assert any(item.source == "OpenDART" and "삼성전자" in item.title for item in snapshot.news_items)
+    assert any("dart.fss.or.kr/dsaf001" in item.url for item in snapshot.news_items)
+
+
+def test_market_snapshot_collects_china_and_japan_keyless_sources():
+    """중국/일본 확장은 키 없이 BOJ 수치와 NBS 공식 맥락을 담아야 한다."""
+    fetcher = FakeMarketFetcher(
+        {
+            "stooq.com": "Symbol,Date,Time,Open,High,Low,Close,Volume\nKOSPI,2026-06-05,15:30:00,1,1,1,2870.5,100\n",
+            "stat-search.boj.or.jp": (
+                "<html><body>"
+                "更新日時：2026/06/23 15:00\n"
+                "為替相場（東京インターバンク相場）（日次）\n"
+                "2026/06/18 145.10\n"
+                "2026/06/19 145.32\n"
+                "</body></html>"
+            ),
+        }
+    )
+
+    snapshot = collect_market_snapshot(
+        MarketScope.KR,
+        slot=BlogSlot.KR_PREOPEN,
+        now=datetime(2026, 6, 23, 8, 10, tzinfo=timezone.utc),
+        fetcher=fetcher,
+        env={},
+        max_news_items=2,
+    )
+    by_symbol = {point.symbol: point for point in snapshot.data_points}
+
+    assert by_symbol["USD_JPY_BOJ"].source == "BOJ Time-Series Data Search"
+    assert by_symbol["USD_JPY_BOJ"].value == 145.32
+    assert by_symbol["USD_JPY_BOJ"].observed_at == datetime(2026, 6, 19, tzinfo=timezone.utc)
+    assert any(
+        item.source == "China NBS National Data" and "Consumer Price Index" in item.title
+        for item in snapshot.news_items
+    )
+    assert not any("easyquery.htm" in url for url in fetcher.urls)
 
 
 def test_market_snapshot_collects_keyless_official_us_rss_feeds():

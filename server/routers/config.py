@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import List
 
 from fastapi import APIRouter, Depends
@@ -95,18 +96,36 @@ def _build_key_status(provider: str, env_var: str, router_value: str) -> ApiKeyS
     )
 
 
+def _load_persisted_text_keys(llm_router: LLMRouter) -> dict:
+    """라우터의 .env 자동 병합값을 제외하고 DB에 저장된 텍스트 키만 읽는다."""
+    job_store = getattr(llm_router, "job_store", None)
+    if job_store is None:
+        return {}
+    try:
+        raw = str(job_store.get_system_setting("router_text_api_keys", "") or "").strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 @router.get("/config", response_model=ConfigResponse, summary="대시보드 설정 조회")
 def get_config(
     app_config: AppConfig = Depends(get_app_config),
     llm_router: LLMRouter = Depends(get_llm_router),
 ) -> ConfigResponse:
     """대시보드 표시용 읽기 전용 설정 정보를 반환한다."""
-    saved_settings = llm_router.get_saved_settings()
-    text_keys = saved_settings.get("text_api_keys", {})
+    text_keys = _load_persisted_text_keys(llm_router)
     
     api_keys = [
         _build_key_status("openai", "OPENAI_API_KEY", str(text_keys.get("openai", ""))),
         _build_key_status("deepseek", "DEEPSEEK_API_KEY", str(text_keys.get("deepseek", ""))),
+        _build_key_status("zai", "ZAI_API_KEY", str(text_keys.get("zai", ""))),
         _build_key_status("dashscope", "DASHSCOPE_API_KEY", str(text_keys.get("qwen", ""))),
         _build_key_status("anthropic", "ANTHROPIC_API_KEY", str(text_keys.get("claude", ""))),
     ]
